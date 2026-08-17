@@ -76,6 +76,7 @@ class StreamingChunker:
         self._min_chunk_samples = int(MIN_CHUNK_MS / 1000 * SAMPLE_RATE)
         self._max_chunk_samples = int(MAX_CHUNK_MS / 1000 * SAMPLE_RATE)
         self._buf: list[np.ndarray] = []
+        self._frame_is_speech: list[bool] = []  # parallel to _buf, one bool per frame
         self._silence_run = 0
         self._saw_speech = False
 
@@ -91,7 +92,9 @@ class StreamingChunker:
         assert len(frame_i16) == FRAME_SAMPLES
         prob = self.vad.speech_prob(frame_i16)  # the ONE place speech_prob is called per frame
         self._buf.append(frame_i16)
-        if prob >= SPEECH_THRESHOLD:
+        is_speech = prob >= SPEECH_THRESHOLD
+        self._frame_is_speech.append(is_speech)
+        if is_speech:
             self._saw_speech = True
             self._silence_run = 0
         else:
@@ -106,18 +109,73 @@ class StreamingChunker:
             return self._cut()
         return None
 
+    # Minimum count of speech-classified frames a trimmed remainder must
+    # contain before it's worth sending to Whisper at all. Exists because a
+    # remainder can pass the duration check (min_chunk_samples) while being
+    # almost entirely silence -- e.g. a paused-before-stop case, where the
+    # pending buffer is [long pause][short wake word] and trimming a fixed
+    # tail off the end leaves mostly the pause behind. Whisper hallucinates
+    # on near-silent input rather than returning nothing (confirmed by
+    # testing: got back "TV Gelderland 2021" from what should have been an
+    # empty remainder) -- so silence has to be filtered out explicitly,
+    # not left to the model to notice there's nothing to transcribe.
+    _MIN_SPEECH_FRAMES_IN_REMAINDER = 5  # ~160ms of actual speech
+
     def flush(self) -> np.ndarray | None:
         """Call at dictation end: returns any buffered speech as a final chunk."""
         if self._buf and self._saw_speech:
             return self._cut()
-        self._buf = []
+        self._reset_buffer()
         return None
+
+    def pop_trimming_tail(self, trim_s: float) -> np.ndarray | None:
+        """Call when a stop wake word fires mid-buffer: removes the last
+        `trim_s` seconds (the wake word's own acoustic span) and returns
+        whatever real content remains before it, or None if nothing does.
+
+        Exists because discarding the whole pending buffer on stop is only
+        correct when there was a pause before the stop word -- the VAD
+        will already have cut real content into its own chunk by then. If
+        Ayman says the stop word with no pause, the pending buffer *is*
+        the real content plus the stop word stuck together with nothing to
+        tell them apart except roughly how long "hey jarvis" itself takes
+        to say. Confirmed by testing: without this, a whole no-pause
+        dictation ("...also tell Ship Check to redeploy, Hey Jarvis") was
+        silently lost in full, not just the stop phrase.
+
+        This is a fixed-duration heuristic, not a precise cut -- it can't
+        know exactly where the wake word starts, only estimate from
+        typical duration. Real-voice validation should confirm the trim
+        window against how Ayman actually says it, not just synthetic
+        `say` timing.
+        """
+        if not self._buf:
+            self._reset_buffer()
+            return None
+        audio = np.concatenate(self._buf)
+        speech_flags = self._frame_is_speech
+        self._reset_buffer()
+
+        trim_samples = int(trim_s * SAMPLE_RATE)
+        keep_samples = max(0, len(audio) - trim_samples)
+        remainder = audio[:keep_samples]
+        if len(remainder) < self._min_chunk_samples:
+            return None
+
+        keep_frames = keep_samples // FRAME_SAMPLES
+        if sum(speech_flags[:keep_frames]) < self._MIN_SPEECH_FRAMES_IN_REMAINDER:
+            return None  # mostly/entirely silence -- would just feed Whisper hallucination bait
+        return remainder
+
+    def _reset_buffer(self):
+        self._buf = []
+        self._frame_is_speech = []
+        self._silence_run = 0
+        self._saw_speech = False
 
     def _cut(self) -> np.ndarray:
         audio = np.concatenate(self._buf)
-        self._buf = []
-        self._silence_run = 0
-        self._saw_speech = False
+        self._reset_buffer()
         return audio
 
 

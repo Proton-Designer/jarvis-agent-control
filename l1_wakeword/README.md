@@ -80,27 +80,69 @@ happened to run last."
 
 **Two detection thresholds, not one, and why:** `IDLE_THRESHOLD` (0.5) for
 starting a dictation, `RECOVERABLE_THRESHOLD` (0.3) for *ending* one
-(post-guard stop-toggle) and for the cancel window. Both of the lowered
-cases share the same logic: a false positive is cheap (say the wake word
-again / re-dictate), a false negative is the failure being guarded
-against (a stuck-open mic / an undetected cancel). This isn't
+(post-guard stop-toggle) and for the cancel window. This isn't
 speculative — a real synthetic test clip's closing "Hey Jarvis." peaked
 at 0.348, comfortably below 0.5 but above 0.3, meaning the un-lowered
 threshold would have missed the stop trigger entirely and run the
 dictation to the (also real, separately tested) 50s silence safety net
 instead of ending when Ayman actually stopped talking.
 
-**Known limitation, tested and documented rather than silently assumed
-away:** when the stop wake word fires, whatever audio is still buffered
-(not yet cut into a chunk by the VAD) is discarded, not transcribed —
-otherwise "Hey Jarvis" itself shows up verbatim at the end of the
-transcript (this happened in testing before the fix). This is correct
-when Ayman pauses before the closing phrase, which the VAD will already
-have cut as its own chunk boundary by then. It is **not** correct if he
-says real content immediately before "Hey Jarvis" with no pause — that
-content would be in the same undischarged buffer and lost. The
-pause-before-stop case is tested; the no-pause case is not, and belongs
-in real-voice validation.
+The asymmetry argument ("false positive is cheap, false negative is the
+failure being guarded against") is NOT equally true for both lowered
+cases, and this was checked rather than assumed: a spurious *cancel* is
+fully recoverable (re-dictate), but a spurious *stop* truncates a real
+dictation mid-thought before it's caught by `confirm_plan`. Measured the
+actual risk before deciding whether to split the thresholds: 20 diverse
+synthetic "ordinary conversation" sentences (no wake-word-like phrasing)
+scored a **max of 0.002** against this model — nowhere near either
+threshold. The one real false-positive risk found this session ("Hey
+Travis," 0.82–0.99) is already well above 0.5, so a lower threshold
+doesn't change that risk either. Conclusion: no evidence to split the
+thresholds despite the worse failure mode on the stop side — the
+measured FP rate at 0.3 is ~zero on realistic content, so lowering it
+costs nothing.
+
+**Stop-word audio handling, and two more bugs this surfaced:** the
+pending (not-yet-VAD-cut) audio when the stop word fires can't simply be
+transcribed as-is — "Hey Jarvis" would show up verbatim at the end of the
+transcript (confirmed, this happened before the first fix) — but it also
+can't simply be discarded wholesale, confirmed by testing the case where
+Ayman says the stop word with **no pause** before it: an entire
+multi-instruction dictation ("...also tell Ship Check to redeploy, Hey
+Jarvis," no pause anywhere) was silently lost in full, because the whole
+thing was still one undischarged VAD chunk with nothing marking where
+real content ends and the stop phrase begins.
+
+Fixed with `StreamingChunker.pop_trimming_tail`: trims a fixed
+`WAKE_WORD_TAIL_TRIM_S` (1.0s) off the end of the pending buffer — sized
+from every "hey jarvis" detection observed this session spanning roughly
+0.5–0.6s of above-threshold scoring, with margin for the quieter lead-in.
+This alone reintroduced a different bug: when there *was* a pause before
+the stop word, the pending buffer is mostly that pause's silence plus a
+short wake word, and trimming a fixed tail off the end can leave a
+near-silent remainder — which Whisper doesn't return nothing for, it
+**hallucinates** ("TV Gelderland 2021" out of what should have been an
+empty remainder, confirmed by testing). Fixed by tracking per-frame
+speech/silence classification and requiring the trimmed remainder to
+contain at least `_MIN_SPEECH_FRAMES_IN_REMAINDER` (~160ms) of actual
+speech before sending it to Whisper at all.
+
+A third bug, also found by testing the no-pause case specifically: a
+single spoken "Hey Jarvis" scores above threshold across several
+consecutive frames, so the same utterance that just fired the STOP
+transition was crossing `IDLE_THRESHOLD` again on the very next frame and
+immediately opening a new, unintended dictation — `CAPTURING -> IDLE ->
+CAPTURING` within 40ms of simulated time. Fixed with
+`POST_STOP_COOLDOWN_S` (1.5s): wake-word starts are ignored for this long
+after any dictation ends.
+
+All three fixes verified together against the original pause-before-stop
+clip (still clean, no regression), the no-pause-with-filler-content clip,
+and the no-pause-with-real-instruction clip (full instruction now
+recovered, previously lost in full). The trim/cooldown durations are
+heuristics sized from synthetic `say` timing — real-voice validation
+should confirm them against how Ayman actually speaks, not just assume
+these numbers hold.
 
 **Bug found and fixed during this build, logged here because it's the
 kind of thing worth being able to point to later:** an earlier version

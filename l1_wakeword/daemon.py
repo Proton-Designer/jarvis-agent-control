@@ -66,7 +66,36 @@ IDLE_THRESHOLD = 0.5
 # resume"; a false-negative stop leaves the mic open over whatever comes
 # next. Same asymmetry as the cancel window -- same fix.
 RECOVERABLE_THRESHOLD = 0.3
+# Measured, not assumed: 20 diverse synthetic "ordinary conversation"
+# sentences (no wake-word-like phrasing) scored a max of 0.002 against this
+# model -- zero false positives anywhere near 0.3. The one real risk
+# category found this session ("Hey Travis") scores 0.82-0.99, comfortably
+# above 0.5 too, so a lower threshold doesn't meaningfully worsen that risk
+# either. Conclusion: no evidence to split the stop threshold higher than
+# the cancel threshold, despite stop-FP being a worse failure than
+# cancel-FP (truncates a real dictation vs. a free re-dictate) -- the
+# asymmetry argument doesn't change the answer when the measured FP rate
+# at the lower threshold is already ~zero on realistic content.
 GUARD_S = 3.0
+
+# How much of the end of the pending audio buffer to assume is the stop
+# wake word's own acoustic content when trimming it out (see
+# StreamingChunker.pop_trimming_tail). Sized from every "hey jarvis"
+# detection observed this session spanning roughly 0.5-0.6s of
+# above-threshold scoring; 1.0s adds margin for the quieter lead-in before
+# the score crosses threshold. A fixed heuristic on synthetic timing --
+# confirm against real speech before trusting it precisely.
+WAKE_WORD_TAIL_TRIM_S = 1.0
+
+# After a dictation ends (either way), ignore wake-word starts for this
+# long. Exists because a single spoken "hey jarvis" scores above threshold
+# across several consecutive frames (observed spans up to ~0.4s) -- without
+# this, the same utterance that just fired the STOP transition can cross
+# IDLE_THRESHOLD again on the very next frame and immediately open a new,
+# unintended dictation. Found by testing, not anticipated: a no-pause test
+# clip showed exactly this -- CAPTURING -> IDLE -> CAPTURING again within
+# 40ms of simulated time, on what was acoustically one utterance.
+POST_STOP_COOLDOWN_S = 1.5
 SILENCE_SAFETY_NET_S = 50.0
 SOCKET_PATH = Path.home() / ".jarvis" / "l1.sock"
 
@@ -128,23 +157,29 @@ class DictationSession:
             _write_wav(wav_tmp_path, audio)
             self.chunks_transcribed.append(self.whisper.transcribe(str(wav_tmp_path), prompt=build_prompt()))
 
-    def discard_pending(self):
-        """Called after the dictation ends via the stop wake word instead --
-        the still-buffered audio at that moment IS the "hey jarvis" stop
-        phrase (the VAD hasn't cut it into its own chunk yet, since nothing
-        after it has triggered a silence-based cut), so it gets dropped
-        rather than transcribed. Confirmed by testing: without this, a
-        closing "Hey Jarvis" showed up verbatim at the end of the
-        transcript handed to L3.
+    def finalize_on_stop_word(self, wav_tmp_path: Path):
+        """Called when the dictation ends via the stop wake word. The still-
+        buffered audio at that moment is the "hey jarvis" stop phrase, plus
+        possibly real content before it if Ayman said it with no pause --
+        the VAD only cuts on a pause, so with no pause there's nothing
+        marking where real content ends and the stop phrase begins except
+        roughly how long "hey jarvis" itself takes to say.
 
-        Known limitation, not silently assumed safe: if Ayman says real
-        content immediately before the stop word with no pause between
-        them, that content is in the same not-yet-cut buffer and would be
-        discarded along with it. The common case (a natural pause before a
-        deliberate toggle phrase) is what's been tested; the no-pause case
-        hasn't been, and belongs in real-voice validation.
+        Originally this just discarded the whole pending buffer -- correct
+        for the pause-before-stop case (tested, and it's what stopped a
+        literal "Hey Jarvis" showing up verbatim at the end of a
+        transcript), **wrong** for the no-pause case: tested directly and
+        it silently dropped an entire multi-instruction dictation
+        ("...also tell Ship Check to redeploy, Hey Jarvis" with no pause
+        anywhere) because the whole thing was still one undischarged
+        chunk. Now trims a fixed tail instead of discarding everything --
+        see StreamingChunker.pop_trimming_tail for the heuristic and its
+        limits.
         """
-        self._chunker = StreamingChunker(self._chunker.vad)  # drop pending audio; flush() deliberately not called
+        audio = self._chunker.pop_trimming_tail(WAKE_WORD_TAIL_TRIM_S)
+        if audio is not None:
+            _write_wav(wav_tmp_path, audio)
+            self.chunks_transcribed.append(self.whisper.transcribe(str(wav_tmp_path), prompt=build_prompt()))
 
     def full_transcript(self) -> str:
         return " ".join(t for t in self.chunks_transcribed if t)
@@ -172,6 +207,7 @@ def simulate(dictation_wav: str, whisper: WhisperDaemon):
 
     state = "IDLE"
     session: DictationSession | None = None
+    cooldown_until: float | None = None  # see POST_STOP_COOLDOWN_S
     # Drive the loop at the VAD's (smaller) native frame size, not the wake-word
     # model's. openWakeWord's predict() explicitly supports non-80ms input --
     # it accumulates internally, at the cost of up to one extra 80ms of
@@ -190,19 +226,23 @@ def simulate(dictation_wav: str, whisper: WhisperDaemon):
         stop_fired = score >= RECOVERABLE_THRESHOLD  # deliberately lower, see RECOVERABLE_THRESHOLD
 
         if state == "IDLE":
-            if start_fired:
+            in_cooldown = cooldown_until is not None and t < cooldown_until
+            if start_fired and not in_cooldown:
                 print(f"[{t:.2f}s] wake word -> CAPTURING")
                 state = "CAPTURING"
                 session = DictationSession(vad, whisper, started_at=t)
+            elif start_fired and in_cooldown:
+                print(f"[{t:.2f}s] wake word ignored -- inside post-stop cooldown (score={score:.3f})")
         elif state == "CAPTURING":
             if not session.in_guard(now=t) and stop_fired:
                 print(f"[{t:.2f}s] wake word (post-guard, score={score:.3f}) -> finalize")
-                session.discard_pending()  # drops the stop phrase itself, not real content -- see docstring
+                session.finalize_on_stop_word(tmp_wav)  # trims the stop phrase's own audio, keeps real content
                 text = session.full_transcript()
                 print(f"[{t:.2f}s] FULL TRANSCRIPT: {text!r}")
                 print(f"[{t:.2f}s] (simulate mode: not calling deliver_transcript -- would send to L4 here)")
                 state = "IDLE"
                 session = None
+                cooldown_until = t + POST_STOP_COOLDOWN_S
             elif session.silence_exceeds_safety_net():
                 print(f"[{t:.2f}s] {SILENCE_SAFETY_NET_S}s silence safety net -> finalize (no stop word heard)")
                 session.flush_final(tmp_wav)  # no stop word to strip -- transcribe everything buffered
@@ -211,6 +251,7 @@ def simulate(dictation_wav: str, whisper: WhisperDaemon):
                 print(f"[{t:.2f}s] (simulate mode: not calling deliver_transcript -- would send to L4 here)")
                 state = "IDLE"
                 session = None
+                cooldown_until = None  # no wake word involved in this ending, nothing to cool down from
             else:
                 partial = session.feed(frame, tmp_wav)
                 if partial:
