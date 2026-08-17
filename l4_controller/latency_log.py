@@ -20,10 +20,14 @@ dictations).
 from __future__ import annotations
 
 import json
+import sys
 import time
 from pathlib import Path
 
-LATENCY_LOG_PATH = Path.home() / ".jarvis" / "latency_log.jsonl"
+sys.path.insert(0, str(Path(__file__).parent.parent))
+from jarvis_paths import jarvis_home  # noqa: E402
+
+LATENCY_LOG_PATH = jarvis_home() / "latency_log.jsonl"
 
 
 def log_event(event: str, **fields) -> None:

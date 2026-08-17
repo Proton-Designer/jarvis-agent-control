@@ -29,6 +29,7 @@ from __future__ import annotations
 import json
 import os
 import subprocess
+import sys
 import threading
 import time
 from pathlib import Path
@@ -36,8 +37,11 @@ from pathlib import Path
 from cancel_listener import listen_for_cancel
 from latency_log import log_event
 
+sys.path.insert(0, str(Path(__file__).parent.parent))
+from jarvis_paths import jarvis_home  # noqa: E402
+
 MUTE = os.environ.get("JARVIS_MUTE", "0") == "1"
-SAY_LOG_PATH = Path.home() / ".jarvis" / "say_log.jsonl"
+SAY_LOG_PATH = jarvis_home() / "say_log.jsonl"
 
 # Default `say` voice is a novelty/robotic system voice (Fred/Alex-class),
 # not something meant to be heard on every turn. Samantha is the best

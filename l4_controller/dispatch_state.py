@@ -35,10 +35,14 @@ happening.
 from __future__ import annotations
 
 import json
+import sys
 import time
 from pathlib import Path
 
-DISPATCH_STATE_PATH = Path.home() / ".jarvis" / "dispatch_state.json"
+sys.path.insert(0, str(Path(__file__).parent.parent))
+from jarvis_paths import jarvis_home  # noqa: E402
+
+DISPATCH_STATE_PATH = jarvis_home() / "dispatch_state.json"
 
 
 def mark_dispatch_forwarded(dictation_ref: str) -> None:

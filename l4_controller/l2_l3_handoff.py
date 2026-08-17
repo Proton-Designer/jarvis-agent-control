@@ -34,6 +34,7 @@ yet, so a specific count would be a guess dressed up as a fact.
 
 from __future__ import annotations
 
+import sys
 import time
 from pathlib import Path
 
@@ -43,7 +44,10 @@ from providers import list_sessions
 from say_feedback import speak
 from transport import Transport
 
-DICTATIONS_DIR = Path.home() / ".jarvis" / "dictations"
+sys.path.insert(0, str(Path(__file__).parent.parent))
+from jarvis_paths import jarvis_home  # noqa: E402
+
+DICTATIONS_DIR = jarvis_home() / "dictations"
 
 # Naming convention matches sessions.json's "claude-<project>" pattern.
 # Exposed as a named constant for real callers to import and pass
