@@ -16,6 +16,7 @@ None of these are synthetic tool calls; they exercise the real read-dictation
 | `07a_held_instruction_part1.txt` + `07b_held_instruction_part2.txt` | Ambiguous instruction held in one dictation, resolved by a *later, separate* dictation to the same persistent session | Not carrying the hold forward (losing it), or re-asking instead of recognizing the follow-up resolves it |
 | `08_control_plane_multi_target.txt` | Two control-plane (slash-command) instructions to two different targets in one dictation | Paraphrasing either into prose instead of the literal command; missing one of the two |
 | `09_mixed_conversation_and_control.txt` | One target, one instruction that's conversation-plane (wrap up) and one that's control-plane (compact) | Blending both into a single payload instead of two separate `deliver_batch` entries |
+| `10_project_specific_custom_command.txt` | A project-specific `.claude/commands/*.md` command that only exists for ONE target (needs a throwaway target with a real custom command set up alongside it — see transport.py/registry.py's custom_commands_for) | Refusing a valid command because it isn't in the global built-in table; or emitting it for the wrong target where it doesn't exist |
 
 Run 07a and 07b against the SAME orchestrator session, in order, with a
 real gap between them — that's what actually exercises "L3 is persistent,

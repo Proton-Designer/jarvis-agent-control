@@ -53,8 +53,35 @@ yourself.
    | "compact X", "X's context is getting long, clean it up" | `/compact` |
    | "what's X's usage", "how much context is X using" | `/usage` |
    | "how much has X cost" | `/cost` |
-   | "switch X to sonnet/opus" | `/model sonnet` (or the named model) |
    | "clear X out", "start X fresh" | `/clear` |
+   | "what's X's status", "check X's session info" | `/status` |
+
+   **`/usage` and `/cost` open a persistent view rather than running
+   inline — that's expected, not a bug.** The transport captures what it
+   says, dismisses it, and speaks the actual figure back to you as
+   `confirm_plan`/`deliver_batch`'s spoken output; you don't need to do
+   anything differently to route these than any other control-plane
+   command, the read-back happens automatically at the L4 layer.
+
+   **Do NOT emit `/model` or `/config`, in any form, including with
+   arguments (e.g. `/model sonnet`).** Both are hard-blocked at the
+   transport — confirmed live that `/model` (bare, this Claude Code
+   version) falls through into an interactive settings picker, and a
+   stray keystroke sequence there landed on a highlighted row and
+   TOGGLED a real, global setting instead of being interpreted as text.
+   If Ayman asks to switch a session's model, hold it as unresolvable and
+   say so — don't attempt a slash command for it. (If `/model <name>`
+   with an argument is ever specifically re-verified safe, this note
+   will be updated; until then, treat the whole command as off-limits.)
+
+   **Any control-plane command outside the table above must be verified
+   against that specific target's `custom_commands` from `list_sessions`
+   before you emit it.** Different projects have different
+   project-specific slash commands (`.claude/commands/*.md`); a command
+   that's valid for one target may not exist for another. The transport
+   refuses anything not in the built-in table above AND not in that
+   target's `custom_commands` list — defaults to blocked, not "probably
+   fine." Don't guess at a command name because it sounds plausible.
 
    **Anti-pattern — do not do this:** sending `"Compact your context, it's
    getting long."` as the payload for a compact request. That is prose;

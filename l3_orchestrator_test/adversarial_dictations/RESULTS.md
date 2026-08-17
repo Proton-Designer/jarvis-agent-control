@@ -16,7 +16,8 @@ is not the version the failing runs (03, 09) were tested against.
 | 06 | Mid-utterance retraction | PASS | The scenario expected most likely to fail. Delivered only the corrected instruction ("Check your logs."); zero trace of the retracted "restart" instruction. |
 | 07a/07b | Held instruction resolved by a later, separate dictation | PASS | 07a correctly held ("the other one" — bare deictic, 5 equally plausible live sessions, explicitly rejected "not the session I last delivered to" as an unstated inference). 07b, run in a **fresh orchestrator process** (no conversation memory — the original process was killed mid-suite for an unrelated reason), correctly recovered the hold from `held.json` on disk and resolved/delivered it. Validates the "file is the source of truth, not conversation memory" design. |
 | 08 | Control-plane instructions to two different targets | PASS | `/compact` to one target, `/usage` to another, both delivered as literal commands and both executed for real (compaction progress bar; real usage stats). Re-verifies the scenario 03 fix. |
-| 09 | Mixed conversation-plane + control-plane, same target | **PARTIAL — real structural finding, not a flake** | Correctly split into two batch entries in the right order (reasoned that compacting first would destroy the context the wrap-up needs). First delivered fine. Second (`/compact`) was refused: the first instruction put the pane into a genuinely busy state, and `deliver_batch`'s one bounded ~3s retry can't wait out an open-ended "wrap up your work" task. The model self-diagnosed this correctly, logged the undelivered instruction to `held.json` under the same log/speak/expire lifecycle as a routing hold (explicitly reasoning that auto-redelivering `/compact` hours later would be a stale-intent "zombie" delivery), and proposed three fixes. CLAUDE.md now makes this the documented behavior instead of relying on the model to reinvent it each run. |
+| 09 | Mixed conversation-plane + control-plane, same target | **PARTIAL — real structural finding, not a flake** | Correctly split into two batch entries in the right order (reasoned that compacting first would destroy the context the wrap-up needs). First delivered fine. Second (`/compact`) was refused: the first instruction put the pane into a genuinely busy state, and `deliver_batch`'s one bounded ~3s retry can't wait out an open-ended "wrap up your work" task. The model self-diagnosed this correctly, logged the undelivered instruction to `held.json` under the same log/speak/expire lifecycle as a routing hold (explicitly reasoning that auto-redelivering `/compact` hours later would be a stale-intent "zombie" delivery), and proposed three fixes. CLAUDE.md now makes this the documented behavior instead of relying on the model to reinvent it each run. Later re-run through the real full-pipeline integration test (see README): the same race did NOT reproduce that time — Claude Code's own UI queued the mid-turn `/compact` instead of refusing it, see the queueing investigation below. |
+| 10 | Project-specific custom command | **Verified at the transport level directly, not yet run through a live L3 orchestrator** | Set up a real target with `.claude/commands/deploy-check.md`; confirmed `registry.custom_commands_for()` discovers it and `deliver_batch` delivers it successfully (target actually invoked the skill/command — "Skill(/deploy-check)... Initializing…"). What's not yet verified: whether L3, given only a loose spoken reference ("run the deploy check on the deploy service") and `list_sessions`' new `custom_commands` field, correctly resolves and emits it without prompting. Dictation file is ready for that run. |
 
 ## Fixes applied to CLAUDE.md as a result of this run
 
@@ -99,3 +100,85 @@ crossed first wins. 60 minutes is a config value, not a deep decision —
 revisit if it feels wrong in practice. CLAUDE.md updated accordingly; both
 `held.json` entry fields (`surfaced_and_unresolved`, `timestamp`) are
 required going forward.
+
+## Persistent-view control-plane commands (`/cost`, `/usage`, `/config`, `/model`, `/status`, `/help`)
+
+Characterized all six live (2026-08-17). `/cost`, `/usage`, `/config`,
+`/status` all open the same tabbed dashboard modal (or a variant of it);
+`/help` opens a separate shortcuts view. All share one property: no `❯`
+input prompt while open, dismissed only by Escape, marked by "Esc to
+cancel" text with no accompanying "Enter to confirm" (which is what
+distinguishes them from a real actionable permission modal — an earlier
+version of `pane_state.py`'s patterns matched "esc to cancel" alone and
+would have misclassified every one of these as PERMISSION_PROMPT; fixed
+to require both phrases together for that state, added a new
+PERSISTENT_VIEW state for "esc to cancel" alone).
+
+**Incident during this characterization work, disclosed and fixed
+immediately:** testing `/config` then `/model` in sequence, a stray
+keystroke sequence sent while the Config view was still open/closing
+landed on a highlighted settings row and Enter TOGGLED it — disabled
+Ayman's real, global "Auto-compact" preference (not scoped to the
+throwaway test session; same account as every other session). Caught by
+inspecting the pane afterward, fixed by navigating back in and
+re-enabling it, verified `autoCompactEnabled: true` restored. Root cause:
+`/model` doesn't exist as a distinct command in this Claude Code version
+and fell through into the still-open Config view, and inside an
+interactive picker, injected keystrokes are UI INPUT, not text — the
+transport's whole design assumes it's typing into an input box, and that
+assumption is false inside a picker.
+
+**Policy fix, not just the proximate bug:** classified every control-
+plane command by what kind of view (if any) it opens, in
+`known_slash_commands.json`:
+- `none` — runs inline, always safe (`/compact`, `/clear`).
+- `readonly` — persistent view, nothing selectable, safe to send AND
+  safe to read back (`/cost`, `/usage`, `/status`).
+- Hard-blocked, explicit reason recorded — `/config` and `/model` (the
+  entire command, including `/model <name>` forms, until specifically
+  re-verified safe with an argument) and `/help` (not yet classified
+  readonly vs interactive, blocked pending that).
+- **Anything not in the allowed list at all is refused by default** —
+  the same rule that already applied to partial/unrecognized slash
+  fragments now applies to whole unverified commands, since an
+  unrecognized command is exactly what caused this incident.
+
+**Read-only view flow, built and verified live against `/cost`:**
+`deliver_batch` -> transport sends the command -> polls for the
+PERSISTENT_VIEW state to actually appear (bounded wait, never assumed) ->
+captures the plain-text content -> sends Escape -> polls again for a
+genuinely empty `❯` prompt before considering the delivery complete
+(never chains a send immediately after Escape without that verification)
+-> a small per-command parser (`view_parsers.py`) extracts a short
+spoken answer from the captured text. Verified end to end: real `/cost`
+delivery correctly spoke "$0.66 spent this session, 15 percent of the
+session limit used" (numbers from a live capture) and left the pane
+verified READY afterward. Parsers return `None` rather than guessing on
+an unexpected layout, and the caller speaks an honest fallback
+("...on screen but I couldn't parse a clean answer from it") instead of
+ever fabricating a figure from a misparse. A failed dismiss is reported
+as a delivery failure (in `deliver_batch`'s `failures` list, spoken
+explicitly) even though the content was still successfully read, per the
+"never treat an uncertain pane state as done" rule everywhere else in
+this codebase.
+
+**Per-target custom command discovery**, promoted to a safety control by
+the same incident (verifying a command exists before sending it is the
+actual fix, not a nice-to-have): `registry.custom_commands_for(cwd)`
+scans `<cwd>/.claude/commands/*.md` per target and `list_sessions` now
+exposes each session's `custom_commands`. `deliver_batch` refuses any
+slash command that's neither in the built-in allowed table nor that
+specific target's custom-command list. Verified live end to end: set up
+a real target with `.claude/commands/deploy-check.md`, delivered
+`/deploy-check` to it, and confirmed the target actually invoked it
+("Skill(/deploy-check)... Initializing…") — not just that the guard let
+it through. Does not enumerate plugin- or skill-provided commands (no
+generic way to inspect those from outside a live Claude Code session);
+project-local `.claude/commands/` only.
+
+**Not yet done:** scenario 10 (a full L3 orchestrator run resolving a
+loose reference to a project-specific command) — verified at the
+transport level only so far, see the table above. The queueing
+investigation the Lead requested (whether Claude Code's own message
+queueing makes the scenario 09 busy-deferral workaround unnecessary) is
+a separate, not-yet-started investigation.
