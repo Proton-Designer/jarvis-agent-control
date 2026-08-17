@@ -23,17 +23,23 @@ plan/confirm → `deliver_batch` → all 4 resolved instructions landed
 correctly in 3 real throwaway target sessions, including a control-plane
 command Whisper had rendered oddly ("run/compact" instead of "/compact")
 that L3 still correctly recognized and emitted as a literal `/compact`.
-One real seam behavior confirmed rather than assumed: a delivery that
-races a target's busy state doesn't get lost — Claude Code's own UI
-queues it ("press up to edit queued messages") and processes it once the
-pane frees up. The orchestrator also correctly picked up an unrelated
-undelivered-instruction record left over from an earlier test run,
-reasoned that this dictation didn't resolve it, and correctly declined to
-auto-redeliver it. Not yet measured: precise stop-word-to-first-token
-latency instrumentation (currently eyeballed via wall-clock, not logged) —
-the run took roughly two minutes end to end, dominated by the
-orchestrator's own reasoning time on a 5-instruction dictation, not by
-audio processing.
+The orchestrator also correctly picked up an unrelated undelivered-
+instruction record left over from an earlier test run, reasoned that this
+dictation didn't resolve it, and correctly declined to auto-redeliver it.
+
+**Latency**: the audio-to-pointer step is fast — isolated measurement of
+`deliver_transcript` against a real ready target: **20 milliseconds**
+(file write + one tmux send-keys call). The full integration run took
+roughly two minutes end to end, and essentially all of that is
+orchestrator reasoning time, not audio/transport overhead — a deliberate
+cost of choosing Claude over a local model for routing (see "Auto-mode
+safety posture"). An early estimate of a ~14s "pointer sent → visible"
+gap during the live run turned out to be the tester's own reaction time,
+not a real delay — worth recording as a killed false lead, not just the
+real numbers. Structured latency events (handoff_received →
+pointer_delivered → confirm_spoken → cancel_window_closed →
+last_send_issued) are logged to `~/.jarvis/latency_log.jsonl` for any
+future breakdown.
 
 Layer READMEs have the real detail and the dated findings behind each
 design decision — this file is the map, install steps, and the safety
@@ -42,9 +48,10 @@ model, not a duplicate of them:
   three-bug state-machine hardening pass
 - `l2_transcription/README.md` — VAD chunking, whisper-server wrapper,
   hallucination defense
-- `l4_controller/` — no single README yet; see `pane_state.py`,
-  `FALSE_REFUSAL_MEASUREMENT.md`, and `l3_orchestrator_test/adversarial_dictations/RESULTS.md`
-  for the equivalent dated-findings record
+- `l4_controller/` — no single README yet; see `FALSE_REFUSAL_MEASUREMENT.md`,
+  `QUEUEING_INVESTIGATION.md`, and
+  `l3_orchestrator_test/adversarial_dictations/RESULTS.md` for the
+  equivalent dated-findings record
 
 ## Install
 
@@ -80,9 +87,12 @@ install per project. Two things make it addressable:
 1. **Live discovery is the default and requires no configuration.**
    `list_sessions` (an L4 MCP tool) enumerates real, currently-running
    tmux sessions via `tmux list-sessions` and enriches each with its
-   working directory. L3 resolves loose voice references ("the API one")
-   against this list at request time — nothing is hardcoded, and nothing
-   ever gets routed to a session that isn't actually running.
+   working directory AND its project-specific custom slash commands
+   (`.claude/commands/*.md` at that cwd). L3 resolves loose voice
+   references ("the API one") against this list at request time —
+   nothing is hardcoded, and nothing ever gets routed to a session that
+   isn't actually running, or a command that doesn't actually exist for
+   that target.
 2. **`l4_controller/sessions.json` is an optional alias override**, empty
    by default. Only needed if Ayman wants a spoken nickname that doesn't
    match the session's real tmux name. Do not seed it with real project
@@ -143,21 +153,53 @@ Consequences this codebase enforces, not just documents:
   audibly; convenience features fail open and quietly.**
 - **Pane-state gating before every delivery.** `deliver_batch` never
   types into a target blind — it captures the pane, classifies it
-  (ready / busy / permission-prompt / unknown), and only injects into
-  READY. A real bug here (ghost/autosuggest text in the input box
+  (ready / busy / permission-prompt / persistent-view / unknown), and
+  only injects into READY (plus one narrow, evidence-backed exception,
+  see below). A real bug here (ghost/autosuggest text in the input box
   visually indistinguishable from Ayman's own unsubmitted typing, unless
   you read the ANSI dim/faint attribute rather than cursor position — see
   `pane_state.py`) was found and fixed by testing against a live pane, not
   by inspection. Measured false-refusal rate after the fix: 0/20 on a
   clean methodology run — see `FALSE_REFUSAL_MEASUREMENT.md`.
+- **`/compact` may be sent into a BUSY pane rather than refused**,
+  trusting Claude Code's own mid-turn message queueing — the one, narrow,
+  exact-by-name exception to the rule above. Verified reliable at
+  multiple points in a busy window, in order, no swallowing, AND (the
+  finding that actually justified this) queued actionable instructions
+  are genuinely performed when a merged turn resolves, not just
+  acknowledged — verified with independently-checked file artifacts, not
+  model self-report, up to 3 instructions merged into one turn with no
+  degradation. See `QUEUEING_INVESTIGATION.md`. By name, not by category
+  ("any command that touches conversation state") — a category rule
+  would silently extend to a future untested command. `held.json`'s
+  undelivered-instruction deferral stays as a fallback for anything this
+  doesn't cover, not deleted.
+- **Control-plane (slash-command) safety is two-axis, not one.**
+  `known_slash_commands.json` classifies every command on (a) what kind
+  of view it opens — `none` (runs inline), `readonly` (opens a display-
+  only view, captured/dismissed/read back automatically, see
+  `/cost`/`/usage`/`/status`), or hard-blocked as interactive
+  (`/config`, `/model` — confirmed live that injected keystrokes inside
+  a selectable-list view are UI INPUT, not text: a stray send toggled a
+  real, global Claude Code setting during testing, caught, fixed,
+  disclosed, and turned into this policy) — and (b) reversibility,
+  independent of view type: `/clear` renders inline like `/compact` but
+  is irreversible (wipes the conversation, vs. `/compact`'s
+  non-destructive summarize), so it's blocked by default regardless of
+  its view classification (`JARVIS_ALLOW_CLEAR=1` re-enables it; no such
+  override exists for the interactive-picker blocks, since that's a
+  hazard axis, not a risk-Ayman-can-knowingly-accept axis). **Anything
+  not explicitly classified defaults to refused** — the same rule that
+  already applied to partial/unrecognized slash fragments now applies to
+  whole unverified commands, project-specific or not (see
+  `registry.py`'s per-target `.claude/commands/*.md` discovery).
 - **Partial/unrecognized slash commands are refused, not typed.**
   Confirmed live that a truncated payload like `/comp` doesn't fail
   safely — Claude Code's own completion overlay auto-submits whatever it
   has highlighted (`/compact`) instead of the literal typed text. A
   malformed payload reaching the transport could therefore execute a
   *different* command than the one resolved. `slash_guard.py` refuses any
-  `/`-prefixed payload that isn't an exact match against
-  `known_slash_commands.json`.
+  `/`-prefixed payload that isn't an exact match.
 - **`JARVIS_MUTE=1` silences audio, never the cancel window.** A real
   product feature (Ayman on a call, in a meeting), not test scaffolding —
   `speak_with_cancel_window`'s control flow is identical under mute; only
@@ -175,12 +217,26 @@ Consequences this codebase enforces, not just documents:
   `l1_wakeword/daemon.py`'s live-mic branch is a deliberate placeholder
   until that go-ahead happens.
 
+**Broader lesson from three separate incidents on this project** (a
+partial slash fragment resolving to the wrong command via the completion
+overlay; a settings-picker view treating injected text as a UI toggle
+instead of prose; and — checked, not assumed — that queued messages
+still get correctly acted on): **the transport's core assumption — that
+send-keys produces characters in an input box — only holds when the
+target is genuinely at an input line.** Every place that gate gets
+relaxed or a new interaction shape gets added, re-derive from evidence
+whether the assumption still holds; don't extend a working pattern to a
+new case by analogy alone.
+
 ## What isn't built yet
 
 - Live-mic end-to-end integration test (blocked on Ayman's explicit
   go-ahead + presence, not a technical blocker)
-- A dismissal mechanism for control-plane commands that open a persistent
-  view (`/cost` confirmed, likely `/usage`/`/status`/`/config`) — flagged
-  in `FALSE_REFUSAL_MEASUREMENT.md`, not yet decided
+- `/help`'s view classification (readonly vs interactive) — currently
+  blocked pending that check, see `known_slash_commands.json`
 - `l4_controller`'s own README (this file covers it at the system level;
   a layer-level one following L1/L2's format would be useful)
+- A full L3-orchestrator-level run of the project-specific custom-command
+  scenario (verified at the transport level directly; loose-voice-
+  reference resolution of a custom command hasn't been run live — see
+  scenario 10 in `l3_orchestrator_test/adversarial_dictations/`)
