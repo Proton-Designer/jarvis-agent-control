@@ -23,6 +23,25 @@ VIEW_OPEN_POLL_INTERVAL_S = 0.5
 DISMISS_VERIFY_POLL_ATTEMPTS = 6
 DISMISS_VERIFY_POLL_INTERVAL_S = 0.5
 
+# Exact-match allowlist (by name, not by category) of commands that may be
+# sent into a BUSY pane rather than refused, trusting Claude Code's own
+# mid-turn message queueing instead. See QUEUEING_INVESTIGATION.md: /compact
+# was verified reliable at multiple points in a busy window, in order, with
+# no swallowing, AND (the finding that actually justifies this) queued
+# actionable instructions get genuinely performed when a merged turn
+# resolves, not just acknowledged -- verified with independently-checked
+# file artifacts, not model self-report.
+#
+# By-name, not "any conversation-state-touching command": a generic rule
+# would silently extend to a future command nobody's tested, the same
+# mistake as the unnamed-slash-command hazard this codebase already found
+# once. Widen only with the same evidence standard, one command at a time.
+#
+# Only applies to BUSY. PERMISSION_PROMPT and UNKNOWN/real-typed-content
+# are untouched -- a different hazard class this investigation says
+# nothing about.
+BUSY_TOLERANT_COMMANDS = {"/compact"}
+
 
 @dataclass
 class DeliveryResult:
@@ -74,6 +93,15 @@ class TmuxTransport(Transport):
     or refused (unrecognized / explicitly blocked as interactive/mutating —
     confirmed live that an interactive view treats injected keystrokes as UI
     input, not text: a stray send toggled a real global setting).
+
+    Pane-state gate: refuses BUSY/PERMISSION_PROMPT/UNKNOWN, EXCEPT the
+    exact-match BUSY_TOLERANT_COMMANDS allowlist (currently just /compact),
+    which is sent into a BUSY pane rather than refused, trusting Claude
+    Code's own mid-turn message queueing (verified reliable — see
+    QUEUEING_INVESTIGATION.md, including that queued actionable
+    instructions genuinely get performed, not just acknowledged, when a
+    merged turn resolves). PERMISSION_PROMPT and UNKNOWN are never
+    bypassed this way, for any command.
     """
 
     def __init__(
@@ -150,7 +178,9 @@ class TmuxTransport(Transport):
 
         pane_text = self.capture_pane(target)
         state = classify_pane_ansi(pane_text, self.patterns)
-        if state != PaneState.READY:
+        leading_token = normalized.split(" ", 1)[0]
+        busy_tolerated = state == PaneState.BUSY and leading_token in BUSY_TOLERANT_COMMANDS
+        if state != PaneState.READY and not busy_tolerated:
             return DeliveryResult(
                 ok=False,
                 detail=f"refused: {target} pane state is {state.value}, not ready",

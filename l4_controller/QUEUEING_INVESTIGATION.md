@@ -59,6 +59,49 @@ checking which category a given one falls into.
 **4. No state found where mid-turn text was swallowed rather than
 queued**, across all timings and payload types tested.
 
+## Follow-up: does a merged turn actually PERFORM every queued
+actionable instruction, or just acknowledge them?
+
+This is the question that actually matters — our system routinely
+delivers multiple instructions to the same target, so "acknowledged but
+only some acted on" would be a silent-loss failure mode sitting directly
+in the main path, worse than a refusal (a refusal is loud; this would be
+silent, with every layer reporting success).
+
+Tested with independently-verifiable artifacts, not informational
+messages — the acknowledgement/action distinction only shows up with
+something that either does or doesn't exist on disk afterward:
+
+- **Two actionable instructions** ("create artifact-A.txt containing
+  HELLO-FROM-A" / "create artifact-B.txt containing HELLO-FROM-B")
+  queued during one busy window. Both `Write()` tool calls executed;
+  both files independently verified on disk with correct content
+  afterward (not just claimed in the model's summary).
+- **Three actionable instructions** (C, D, E), same setup, to check
+  whether merge behavior degrades with more queued items. All three
+  executed and independently verified on disk. No degradation observed.
+- **One actionable + one informational**, mixed. The actionable one
+  (artifact-F.txt) was correctly created and verified on disk; the
+  informational one was correctly recognized as needing no action ("And
+  noted on the FYI — good to hear, nothing done there.") rather than
+  either being dropped or triggering unwanted action.
+
+**Result: every actionable instruction across all three trials was
+actually performed, not merely acknowledged, verified independently each
+time.** No evidence of the silent-loss failure mode. The "merge into one
+continuation turn" behavior found in finding #2 means multiple queued
+items get processed together in one turn, but that turn still correctly
+executes each distinct action within it — closer to "the model correctly
+handles a multi-part follow-up," not "some parts get dropped."
+
+Caveats: three trials, one target app version, informational and simple
+single-file-write actions only — not exhaustive. If a queued instruction
+were more complex (e.g. two actions that conflict, or an action that
+depends on reading the result of another queued action first) this
+hasn't been tested. Reasonable to trust for the instruction shapes this
+system actually produces (short, independent, one-artifact-or-message-
+per-instruction); worth another look if instruction complexity grows.
+
 ## Recommendation
 
 **Relax the BUSY refusal specifically for scenario 09's shape**
