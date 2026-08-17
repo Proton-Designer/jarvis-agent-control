@@ -228,18 +228,22 @@ def verify_wake_trigger(whisper: WhisperDaemon, preroll_frames: "collections.deq
     return accepted, transcript
 
 
-def default_deliver(text: str, orchestrator_target: str | None = None):
-    """Production hookup -- imports L4's real handoff. Only called by
-    --simulate when --live-deliver is explicitly passed (see below); the
-    default is still print-only, so an ordinary test run never fires a
-    real `tmux send-keys` by accident. --live-deliver exists specifically
-    for the coordinated end-to-end pipeline test with L4/L3, not for
-    routine testing."""
-    sys.path.insert(0, str(Path(__file__).parent.parent / "l4_controller"))
-    from l2_l3_handoff import deliver_transcript, DEFAULT_ORCHESTRATOR_TARGET  # noqa
-    from transport import TmuxTransport  # noqa
+def default_deliver(text: str, orchestrator_target: str | None = None, live_deliver: bool = False):
+    """Production hookup -- routes every finished dictation through the
+    L2.5 concierge (classify -> answer locally, or forward unchanged)
+    instead of calling deliver_transcript directly. `live_deliver` only
+    gates the concierge's OWN forwarding decision for a DISPATCH/UNSURE
+    classification -- CONTROL/QUERY/CHAT get classified and answered
+    locally regardless, since answering locally never touches a real
+    orchestrator session (it can still speak, gated separately by
+    JARVIS_MUTE, same as everything else that calls say_feedback.speak).
+    See l2_5_concierge/concierge.py's own --live-deliver flag and the
+    incident that motivated it: a smoke test without this flag delivered
+    fake test text into a real live orchestrator session by accident."""
+    sys.path.insert(0, str(Path(__file__).parent.parent / "l2_5_concierge"))
+    from concierge import handle_transcript, DEFAULT_ORCHESTRATOR_TARGET  # noqa
     target = orchestrator_target or DEFAULT_ORCHESTRATOR_TARGET
-    return deliver_transcript(text, TmuxTransport(), orchestrator_target=target)
+    return handle_transcript(text, orchestrator_target=target, live_deliver=live_deliver)
 
 
 class DictationSession:
@@ -387,15 +391,19 @@ def _write_chunk_log(chunk_log: list[dict]) -> Path:
 
 
 def _report_and_deliver(text: str, chunk_log: list[dict], live_deliver: bool, orchestrator_target: str | None, stop_wall_time: float):
+    """Always routes through the L2.5 concierge now, regardless of
+    live_deliver -- CONTROL/QUERY/CHAT get classified and answered on
+    every run (including plain --simulate testing with no flags), since
+    none of that touches a real orchestrator session. live_deliver only
+    reaches the concierge's own DISPATCH/UNSURE forwarding gate (see
+    default_deliver / concierge.handle_transcript's --live-deliver
+    semantics) -- there is no separate short-circuit here any more."""
     print(f"FULL TRANSCRIPT: {text!r}")
     chunk_log_path = _write_chunk_log(chunk_log)
     print(f"chunk log ({len(chunk_log)} chunks): {chunk_log_path}")
-    if not live_deliver:
-        print("(simulate mode: not calling deliver_transcript -- would send to L4 here; pass --live-deliver to actually send)")
-        return
-    result = default_deliver(text, orchestrator_target=orchestrator_target)
+    result = default_deliver(text, orchestrator_target=orchestrator_target, live_deliver=live_deliver)
     handoff_wall_time = time.time()
-    print(f"DELIVERED via deliver_transcript: {result!r}")
+    print(f"concierge result: {result!r}")
     print(f"stop-word-to-handoff-return wall-clock: {handoff_wall_time - stop_wall_time:.3f}s")
 
 
@@ -810,9 +818,11 @@ if __name__ == "__main__":
     ap.add_argument("--model", default=None, help="whisper.cpp model path override")
     ap.add_argument(
         "--live-deliver", action="store_true",
-        help="actually call deliver_transcript() at the end of the dictation (real tmux send-keys into the "
-             "orchestrator pane) instead of just printing. For the coordinated end-to-end pipeline test only "
-             "-- never the default, so routine testing can't touch a real session by accident.",
+        help="let the L2.5 concierge actually forward a DISPATCH/UNSURE-classified dictation (real tmux "
+             "send-keys into the orchestrator pane) instead of just printing what it would send. Every "
+             "dictation is classified and CONTROL/QUERY/CHAT turns are answered locally regardless of this "
+             "flag -- it only gates real delivery to a live orchestrator session. Never the default, so "
+             "routine testing (including plain --simulate) can't touch a real session by accident.",
     )
     ap.add_argument("--target", default=None, help="orchestrator tmux session name (only used with --live-deliver)")
     args = ap.parse_args()
