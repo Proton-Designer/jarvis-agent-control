@@ -39,13 +39,32 @@ from pathlib import Path
 
 from dispatch_state import mark_dispatch_forwarded
 from latency_log import log_event
+from providers import list_sessions
 from say_feedback import speak
 from transport import Transport
 
 DICTATIONS_DIR = Path.home() / ".jarvis" / "dictations"
 
 # Naming convention matches sessions.json's "claude-<project>" pattern.
+# Exposed as a named constant for real callers to import and pass
+# explicitly (daemon.py's default_deliver, concierge.py's _forward both
+# do) -- deliberately NOT deliver_transcript()'s own default (see below).
 DEFAULT_ORCHESTRATOR_TARGET = "claude-orchestrator"
+
+
+def _format_session_list(sessions: list[dict]) -> str:
+    if not sessions:
+        return "No sessions are currently running."
+    parts = []
+    for s in sessions:
+        bit = f"{s['session_id']} (cwd: {s['working_dir']}"
+        if s["alias"]:
+            bit += f", alias: {s['alias']}"
+        if s["custom_commands"]:
+            bit += f", custom commands: {', '.join(s['custom_commands'])}"
+        bit += ")"
+        parts.append(bit)
+    return "; ".join(parts)
 
 
 def write_dictation(text: str) -> Path:
@@ -65,12 +84,37 @@ def write_dictation(text: str) -> Path:
 def deliver_transcript(
     text: str,
     transport: Transport,
-    orchestrator_target: str = DEFAULT_ORCHESTRATOR_TARGET,
+    orchestrator_target: str,
 ):
+    """orchestrator_target has no default, deliberately -- this is a bare,
+    directly-importable function, not gated behind daemon.py's
+    --live-deliver or concierge.py's live_deliver flag the way a real
+    dispatch is. A default here (it used to be DEFAULT_ORCHESTRATOR_TARGET,
+    the real production session name) meant any ad-hoc call -- a quick
+    script, a REPL check, a CLI smoke test -- silently hit the live
+    orchestrator unless the caller happened to think to override it.
+    Confirmed the hard way, 2026-08-17: exactly this shape, one directory
+    over, sent a concierge CLI smoke test to the real orchestrator by
+    omission. Both real callers (daemon.py, concierge.py) already pass
+    this explicitly on every call, so removing the default cost them
+    nothing and closes the footgun for whoever writes the next one."""
     log_event("handoff_received", chars=len(text))
     speak("Got it, working on it.")
     path = write_dictation(text)
-    pointer = f"New dictation at {path} — read it and route the instructions inside."
+    # Pre-inject the live session list rather than making L3 spend a full
+    # model turn calling list_sessions() itself before it can even start
+    # building a routing plan -- measured live (2026-08-17): ~7.7s of a
+    # ~17.9s pointer-to-spoken-plan turn was spent on exactly that round
+    # trip. Captured at send time, right here, milliseconds before
+    # delivery -- as fresh as a separate list_sessions() call would have
+    # been anyway. CLAUDE.md still permits calling list_sessions() as a
+    # fallback if this list looks stale or wrong; this only removes the
+    # round trip on the common path, it doesn't remove the tool.
+    sessions = list_sessions()
+    pointer = (
+        f"New dictation at {path} — read it and route the instructions inside. "
+        f"Live sessions right now (captured at send time): {_format_session_list(sessions)}"
+    )
     # Code-driven "forwarded" marker for the concierge's dispatch-in-flight
     # state -- written here, not by L3, because this is the actual moment
     # of handoff and this call already fires exactly once per real
