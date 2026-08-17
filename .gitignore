@@ -1,0 +1,22 @@
+# Python
+__pycache__/
+*.py[cod]
+*.so
+.venv/
+venv/
+.Python
+
+# Model weights — large binaries, fetched not versioned
+*.bin
+*.onnx
+*.gguf
+models/
+
+# Runtime artifacts
+dictations/
+*.wav
+*.log
+
+# Local agent/session state
+.claude/
+.DS_Store
