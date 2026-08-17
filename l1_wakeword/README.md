@@ -468,6 +468,29 @@ model call, verified against the exact case that exposed it plus the
 real "Iron Man" transcript (still correctly discards) and genuinely-
 addressed capitalized cases (still correctly keep).
 
+**The general lesson, not just this one bug:** every model call
+downstream of L2 receives text with Whisper's consistent shape —
+capitalized, punctuated, sometimes with filler ("um," "uh," self-
+correction). A test fixture that doesn't match that shape is testing a
+different system, and the mismatch can be invisible until something
+forces the comparison directly (here: running the real quoted transcript
+alongside a hand-typed lowercase one, and noticing they disagreed). This
+also caught the 5-way classifier itself by extension: the Lead asked
+whether `classify()` had the same instability given the 7B-vs-3B decision
+rests on it. Re-ran the full 28-case adversarial set (see the concierge
+docs) against both its original casing (already mostly capitalized, so
+mostly already production-shaped) and a fully case-flipped variant of
+every case — 0/28 flipped label, same residual either way. But a
+narrower direct test on a different phrasing of the same "Iron Man" case
+did flip DISPATCH vs UNSURE by capitalization alone. Not present on the
+already-validated 28 wordings, but real and reproducible on a wording
+that wasn't — so `classify()` got the same lowercasing fix as a
+precaution, not because the validated set proved it necessary. Same
+instinct as the PERMISSION_PROMPT detector once being validated against
+the onboarding dialog instead of a real tool-approval prompt: a plausible
+substitute can be the wrong reality, and it stays invisible until
+something forces the direct comparison.
+
 Discard events are logged (event, timestamp, wake-word score,
 classification, character count) to `~/.jarvis/latency_log.jsonl` for
 measuring the real false-trigger rate — never the transcript content.

@@ -53,8 +53,12 @@ from session_match import resolve_session as _resolve_session  # noqa: E402
 _last_utterance: dict[str, str | None] = {"text": None}
 
 
-def _phrase(kind: str, text: str, facts: str = "") -> str:
-    response, elapsed_ms = phrase_answer(kind, text, facts)
+def _phrase(kind: str, facts: str = "") -> str:
+    """Deliberately does NOT take the raw transcript -- see
+    ollama_client.phrase_answer's docstring for why. The phrasing model
+    only ever sees `facts` (code-computed, from a real provider call),
+    never anything Ayman said."""
+    response, elapsed_ms = phrase_answer(kind, facts)
     log_event("concierge_phrase", kind=kind, elapsed_ms=round(elapsed_ms, 1))
     return response
 
@@ -74,7 +78,23 @@ def _handle_control(text: str) -> str:
 def _handle_query(text: str) -> str:
     """Deterministic data first (requirement 1), always -- the model
     (via _phrase) only phrases what's already been fetched here, it never
-    originates a fact about session state or cost."""
+    originates a fact about session state or cost.
+
+    `text` is used ONLY to route to the right deterministic lookup below
+    (spend vs. list vs. per-session activity vs. dispatch status) -- it
+    is never passed to _phrase/phrase_answer. Found live (gu2s6tnt's
+    review): a compound utterance ("what's running right now, and tell
+    the billing session to redeploy") that slipped past the keyword tier
+    into here would previously reach _phrase with the FULL original text
+    plus partial facts, and the model would pick up the redeploy clause
+    and fabricate that it happened -- "Currently running: claude-
+    orchestrator. Billing session redeployed." despite the prompt saying
+    to use only the given facts. A prompt telling the model not to do
+    something is not a control; not showing it the transcript at all is.
+    (The keyword-tier hole itself is fixed separately, see
+    classifier.py's anchored _QUERY_PATTERNS -- this fix stands on its
+    own regardless, since text could still reach here via the model
+    tier.)"""
     lowered = text.lower()
 
     if any(k in lowered for k in ("spend", "spent", "cost")):
@@ -87,20 +107,20 @@ def _handle_query(text: str) -> str:
             if result["ok"] and result["summary"]
             else f"no cost data currently available for {session['session_id']}"
         )
-        return _phrase(QUERY, text, facts)
+        return _phrase(QUERY, facts)
 
     if any(k in lowered for k in ("running", "sessions", "going on")):
         sessions = list_sessions()
         if not sessions:
             return "Nothing's running right now."
         names = ", ".join(s.get("alias") or s["session_id"] for s in sessions)
-        return _phrase(QUERY, text, f"currently running sessions: {names}")
+        return _phrase(QUERY, f"currently running sessions: {names}")
 
     session = _resolve_session(text)
     if session is not None:
         activity = session_activity(session["session_id"])
         facts = f"session {session['session_id']}: state={activity['state']}, activity={activity['activity']}"
-        return _phrase(QUERY, text, facts)
+        return _phrase(QUERY, facts)
 
     # No named session resolved -- most likely asking about the last
     # dispatch ("is it done yet", "what's it doing"). dispatch_state() is

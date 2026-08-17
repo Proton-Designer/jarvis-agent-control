@@ -65,9 +65,9 @@ PHRASE_MAX_TOKENS = 64
 CLASSIFY_SYSTEM = """You classify a single spoken instruction to a voice assistant named Jarvis into exactly one category. Answer with ONLY the category word, nothing else.
 
 CONTROL - a command about the conversation itself: cancel, never mind, stop, repeat that, say that again.
-QUERY - asking about the state of a running task or session: what's running, what's X doing, how much have I spent, is it done yet.
+QUERY - ONLY asking about the state of a running task or session, with no action requested anywhere in the utterance: what's running, what's X doing, how much have I spent, is it done yet.
 CHAT - conversational, no action or data requested: greetings, small talk, opinions, thanks.
-DISPATCH - an instruction to be carried out by an agent: tell X to do Y, have X run/fix/deploy/check something.
+DISPATCH - an instruction to be carried out by an agent, anywhere in the utterance: tell X to do Y, have X run/fix/deploy/check something. If a question and an instruction both appear in the same utterance -- in either order, even a short one tacked onto the end ("...and also have it restart") -- the whole thing is DISPATCH, never QUERY. An utterance is only QUERY if it asks about state and requests NOTHING else.
 UNSURE - anything ambiguous, unclear, or not confidently one of the above. When in doubt, choose UNSURE, never CHAT.
 
 Examples:
@@ -82,6 +82,8 @@ Examples:
 "good morning" -> CHAT
 "tell shipcheck to redeploy the api" -> DISPATCH
 "have mobile run the test suite" -> DISPATCH
+"what's running right now, and tell the billing session to redeploy" -> DISPATCH
+"what's the gateway doing, oh and also have it restart" -> DISPATCH
 """
 
 RECLASSIFY_DISPATCH_OR_QUERY_SYSTEM = """A transcript mentions a real, currently-running session by name, so it cannot be idle chat -- it is either an INSTRUCTION for that session to do something, or a QUESTION asking about that session's current state. Answer with ONLY one word: DISPATCH or QUERY.
@@ -106,19 +108,22 @@ Examples:
 "I think Jarvis needs a better wake word detector" -> UNSURE
 """
 
-PHRASE_SYSTEM_QUERY = """You are Jarvis, a voice assistant. Answer the user's question in ONE short SPOKEN sentence (under 20 words), using ONLY the facts given below. Do not add any detail not present in the facts. If the facts say nothing relevant or state is unknown, say you don't have that information -- never guess.
+# Deliberately does NOT include the user's transcript anywhere in this
+# prompt -- see phrase_answer's docstring. Only ever fed `facts`, a
+# code-computed string from a real provider call (list_sessions,
+# session_activity, spend). This template has no place to put a
+# transcript even if a caller tried to pass one.
+PHRASE_SYSTEM_QUERY = """You are Jarvis, a voice assistant. Phrase the FACTS below as ONE short SPOKEN sentence (under 20 words) reporting them to the user. Use ONLY the facts given -- do not add any detail not present in them. If the facts say nothing relevant or state is unknown, say you don't have that information -- never guess.
 
 This gets read aloud, not displayed as text. If the facts contain a long list (many session names, many items), SUMMARIZE it instead of reading every item -- a count, a pattern, "mostly test sessions" -- nobody wants a list of names read to them one by one. Example: given "currently running sessions: claude-a, claude-b, claude-c, claude-d, claude-e", say something like "You've got 5 sessions running" or "5 sessions running, mostly test ones" -- not a recitation of all 5 names.
 
 Facts:
 {facts}
 
-User asked: "{text}"
 Jarvis says:"""
 
-PHRASE_SYSTEM_CHAT = """You are Jarvis, a voice assistant, replying to a casual remark (not a question about system state). Reply in ONE short, natural spoken sentence (under 15 words). Do not claim any information about running tasks, sessions, or costs -- you have none available. If the remark seems to need real information, say you're not sure rather than guessing.
+PHRASE_SYSTEM_CHAT = """You are Jarvis, a voice assistant, acknowledging a casual remark briefly and pleasantly. Reply in ONE short, natural spoken sentence (under 15 words). You have no information about running tasks, sessions, or costs -- never claim any.
 
-User said: "{text}"
 Jarvis says:"""
 
 
@@ -201,13 +206,29 @@ def assess_addressed(text: str) -> str:
     return label if label in ("ADDRESSED", "AMBIENT", "UNSURE") else "UNSURE"
 
 
-def phrase_answer(kind: str, text: str, facts: str = "") -> tuple[str, float]:
+def phrase_answer(kind: str, facts: str = "") -> tuple[str, float]:
     """kind: "CHAT" or "QUERY". `facts` is the ONLY source of truth the
     model may draw on for a QUERY answer -- e.g. a provider function's
     literal output -- never invented. Ignored for CHAT (nothing to
-    report; the model is explicitly told it has no state access)."""
+    report; the model is explicitly told it has no state access).
+
+    Deliberately takes no `text` parameter -- the raw transcript is never
+    part of this prompt, structurally, not just by instruction. Found
+    live (gu2s6tnt's review): when this used to also receive the full
+    original transcript, a compound utterance that slipped a DISPATCH
+    clause past the QUERY keyword tier ("what's running right now, and
+    tell the billing session to redeploy") made the model pick up the
+    redeploy clause from `text` and FABRICATE that it happened --
+    "Currently running: claude-orchestrator. Billing session redeployed."
+    -- despite the prompt saying to use only the facts given. A confident
+    false confirmation of an action that never occurred, with no record
+    of the real instruction anywhere, is strictly worse than silence.
+    Telling a model not to use information it can see is not a control;
+    not showing it the information is. If `text` isn't in this function's
+    signature, it can't leak into the prompt no matter what a future
+    caller passes or what a future prompt edit forgets to restate."""
     template = PHRASE_SYSTEM_QUERY if kind == "QUERY" else PHRASE_SYSTEM_CHAT
-    prompt = template.format(facts=facts, text=text)
+    prompt = template.format(facts=facts)
     response, elapsed_ms = _generate(prompt, num_predict=PHRASE_MAX_TOKENS, temperature=0.3)
     log_event("concierge_phrase_model_call", kind=kind, elapsed_ms=round(elapsed_ms, 1))
     return response, elapsed_ms

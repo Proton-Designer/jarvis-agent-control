@@ -79,20 +79,29 @@ _CONTROL_PATTERNS = [
     ]
 ]
 
-# Search (not anchor-match) is deliberate here, unlike CONTROL -- QUERY
-# phrasing is more varied ("hey, what's the gateway doing right now") and
-# a query embedded in a slightly longer sentence should still route as a
-# query. Less risky than doing the same for CONTROL/DISPATCH: routing a
-# QUERY-shaped chunk to the deterministic answer path costs nothing if
-# wrong (worst case: an oddly-phrased response), unlike misrouting a real
-# instruction.
+# Anchored (^...$) exactly like CONTROL now -- was a bare .search()
+# ("routing a QUERY-shaped chunk to the deterministic answer path costs
+# nothing if wrong, worst case an oddly-phrased response"), and that
+# reasoning was WRONG for a compound utterance. Found live (gu2s6tnt's
+# review): "what's running right now, and tell the billing session to
+# redeploy" matched the "running" pattern via .search(), classified QUERY
+# via the keyword tier, and the redeploy clause never reached the model
+# or deliver_transcript() at all -- worse than silent loss, see
+# _handle_query's docstring for how it also produced a FABRICATED
+# confirmation that the redeploy happened. A compound utterance now
+# correctly fails every anchored pattern and falls through to the model,
+# which is what the tiered design was for -- costs ~200ms on a case that
+# used to be free, in exchange for not silently dropping (and then lying
+# about) a real instruction. Trailing punctuation still tolerated
+# (\.?$), leading filler ("hey, what's...") is not -- that now falls
+# through to the model too, same tradeoff.
 _QUERY_PATTERNS = [
     re.compile(p, re.IGNORECASE) for p in [
-        r"what'?s\s+(\w+\s+)?(running|going on|happening)\??",
-        r"what'?s\s+.+\s+doing\??",
-        r"is\s+.+\s+done\s+yet\??",
-        r"how\s+much\s+(have\s+i|did\s+i)\s+spen[dt]\??",
-        r"what'?s\s+the\s+status\b",
+        r"^what'?s\s+(\w+\s+)?(running|going on|happening)\??\.?$",
+        r"^what'?s\s+.+\s+doing\??\.?$",
+        r"^is\s+.+\s+done\s+yet\??\.?$",
+        r"^how\s+much\s+(have\s+i|did\s+i)\s+spen[dt]\??\.?$",
+        r"^what'?s\s+the\s+status\??\.?$",
     ]
 ]
 
