@@ -242,6 +242,24 @@ Consequences this codebase enforces, not just documents:
   session through every known state (including a real manual-mode
   approval prompt, declined, with an explicit assertion that nothing was
   actually written) and asserts the classifier still agrees with reality.
+- **Held-instruction expiry (the dual-clock design in `CLAUDE.md`'s
+  "Held instructions" section — `surfaced_and_unresolved` reaching 2, or
+  60 minutes wall-clock, whichever comes first) is not a cleanup path for
+  test artifacts, and must never be relied on as one.** A surfacing means
+  the hold is spoken aloud to Ayman — the clock exists to answer "has he
+  had a real chance to resolve this and declined," which is exactly why
+  it can't also be the thing that quietly removes a fake instruction
+  before he hears it. Confirmed the hard way (2026-08-17): an accidental
+  live delivery from a CLI smoke test (see the shared-git-index and
+  default-target-resolves-to-a-live-session lessons in this same section)
+  produced a real, spoken-aloud held entry — "still holding: tell
+  shipcheck to redeploy the api gateway" — for an instruction Ayman never
+  gave, about a session that never existed. Self-expiry would eventually
+  have cleared it, but only after Ayman heard it at least once as if it
+  were a real, currently-pending decision. **Tests and test artifacts
+  clear their own runtime state explicitly** — delete/reset
+  `held.json` (or whatever file the mistake touched) as part of noticing
+  the mistake, don't wait for or rely on the expiry clock to do it.
 - **No unattended microphone capture, ever.** Live-mic testing only
   happens while Ayman is actively present and watching, and stops when
   watching stops — this is a standing rule, not a per-incident decision
