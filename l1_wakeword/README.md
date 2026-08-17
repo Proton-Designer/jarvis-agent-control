@@ -222,3 +222,79 @@ that it isn't wired up and exits — this is deliberate, not an oversight.
 The cancel-socket server (`~/.jarvis/l1.sock`) is scaffolded
 (`cancel_socket_server()`) but its actual detection logic is a documented
 placeholder for the same reason.
+
+## Process lifecycle: launchd, TCC, and how to turn this off
+
+This was part of the original L1 assignment (survive reboot/sleep, stable
+mic-permission identity) and got dropped when the architecture pivoted
+twice before it was built — flagging that gap plainly rather than
+backfilling it, since it should have been called out as "still owed" in
+an earlier status update instead of going unmentioned.
+
+**What exists:** `com.jarvis.l1wakeword.plist` (a launchd LaunchAgent,
+`RunAtLoad` + `KeepAlive`), `run_daemon.sh` (the stable entrypoint the
+plist points at), `install_launch_agent.sh` (copies the plist into
+`~/Library/LaunchAgents/`), `stop_wakeword.sh` (the real off switch).
+
+**Installed but deliberately not loaded.** Per the standing no-unattended-
+mic rule: a LaunchAgent that auto-starts a microphone listener on login is
+exactly the case that rule exists for. `install_launch_agent.sh` copies
+the plist and prints the `launchctl bootstrap` command rather than running
+it. First load happens during the live-mic session, with Ayman present —
+that session also answers the one open design question below, which
+should be resolved before this runs unattended across reboots.
+
+**How to turn it off, once it's running:** `stop_wakeword.sh`. Plain
+`kill`/`pkill` will NOT work — `KeepAlive` is bare `true` (survives any
+exit, clean or crashed), specifically so there's one unambiguous "off"
+(`launchctl bootout`, wrapped by the script) instead of a kill-vs-launchctl
+question about what "stopped" even means. This is the answer to "how does
+Ayman turn it off without reading source."
+
+**The open question: what does TCC actually key the microphone-permission
+grant on, and where should `run_daemon.sh` point?**
+
+`run_daemon.sh` currently execs
+`/opt/homebrew/opt/python@3.13/bin/python3.13` — Homebrew's floating
+"current version" alias, not the venv's own python. Verified, not assumed:
+`.venv/bin/python3.13` is a symlink chain resolving to a real binary under
+`/opt/homebrew/Cellar/python@3.13/3.13.7/...`, and `execve()` always
+resolves symlinks before running — so recreating the venv doesn't change
+what actually executes or opens the mic. The real exposure is a
+`brew upgrade python@3.13`, which moves the Cellar version directory.
+
+Since invoking that alias directly bypasses Python's normal venv
+auto-detection (which walks from the invoked path looking for a sibling
+`pyvenv.cfg` — the alias's directory has none), `run_daemon.sh` sets
+`PYTHONPATH` explicitly to the venv's `site-packages` rather than relying
+on implicit activation. Verified working (no mic needed to check this
+part): `PYTHONPATH=.../site-packages /opt/homebrew/opt/python@3.13/bin/python3.13`
+imports `numpy`/`onnxruntime`/`openwakeword`/`sounddevice` correctly.
+
+**What's still open, and can't be closed without the mic:** the Lead's
+read, which stands as the better one — both the Homebrew alias and the
+fully-resolved Cellar path share a defect regardless of which one TCC
+actually uses: **they point at a binary this project doesn't own.**
+Homebrew can move or replace it on any upgrade, and the failure mode is
+silent (Ayman talks to a machine that quietly stopped listening because
+macOS re-prompted for a permission nobody was there to grant). Two better
+options, not yet built, pending which one the live-mic test's answer
+requires:
+
+- **(a) Package as a minimal `.app` bundle.** TCC keys the grant on
+  bundle identifier + code signature, not a raw executable path — the
+  only option that's stable by construction rather than by luck. Also
+  gives Ayman a recognizable entry in System Settings → Privacy →
+  Microphone, which matters for the visible-off-switch trust point above.
+- **(b) Vendor a standalone interpreter under `~/.jarvis/runtime/`.**
+  Cruder, less work than (a), removes Homebrew from the trust chain by
+  just owning the binary outright.
+
+The live-mic session is where this actually gets answered — whether TCC
+re-prompts across an interpreter path change is an empirical question
+that needs a real permission grant and a real trigger event to test, not
+something reasoning from documentation can settle. That session should
+also cover: idle CPU/battery measured over a real stretch (not claimed),
+and confirming `KeepAlive` genuinely survives a sleep/wake cycle — both
+also need the listener actually running, so one session covers all three
+asks instead of three separate interruptions.

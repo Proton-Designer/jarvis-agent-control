@@ -1,0 +1,33 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.jarvis.l1wakeword</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/Users/aymanmohammed/Desktop/Jarvis/l1_wakeword/run_daemon.sh</string>
+    </array>
+
+    <!-- Survives reboot (RunAtLoad) and any exit, crash or clean (KeepAlive
+         bare true) -- deliberately not the SuccessfulExit:false dict form,
+         because "clean exit still restarts" is what makes launchctl
+         bootout/unload the ONE reliable way to actually stop this, rather
+         than there being a kill-vs-launchctl ambiguity about what "off"
+         means. See README's "How to turn this off" section -- do not try
+         to stop this with kill/pkill, it will just come back. -->
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <true/>
+
+    <key>StandardOutPath</key>
+    <string>/Users/aymanmohammed/Desktop/Jarvis/l1_wakeword/logs/wakeword.log</string>
+    <key>StandardErrorPath</key>
+    <string>/Users/aymanmohammed/Desktop/Jarvis/l1_wakeword/logs/wakeword.error.log</string>
+
+    <key>ProcessType</key>
+    <string>Interactive</string>
+</dict>
+</plist>
