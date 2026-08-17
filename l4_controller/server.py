@@ -26,6 +26,7 @@ import time
 from mcp.server.mcpserver import MCPServer
 
 from cancel_listener import cancel_socket_available
+from latency_log import log_event
 from registry import SessionRegistry, UnknownSessionError
 from say_feedback import speak, speak_with_cancel_window
 from transport import TmuxTransport
@@ -181,6 +182,8 @@ def deliver_batch(instructions: list[dict], retry_busy_once: bool = True) -> dic
         else:
             failures.append(f"{target_name} ({result.reason})")
             speak(f"{target_name} not sent: {result.detail}.")
+
+    log_event("last_send_issued", count=len(instructions), failures=len(failures))
 
     if failures:
         speak(
