@@ -37,7 +37,9 @@ no benefit; one state machine sidesteps it entirely.
 """
 import argparse
 import asyncio
+import collections
 import json
+import re
 import signal
 import sys
 import time
@@ -100,6 +102,56 @@ WAKE_WORD_TAIL_TRIM_S = 1.0
 POST_STOP_COOLDOWN_S = 1.5
 SILENCE_SAFETY_NET_S = 50.0
 SOCKET_PATH = Path.home() / ".jarvis" / "l1.sock"
+
+# --- Start-trigger verification: fails CLOSED, unlike stop/cancel below ---
+#
+# THE GOVERNING ASYMMETRY OF THIS SYSTEM: start fails closed, stop and
+# cancel fail open, because the consequences invert.
+#   - A false-negative STOP or CANCEL costs Ayman one repeat of the phrase
+#     -- recoverable, so those are biased toward accepting (lowered
+#     RECOVERABLE_THRESHOLD, the offset ensemble maximizing detection odds).
+#   - A false-ACCEPT on START opens the microphone and transcribes whatever
+#     is said in the room next. That is not recoverable the same way, and
+#     it is not hypothetical: measured directly, ordinary two-syllable
+#     names ("Hey Charles" 0.998, "Hey Travis" 0.983) score
+#     indistinguishably from a genuine "Hey Jarvis" (0.999, same voice,
+#     same batch) on the acoustic model alone. No threshold separates
+#     them -- 0.998 is not marginal. So START gets a second, independent
+#     check that isn't fooled by the same failure mode.
+#
+# The acoustic wake-word model scores PROSODIC SHAPE (which is exactly
+# what "Hey Charles" and "Hey Jarvis" share). Whisper transcribes PHONETIC
+# CONTENT (where "Charles" and "Jarvis" are nothing alike). The two
+# failure modes are uncorrelated, which is what makes stacking them
+# effective rather than redundant -- a phrase that fools the acoustic
+# model on shape has no particular reason to also fool Whisper on content.
+#
+# Cost: ~0.5s (measured whisper-server warm latency) added once, at the
+# very start of a dictation that then runs for minutes. Invisible in
+# context; L2 latency was already established as far below the noise
+# floor for this workload.
+VERIFY_BUFFER_S = 2.0  # rolling pre-roll + trigger-window buffer sent to Whisper for verification
+VERIFY_BUFFER_FRAMES = int(VERIFY_BUFFER_S * SAMPLE_RATE / VAD_FRAME_SAMPLES)
+
+# Be permissive about spelling -- Whisper may render the word "Jarvis",
+# "jarvis,", "Jervis" (a real, phonetically plausible mishearing), etc.
+# Reject anything that doesn't recognizably contain the word, including an
+# empty or unclear transcript -- fail closed means ambiguous also rejects.
+_JARVIS_TRANSCRIPT_RE = re.compile(r"jarvis|jervis", re.IGNORECASE)
+
+
+def verify_wake_trigger(whisper: WhisperDaemon, preroll_frames: "collections.deque", tmp_wav_path: Path) -> tuple[bool, str]:
+    """Second-stage check on a wake-word trigger before committing to
+    CAPTURING. Returns (accepted, transcript) -- transcript is logged by
+    the caller regardless of outcome so the false-rejection rate is
+    measurable, not assumed."""
+    if not preroll_frames:
+        return False, ""
+    audio = np.concatenate(list(preroll_frames))
+    _write_wav(tmp_wav_path, audio)
+    transcript = whisper.transcribe(str(tmp_wav_path), prompt="Jarvis")
+    accepted = bool(_JARVIS_TRANSCRIPT_RE.search(transcript))
+    return accepted, transcript
 
 
 def default_deliver(text: str, orchestrator_target: str | None = None):
@@ -293,6 +345,7 @@ def simulate(dictation_wav: str, whisper: WhisperDaemon, live_deliver: bool = Fa
     state = "IDLE"
     session: DictationSession | None = None
     cooldown_until: float | None = None  # see POST_STOP_COOLDOWN_S
+    preroll: collections.deque = collections.deque(maxlen=VERIFY_BUFFER_FRAMES)
     # Drive the loop at the VAD's (smaller) native frame size, not the wake-word
     # model's. openWakeWord's predict() explicitly supports non-80ms input --
     # it accumulates internally, at the cost of up to one extra 80ms of
@@ -309,13 +362,19 @@ def simulate(dictation_wav: str, whisper: WhisperDaemon, live_deliver: bool = Fa
         score = wake_model.predict(frame)["hey_jarvis_v0.1"]
         start_fired = score >= IDLE_THRESHOLD
         stop_fired = score >= RECOVERABLE_THRESHOLD  # deliberately lower, see RECOVERABLE_THRESHOLD
+        preroll.append(frame)
 
         if state == "IDLE":
             in_cooldown = cooldown_until is not None and t < cooldown_until
             if start_fired and not in_cooldown:
-                print(f"[{t:.2f}s] wake word -> CAPTURING")
-                state = "CAPTURING"
-                session = DictationSession(vad, whisper, started_at=t)
+                accepted, verify_text = verify_wake_trigger(whisper, preroll, tmp_wav)
+                if accepted:
+                    print(f"[{t:.2f}s] wake word (score={score:.3f}) verified ({verify_text!r}) -> CAPTURING")
+                    state = "CAPTURING"
+                    session = DictationSession(vad, whisper, started_at=t)
+                    preroll.clear()
+                else:
+                    print(f"[{t:.2f}s] wake word (score={score:.3f}) REJECTED by verification (heard: {verify_text!r}) -- staying IDLE")
             elif start_fired and in_cooldown:
                 print(f"[{t:.2f}s] wake word ignored -- inside post-stop cooldown (score={score:.3f})")
         elif state == "CAPTURING":
@@ -383,46 +442,159 @@ CANCEL_ENSEMBLE_OFFSETS = [0, 171, 341]  # samples; ~0, ~1/3, ~2/3 of the 512-sa
 # "duration" reason originally assumed.
 
 
-async def cancel_socket_server():
-    """Production-only: real implementation needs to read from the SAME live
-    mic stream the IDLE/CAPTURING loop owns, arming a fresh N-offset
-    ensemble for the requested window (see the two constants above -- both
-    fixes are needed, they cover different measured problems). Not
-    exercised by --simulate -- there's no live mic in this environment to
-    validate it against, so it's scaffolded and documented rather than
-    claimed as tested. The ensemble SCORING logic (score_ensemble) is unit-
-    testable without a mic and has been -- see the long-dictation test
-    writeup. What's still a placeholder is the live audio source feeding it.
+def fresh_ensemble():
+    """One fresh Model() per offset, per cancel-window arm -- never the
+    long-running IDLE/CAPTURING detector. See CANCEL_ENSEMBLE_OFFSETS'
+    comment for why fresh-per-arm, not age-based rotation."""
+    ensemble = []
+    for offset in CANCEL_ENSEMBLE_OFFSETS:
+        ensemble.append({
+            "model": load_model(),
+            "lead_in_remaining": offset,  # samples of silence to feed before real audio, to fix this instance's phase
+        })
+    return ensemble
+
+
+def score_frame_ensemble(ensemble, frame_i16: np.ndarray) -> float:
+    """Feed one real frame to every ensemble member (each still working
+    through its own phase lead-in first), return the max score seen this
+    call. Call once per incoming live-mic frame while a cancel window is
+    armed. Unit-tested without a mic -- see the long-dictation writeup for
+    the numbers (recovered the 0.323 case that a single offset could have
+    missed at 0.168)."""
+    best = 0.0
+    for member in ensemble:
+        if member["lead_in_remaining"] > 0:
+            pad = min(member["lead_in_remaining"], VAD_FRAME_SAMPLES)
+            member["model"].predict(np.zeros(pad, dtype=np.int16))
+            member["lead_in_remaining"] -= pad
+            continue
+        score = member["model"].predict(frame_i16)["hey_jarvis_v0.1"]
+        best = max(best, score)
+    return best
+
+
+class LiveController:
+    """Owns the IDLE/CAPTURING/CANCEL_ARMED state machine for live-mic
+    operation. One instance, fed one frame at a time by the sounddevice
+    callback (via an asyncio.Queue -- the callback itself runs on
+    PortAudio's own thread, not the event loop, so it can't touch asyncio
+    objects directly; it just hands frames off).
+
+    This mirrors --simulate's state machine (same transition logic, same
+    DictationSession) but driven by live wall-clock time and a live frame
+    source instead of iterating a pre-loaded array -- the two entrypoints
+    intentionally share DictationSession/StreamingChunker/WhisperDaemon
+    rather than duplicating that logic, so everything --simulate already
+    validated (chunking, hallucination filtering, stop-word trimming,
+    cooldown) applies unchanged here. What's new here is only the frame
+    source and the CANCEL_ARMED branch --simulate never exercised.
     """
+
+    def __init__(self, whisper: WhisperDaemon, live_deliver: bool, orchestrator_target: str | None):
+        self.whisper = whisper
+        self.live_deliver = live_deliver
+        self.orchestrator_target = orchestrator_target
+        self.wake_model = load_model()
+        self.vad = SileroVAD()
+        self.tmp_wav = Path("/tmp/jarvis_daemon_chunk.wav")
+        self.state = "IDLE"
+        self.session: DictationSession | None = None
+        self.cooldown_until: float | None = None
+        self.preroll: collections.deque = collections.deque(maxlen=VERIFY_BUFFER_FRAMES)
+        # CANCEL_ARMED fields, set by arm_cancel(), read/cleared by on_frame()
+        self._cancel_ensemble = None
+        self._cancel_deadline = None
+        self._cancel_detected = False
+
+    def arm_cancel(self, timeout_s: float) -> bool:
+        """Called from the cancel-socket handler. Returns False (and does
+        nothing) if not currently IDLE -- per the exclusive-claim invariant,
+        a cancel window only ever opens after a dictation has already been
+        handed off, so this should never actually be called from CAPTURING
+        in practice; refusing rather than pre-empting is the safe failure
+        mode if it somehow is."""
+        if self.state != "IDLE":
+            return False
+        self.state = "CANCEL_ARMED"
+        self._cancel_ensemble = fresh_ensemble()
+        self._cancel_deadline = time.time() + timeout_s
+        self._cancel_detected = False
+        print(f"[{time.strftime('%H:%M:%S')}] CANCEL_ARMED for {timeout_s}s")
+        return True
+
+    def on_frame(self, frame_i16: np.ndarray, now: float):
+        if self.state == "CANCEL_ARMED":
+            self._on_cancel_frame(frame_i16, now)
+            return
+        score = self.wake_model.predict(frame_i16)["hey_jarvis_v0.1"]
+        start_fired = score >= IDLE_THRESHOLD
+        stop_fired = score >= RECOVERABLE_THRESHOLD
+        self.preroll.append(frame_i16)
+
+        if self.state == "IDLE":
+            in_cooldown = self.cooldown_until is not None and now < self.cooldown_until
+            if start_fired and not in_cooldown:
+                # Blocking whisper call here stalls frame_queue consumption for
+                # ~0.5s -- acceptable and deliberate: nothing else needs the
+                # event loop during that window (verification only runs at the
+                # start of a new dictation, never mid-capture or mid-cancel),
+                # and it keeps the fail-closed check simple rather than adding
+                # executor/threading complexity for a rare, non-latency-
+                # sensitive event.
+                accepted, verify_text = verify_wake_trigger(self.whisper, self.preroll, self.tmp_wav)
+                if accepted:
+                    print(f"[{time.strftime('%H:%M:%S')}] wake word (score={score:.3f}) verified ({verify_text!r}) -> CAPTURING")
+                    self.state = "CAPTURING"
+                    self.session = DictationSession(self.vad, self.whisper, started_at=now)
+                    self.preroll.clear()
+                else:
+                    print(f"[{time.strftime('%H:%M:%S')}] wake word (score={score:.3f}) REJECTED by verification (heard: {verify_text!r}) -- staying IDLE")
+            elif start_fired and in_cooldown:
+                print(f"[{time.strftime('%H:%M:%S')}] wake word ignored -- inside post-stop cooldown (score={score:.3f})")
+        elif self.state == "CAPTURING":
+            if not self.session.in_guard(now) and stop_fired:
+                stop_wall_time = time.time()
+                print(f"[{time.strftime('%H:%M:%S')}] wake word (post-guard, score={score:.3f}) -> finalize")
+                self.session.finalize_on_stop_word(self.tmp_wav)
+                text = self.session.full_transcript()
+                _report_and_deliver(text, self.session.chunk_log, self.live_deliver, self.orchestrator_target, stop_wall_time)
+                self.state = "IDLE"
+                self.session = None
+                self.cooldown_until = now + POST_STOP_COOLDOWN_S
+            elif self.session.silence_exceeds_safety_net():
+                stop_wall_time = time.time()
+                print(f"[{time.strftime('%H:%M:%S')}] {SILENCE_SAFETY_NET_S}s silence safety net -> finalize")
+                self.session.flush_final(self.tmp_wav)
+                text = self.session.full_transcript()
+                _report_and_deliver(text, self.session.chunk_log, self.live_deliver, self.orchestrator_target, stop_wall_time)
+                self.state = "IDLE"
+                self.session = None
+                self.cooldown_until = None
+            else:
+                partial = self.session.feed(frame_i16, self.tmp_wav)
+                if partial:
+                    print(f"[{time.strftime('%H:%M:%S')}] chunk transcribed: {partial!r}")
+
+    def _on_cancel_frame(self, frame_i16: np.ndarray, now: float):
+        if now >= self._cancel_deadline:
+            print(f"[{time.strftime('%H:%M:%S')}] cancel window closed, not detected -> IDLE")
+            self.state = "IDLE"
+            return
+        score = score_frame_ensemble(self._cancel_ensemble, frame_i16)
+        if score >= RECOVERABLE_THRESHOLD:
+            print(f"[{time.strftime('%H:%M:%S')}] CANCEL detected (ensemble score={score:.3f}) -> IDLE")
+            self._cancel_detected = True
+            self.state = "IDLE"
+
+
+async def cancel_socket_server(controller: LiveController):
+    """Handles L4's listen_for_cancel RPC by arming `controller`'s cancel
+    window and polling for the result -- the actual detection happens in
+    LiveController.on_frame(), fed by the same live audio stream as the
+    main loop, per the exclusive-claim design."""
     SOCKET_PATH.parent.mkdir(parents=True, exist_ok=True)
     SOCKET_PATH.unlink(missing_ok=True)
-
-    def fresh_ensemble():
-        """One fresh Model() per offset, per cancel-window arm -- never the
-        long-running IDLE/CAPTURING detector, per the stream-suppression
-        finding above."""
-        ensemble = []
-        for offset in CANCEL_ENSEMBLE_OFFSETS:
-            ensemble.append({
-                "model": load_model(),
-                "lead_in_remaining": offset,  # samples of silence to feed before real audio, to fix this instance's phase
-            })
-        return ensemble
-
-    def score_frame_ensemble(ensemble, frame_i16: np.ndarray) -> float:
-        """Feed one real frame to every ensemble member (each still working
-        through its own phase lead-in first), return the max score seen
-        this call. Call once per incoming live-mic frame."""
-        best = 0.0
-        for member in ensemble:
-            if member["lead_in_remaining"] > 0:
-                pad = min(member["lead_in_remaining"], WAKEWORD_FRAME_SAMPLES)
-                member["model"].predict(np.zeros(pad, dtype=np.int16))
-                member["lead_in_remaining"] -= pad
-                continue
-            score = member["model"].predict(frame_i16)["hey_jarvis_v0.1"]
-            best = max(best, score)
-        return best
 
     async def handle(reader, writer):
         data = await reader.read()
@@ -434,23 +606,59 @@ async def cancel_socket_server():
             await writer.drain()
             writer.close()
             return
-        _ensemble = fresh_ensemble()  # noqa: F841 -- built and ready; wiring to live audio is the TODO below
-        # TODO(live mic): feed real frames from the shared mic stream into
-        # score_frame_ensemble() for up to timeout_s seconds; return
-        # cancelled=True the instant any call returns >= RECOVERABLE_THRESHOLD,
-        # short-circuiting the wait rather than always running the full
-        # timeout. Not implemented against real audio yet -- see module
-        # docstring and README. The ensemble construction and per-frame
-        # scoring above are the tested, reusable part; only the live audio
-        # feed is a placeholder.
-        await asyncio.sleep(timeout_s)
-        writer.write(json.dumps({"cancelled": False}).encode())
+
+        armed = controller.arm_cancel(timeout_s)
+        if not armed:
+            # Not IDLE when the request arrived -- shouldn't happen per the
+            # exclusive-claim invariant, but fail closed (available=False on
+            # the client side, per cancel_listener.py) rather than silently
+            # report "not cancelled" as if the window had genuinely run.
+            writer.close()
+            return
+
+        deadline = time.time() + timeout_s + 0.5  # small buffer over the controller's own deadline
+        while time.time() < deadline and controller.state == "CANCEL_ARMED":
+            await asyncio.sleep(0.02)
+        writer.write(json.dumps({"cancelled": controller._cancel_detected}).encode())
         await writer.drain()
         writer.close()
 
     server = await asyncio.start_unix_server(handle, path=str(SOCKET_PATH))
     async with server:
         await server.serve_forever()
+
+
+async def live(whisper: WhisperDaemon, live_deliver: bool = False, orchestrator_target: str | None = None):
+    """Real microphone capture, driving the same state machine --simulate
+    validated. Prints every state transition and wake-word score above a
+    noise floor, per the requirement that first-run confidence comes from
+    seeing it react, not from trusting it silently.
+    """
+    import sounddevice as sd
+
+    controller = LiveController(whisper, live_deliver, orchestrator_target)
+    loop = asyncio.get_running_loop()
+    frame_queue: asyncio.Queue = asyncio.Queue()
+
+    def audio_callback(indata, frames, time_info, status):
+        if status:
+            print(f"[audio] status: {status}", file=sys.stderr)
+        pcm16 = (indata[:, 0] * 32767).astype(np.int16)
+        loop.call_soon_threadsafe(frame_queue.put_nowait, pcm16)
+
+    print(f"[{time.strftime('%H:%M:%S')}] opening microphone ({SAMPLE_RATE}Hz mono, {VAD_FRAME_SAMPLES}-sample frames)")
+    stream = sd.InputStream(
+        channels=1, samplerate=SAMPLE_RATE, blocksize=VAD_FRAME_SAMPLES, dtype="float32", callback=audio_callback,
+    )
+    with stream:
+        print(f"[{time.strftime('%H:%M:%S')}] listening for \"hey jarvis\" -- Ctrl-C to stop")
+        cancel_task = asyncio.create_task(cancel_socket_server(controller))
+        try:
+            while True:
+                frame = await frame_queue.get()
+                controller.on_frame(frame, time.time())
+        finally:
+            cancel_task.cancel()
 
 
 def _install_clean_shutdown_handler():
@@ -470,6 +678,13 @@ def _install_clean_shutdown_handler():
 
 
 if __name__ == "__main__":
+    # Without this, stdout is fully buffered whenever it's not a TTY (e.g.
+    # redirected to a log file, or piped) -- print() calls sit unflushed
+    # until the buffer fills or the process exits. Found by testing: a full
+    # run's worth of state-transition output appeared all at once, only on
+    # clean shutdown, instead of live. That's the opposite of the "confidence
+    # from watching it react in real time" requirement for Ayman's first run.
+    sys.stdout.reconfigure(line_buffering=True)
     _install_clean_shutdown_handler()
     ap = argparse.ArgumentParser()
     ap.add_argument("--simulate", help="drive the state machine over a pre-recorded wav instead of live mic")
@@ -488,5 +703,4 @@ if __name__ == "__main__":
         if args.simulate:
             simulate(args.simulate, whisper, live_deliver=args.live_deliver, orchestrator_target=args.target)
         else:
-            print("Live mic + cancel-socket loop not wired up yet -- use --simulate <wav> for now.", file=sys.stderr)
-            sys.exit(1)
+            asyncio.run(live(whisper, live_deliver=args.live_deliver, orchestrator_target=args.target))

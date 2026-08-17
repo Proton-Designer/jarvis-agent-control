@@ -122,6 +122,113 @@ thresholds despite the worse failure mode on the stop side — the
 measured FP rate at 0.3 is ~zero on realistic content, so lowering it
 costs nothing.
 
+## THE GOVERNING ASYMMETRY: start fails closed, stop/cancel fail open
+
+Discovered why this needs to be a stated rule, not left implicit, during
+live-mic testing: **ordinary two-syllable human names can score
+indistinguishably from a genuine "Hey Jarvis" on the acoustic model
+alone.** Measured directly, same voice, same batch: "Hey Charles" = 0.998,
+"Hey Travis" = 0.983, against a genuine "Hey Jarvis" baseline of 0.999.
+Not marginal — **no threshold separates 0.998 from 0.999.** Voice-
+assistant phrases ("Hey Siri," "Hey Google," "Hey Alexa," "Hey Cortana,"
+"Hey Meta") were tested too and are completely clean (0.000 across every
+voice) — the risk isn't assistant-phrase confusion, it's the "Hey
+[two-syllable name]" prosodic shape generally, which ordinary names can
+share by chance.
+
+This is why the two lowered-threshold decisions above (stop, cancel) do
+**not** generalize to the start trigger, and why that's correct rather
+than inconsistent:
+
+- **Stop/cancel fail open** (biased toward accepting) because a false
+  negative there is recoverable — repeat the phrase.
+- **Start fails closed** (biased toward rejecting) because a false
+  *accept* opens the microphone and transcribes whatever is said next in
+  the room. Measured, not hypothetical: this happened during live testing
+  (see below). Not recoverable the way a missed stop is.
+
+**Fix: a second-stage verification pass, `verify_wake_trigger()`, gates
+every IDLE -> CAPTURING transition.** On an acoustic trigger, the ~2s
+pre-roll+trigger buffer is sent to the already-warm whisper-server; the
+transition only proceeds if the transcript recognizably contains "jarvis"
+(permissive on spelling — "Jarvis"/"jarvis,"/"Jervis" all accepted,
+case-insensitive). Empty, ambiguous, or wrong-name transcripts reject and
+stay IDLE. Every rejection is logged with the score and the transcript so
+the false-rejection rate is measurable over time, not assumed.
+
+**Why stacking these two checks works instead of being redundant:** the
+acoustic model scores *prosodic shape* (why "Hey Charles" fools it).
+Whisper transcribes *phonetic content* (where "Charles" and "Jarvis" are
+nothing alike). The two failure modes are uncorrelated — a phrase that
+fools one has no particular reason to also fool the other.
+
+**Verified end to end, not just designed:** re-ran the full 35-clip
+distractor set (major assistant phrases + 32 phonetically-varied "Hey
+[name]" constructions, 3 voices) through the actual two-stage pipeline.
+**Both acoustic false-starts (Hey Charles, Hey Travis) were rejected 100%
+of the time** ("REJECTED by verification (heard: 'Hey Charles')"), while
+**all 3 genuine "Hey Jarvis" calibration clips (3 voices) verified
+correctly and opened CAPTURING.** 0/32 distractors survive to a false
+capture; 3/3 genuine triggers still work. This isn't "reject everything"
+— it discriminates correctly in both directions.
+
+**Cost:** one synchronous whisper-server call (~0.5s measured) per
+trigger evaluation, including rejected ones. Paid once at the very start
+of a dictation that then runs for minutes — invisible in context, same
+conclusion as every other latency measurement this session. In live mode
+this blocks the frame-processing loop for that ~0.5s; deliberate, not an
+oversight — nothing else needs the event loop during that window
+(verification only runs transitioning into a new dictation, never
+mid-capture or mid-cancel), so it wasn't worth the complexity of moving
+it to an executor.
+
+**Checked directly whether that block drops audio, given Ayman is
+expected to keep talking through it** ("Hey Jarvis, tell the API
+gateway..." as one continuous utterance, no pause — precisely the no-
+pause case documented earlier in this file). It doesn't, and this was
+verified rather than assumed: `asyncio.Queue` + `call_soon_threadsafe`
+don't drop scheduled callbacks during a synchronous blocking stretch,
+they queue; the next `await` point (right after `on_frame()` returns,
+by which time state has already flipped to CAPTURING) drains them in
+order into the now-existing session. Verified with a real-time-paced
+test of the actual `LiveController`/`on_frame`/`verify_wake_trigger`
+code (not a simplified stand-in) against "Hey Jarvis, tell the API
+gateway to run its test suite and check the response time logs" with
+zero pause: transcript came back complete, nothing clipped off the
+front. **What this does NOT cover:** the OS/PortAudio hardware buffer
+underneath `sounddevice` — that layer requires a real microphone to
+test and is on the live-mic session list, not claimed as verified here.
+
+**Documented fallback, not built:** a custom-trained "Jarvis"-only
+openWakeWord model (openWakeWord supports this, ~1hr per their docs).
+Not needed while verification gets false starts to zero on tested cases —
+if that changes with real-voice data, this is the next lever. A custom
+model could additionally be **speaker-specific** (trained on Ayman's
+voice specifically), which would mean media playback and other people's
+voices don't trigger detection *at all*, not just get caught downstream —
+a real advantage if verification alone ever proves insufficient.
+
+## The incident that motivated this: real ambient audio during live-mic testing
+
+First live-mic run (agent-supervised, offline/no-audio-produced by the
+agent at the time) triggered twice within 20 seconds on real audio in the
+room — scores 0.829 and 0.988, the second with coherent, sentence-
+structured transcribed content. Two hypotheses were raised and both were
+checked against evidence and refuted (a same-machine TTS source, ruled
+out by timestamp — the logged audio was 37 minutes earlier; a concurrent
+real-voice test, ruled out because none was running) before landing on
+the explanation that held up: the cross-trigger risk documented above.
+Not proven to be the specific cause of that incident, but a specific,
+testable, statistically strong candidate, unlike the two ideas that came
+before it and didn't survive checking.
+
+Handling at the time: stopped the live-mic process immediately, deleted
+the captured transcript content without repeating or retaining it
+(the diagnostic scores/timestamps were kept — non-sensitive, needed to
+investigate), and held all further live-mic testing for explicit
+re-authorization. That's the standing procedure for anything like this
+going forward, not a one-off response.
+
 **Stop-word audio handling, and two more bugs this surfaced:** the
 pending (not-yet-VAD-cut) audio when the stop word fires can't simply be
 transcribed as-is — "Hey Jarvis" would show up verbatim at the end of the
