@@ -26,11 +26,34 @@ cap for unbroken speech is implemented but not yet tested against real
 ../l1_wakeword/.venv/bin/python vad_chunker.py --file clip.wav
 ```
 
-## whisper_daemon.py — persistent transcription (next)
+## whisper_daemon.py — persistent transcription
 
-Not built yet. Requirement carried from the L2 benchmark work: must keep
-the whisper.cpp model resident (whisper-server or bindings) rather than
-shelling out to `whisper-cli` per chunk — cold-start (process + Metal
-backend init + model load) was measured at ~350-400ms on top of whichever
-model's own load+encode time, and a long dictation would pay that
-repeatedly, once per chunk, if built the naive way.
+Wraps `whisper-server` (built-in to the whisper.cpp Homebrew formula) as a
+context manager: starts it once, keeps the model resident, and calls its
+HTTP `/inference` endpoint per chunk instead of shelling out to
+`whisper-cli` per chunk. Cold subprocess-per-call was measured earlier at
+~1.1s/utterance (process + Metal backend init + model load, on top of the
+model's own ~184ms load + ~460ms encode for q5_0). Warm, over HTTP to an
+already-running server: **measured ~0.50s/request**, consistently, across
+5 back-to-back calls — matches the predicted savings.
+
+Confirmed empirically (not assumed from docs) that `/inference` accepts a
+per-request `prompt` form field, separate from the server's startup
+`--prompt` flag. This is what makes re-injecting the runtime vocabulary
+(live tmux session names + "Jarvis") on every chunk possible without
+restarting the server — the whole point of the chunked-transcription
+redesign after the architecture pivot.
+
+```
+../l1_wakeword/.venv/bin/python whisper_daemon.py --file clip.wav --prompt "Nightwatch, MyKhutbah, Ship Check, Jarvis"
+```
+
+Defaults to `~/.whisper-models/ggml-large-v3-turbo-q5_0.bin` (the model
+pick from the benchmark). Clean shutdown verified — no orphaned
+`whisper-server` process after the context manager exits.
+
+## Not yet built
+
+The piece that ties L1's toggle events + this chunker + this daemon into
+one running loop, and the client for gu2s6tnt's `deliver_transcript` /
+`listen_for_cancel` handoff. Next.
