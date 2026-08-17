@@ -26,7 +26,6 @@ that way until that follow-up lands.
 """
 from __future__ import annotations
 
-import re
 import sys
 import time
 from pathlib import Path
@@ -42,34 +41,13 @@ from transport import TmuxTransport  # noqa: E402
 sys.path.insert(0, str(Path(__file__).parent))
 from classifier import classify, Classification, CONTROL, QUERY, CHAT, DISPATCH, UNSURE  # noqa: E402
 from ollama_client import phrase_answer  # noqa: E402
+from session_match import resolve_session as _resolve_session  # noqa: E402
 
 # In-process only, one dictation handled fully before the next starts
 # (same non-overlap assumption latency_log.py's docstring already states
 # for this project) -- no persistence needed for "repeat that" to reach
 # across a single daemon.py run.
 _last_utterance: dict[str, str | None] = {"text": None}
-
-
-def _session_tokens(session_id: str, alias: str | None) -> set[str]:
-    name = session_id[len("claude-"):] if session_id.lower().startswith("claude-") else session_id
-    tokens = {t for t in re.split(r"[-_\s]+", name.lower()) if t}
-    if alias:
-        tokens.add(alias.lower())
-    return tokens
-
-
-def _resolve_session(text: str) -> dict | None:
-    """Best-effort match of a spoken session reference ("the gateway",
-    "shipcheck") against real, currently-running sessions -- token
-    overlap against session_id (minus the "claude-" prefix) and alias,
-    never a guess. Returns None on no match OR an ambiguous multiple
-    match; callers must treat that as "don't know," not pick one."""
-    words = {w for w in re.findall(r"[a-z0-9]+", text.lower())}
-    matches = [
-        s for s in list_sessions()
-        if _session_tokens(s["session_id"], s.get("alias")) & words
-    ]
-    return matches[0] if len(matches) == 1 else None
 
 
 def _phrase(kind: str, text: str, facts: str = "") -> str:

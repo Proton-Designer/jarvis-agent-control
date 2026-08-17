@@ -1,30 +1,34 @@
 """
-Thin Ollama HTTP client for the L2.5 concierge. One warm model
-(qwen2.5:3b-instruct-q4_K_M), used for both classification-fallback and
-CHAT/QUERY answer phrasing.
+Thin Ollama HTTP client for the L2.5 concierge. One warm model, used for
+both classification-fallback and CHAT/QUERY answer phrasing.
 
-Single-model choice is measured, not assumed. Ran the same 12-case
-classification test against both locally-pulled qwen2.5 variants:
+MODEL CHOICE, REVISED (2026-08-17): qwen2.5:7b-instruct-q4_K_M, not 3B.
 
-  qwen2.5:3b-instruct-q4_K_M   ~190ms/call warm, 10/12 correct
-  qwen2.5:7b-instruct-q4_K_M   ~510ms/call warm (one cold-load outlier
-                                excluded), 11/12 correct -- the extra
-                                correct case was exactly the ambient-
-                                speech "Iron Man Jarvis" transcript
-                                (7B said UNSURE, the safe answer per the
-                                governing rule; 3B said CHAT, the unsafe
-                                one -- see classifier.py and concierge.py
-                                for how this gap gets covered elsewhere,
-                                not by the model)
+Original choice was 3B, on a 12-case test where it scored 10/12 to 7B's
+11/12 at roughly a third of the latency (~190ms vs ~510ms/call warm).
+That held up until the Lead asked for a DANGEROUS-direction-weighted
+28-case adversarial set (natural filler/hesitation, question-phrased
+instructions, self-correction, implicit targets, instructions buried
+after a chat-shaped opener) -- the shape of input a false-negative on
+DISPATCH actually looks like in real speech, not a constructed edge case.
 
-7B's ~510ms average is already over budget for classification alone
-(spec: <150ms) before whisper/delivery/say latency is added on top, and
-its one real cold-load in this test took ~3.6s -- reloading a 4.7GB model
-mid-conversation would blow the entire fast path by itself. 3B stays
-comfortably under budget everywhere and one warm model is simpler to keep
-resident than two. If phrasing quality specifically (not classification)
-ever needs the difference, revisit 7B for that call only -- not measured
-as necessary yet.
+On that set: 3B produced 5/20 dangerous-direction failures (25%) --
+including a real instruction lost to CHAT on ordinary filler ("So yeah I
+was thinking, um, maybe we should have the api gateway run its test
+suite") and two implicit-addressee questions read as pure QUERY instead
+of an instruction to check something. 7B produced 1/20 (5%), and that one
+was a genuinely ambiguous test case both models landed on the same way,
+not a clear model failure.
+
+Per the Lead's decision rule stated in advance: if 3B fails in the
+dangerous direction anywhere 7B doesn't, the latency difference stops
+being "accuracy for speed" and becomes "safety for speed" -- and a slow
+correct classification beats a fast silent one by a margin not worth
+arguing about. Taking the ~510ms hit deliberately, not optimizing it
+away -- classification is a minority of the fast-path total regardless
+(Whisper dominates, see l1_wakeword's latency measurements), and the
+keyword tier in classifier.py already skips the model call entirely for
+CONTROL and many QUERY phrasings.
 """
 from __future__ import annotations
 
@@ -39,7 +43,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent / "l4_controller"))
 from latency_log import log_event  # noqa: E402
 
 OLLAMA_URL = "http://localhost:11434/api/generate"
-MODEL = "qwen2.5:3b-instruct-q4_K_M"
+MODEL = "qwen2.5:7b-instruct-q4_K_M"
 # Re-sent on every call (not just once at startup) -- keeps the model
 # resident between turns without a separate keep-warm daemon/thread.
 KEEP_ALIVE = "30m"
@@ -65,6 +69,19 @@ Examples:
 "good morning" -> CHAT
 "tell shipcheck to redeploy the api" -> DISPATCH
 "have mobile run the test suite" -> DISPATCH
+"""
+
+RECLASSIFY_DISPATCH_OR_QUERY_SYSTEM = """A transcript mentions a real, currently-running session by name, so it cannot be idle chat -- it is either an INSTRUCTION for that session to do something, or a QUESTION asking about that session's current state. Answer with ONLY one word: DISPATCH or QUERY.
+
+DISPATCH - asks the session to DO something: run, check, fix, restart, redeploy, compact, pull changes, etc. Includes indirect/polite phrasing ("can you have it...", "would it be possible to...", "get it to...") and instructions buried after other talk -- if an action is requested anywhere, it's DISPATCH.
+QUERY - asks ABOUT the session's current state, without requesting any action: what it's doing, whether it's done, how much it's cost.
+
+Examples:
+"can someone check if the api gateway is healthy" -> DISPATCH
+"would it be possible to have the billing session check its logs" -> DISPATCH
+"so yeah, um, maybe we should have the gateway run its test suite" -> DISPATCH
+"what's the gateway up to" -> QUERY
+"has shipcheck finished yet" -> QUERY
 """
 
 PHRASE_SYSTEM_QUERY = """You are Jarvis, a voice assistant. Answer the user's question in ONE short spoken sentence (under 20 words), using ONLY the facts given below. Do not add any detail not present in the facts. If the facts say nothing relevant or state is unknown, say you don't have that information -- never guess.
@@ -120,6 +137,24 @@ def classify_with_model(text: str) -> str:
     prompt = CLASSIFY_SYSTEM + f'\n"{text}" -> '
     response, elapsed_ms = _generate(prompt, num_predict=6)
     log_event("concierge_classify", tier="model", elapsed_ms=round(elapsed_ms, 1), raw_response=response)
+    if not response.strip():
+        return ""
+    return response.strip().split()[0].upper().rstrip(".,:;")
+
+
+def reclassify_dispatch_or_query(text: str) -> str:
+    """Called only when a transcript names a live session AND the
+    5-way classifier said CHAT -- see classifier.py's hard rule. A
+    second, constrained call rather than silently forcing UNSURE, so a
+    real QUERY ("what's the gateway doing") that happens to also
+    mis-trigger CHAT still gets answered locally instead of being
+    forwarded needlessly. Only ever returns "DISPATCH", "QUERY", or
+    something the caller must treat as neither (garbage/timeout) --
+    CONTROL/CHAT/UNSURE are not valid answers to this prompt by
+    construction, so classifier.py doesn't need to re-check for them."""
+    prompt = RECLASSIFY_DISPATCH_OR_QUERY_SYSTEM + f'\n"{text}" -> '
+    response, elapsed_ms = _generate(prompt, num_predict=6)
+    log_event("concierge_reclassify_dispatch_or_query", elapsed_ms=round(elapsed_ms, 1), raw_response=response)
     if not response.strip():
         return ""
     return response.strip().split()[0].upper().rstrip(".,:;")

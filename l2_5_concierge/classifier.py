@@ -20,13 +20,23 @@ The governing rule (classification fails toward DISPATCH) is enforced
 structurally here, not just by prompt wording: any model response that
 isn't one of the five known labels becomes UNSURE, never silently
 dropped or defaulted to CHAT.
+
+Second hard rule, added after a 28-case DANGEROUS-direction-weighted
+adversarial test (see ollama_client.py's docstring for the full
+numbers): a transcript that names a real, currently-running session is
+never CHAT, regardless of what the model says. The two worst measured
+failures were both a real instruction, naming a real session, landing on
+CHAT -- silently speaking nothing and forwarding nothing. CHAT is
+structurally unavailable in that case; see mentions_live_session and the
+constrained re-ask in classify().
 """
 from __future__ import annotations
 
 import re
 from dataclasses import dataclass
 
-from ollama_client import classify_with_model
+from ollama_client import classify_with_model, reclassify_dispatch_or_query
+from session_match import mentions_live_session
 
 CONTROL = "CONTROL"
 QUERY = "QUERY"
@@ -91,4 +101,20 @@ def classify(text: str) -> Classification:
     label = classify_with_model(stripped)
     if label not in VALID_LABELS:
         label = UNSURE  # model returned something unrecognized -- fail toward forwarding, not toward chat
+
+    if label == CHAT and mentions_live_session(stripped):
+        # Hard rule, deterministic, applies regardless of which model is
+        # behind classify_with_model: a transcript naming a real running
+        # session is never idle chat -- the two worst measured failures
+        # (a real instruction landing on CHAT, silently speaking nothing
+        # and forwarding nothing) both named a live session. CHAT is
+        # structurally unavailable here; re-ask constrained to DISPATCH
+        # or QUERY only, so the model still gets to distinguish "do this"
+        # from "tell me about this" rather than everything becoming a
+        # blind forward. See ollama_client.reclassify_dispatch_or_query.
+        label = reclassify_dispatch_or_query(stripped)
+        if label not in (DISPATCH, QUERY):
+            label = UNSURE  # constrained re-ask still didn't land cleanly -- fail toward forwarding
+        return Classification(label, tier="session_override")
+
     return Classification(label, tier="model")
