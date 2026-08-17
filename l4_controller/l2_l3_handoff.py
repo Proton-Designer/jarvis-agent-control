@@ -127,4 +127,18 @@ def deliver_transcript(
     mark_dispatch_forwarded(str(path))
     result = transport.deliver(orchestrator_target, pointer)
     log_event("pointer_delivered", ok=result.ok, target=orchestrator_target)
+    if not result.ok:
+        # Confirmed live (2026-08-17, cold-start validation): without this,
+        # a missing/not-ready orchestrator session produced total silence
+        # after "Got it, working on it" -- nothing downstream ever checked
+        # this DeliveryResult, so a failed handoff looked identical to one
+        # that was still being worked on, forever. Worse than a stack
+        # trace: at least a stack trace shows up somewhere. This is the
+        # one place that can speak the failure, because it's the only
+        # code that ever sees it -- L3 never gets a turn to report a
+        # pointer it was never sent.
+        if result.reason == "no_session":
+            speak("I couldn't reach the orchestrator session -- is it running?")
+        else:
+            speak(f"I couldn't hand that off to the orchestrator: {result.detail}.")
     return result
