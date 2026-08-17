@@ -49,6 +49,19 @@ MODEL = "qwen2.5:7b-instruct-q4_K_M"
 KEEP_ALIVE = "30m"
 REQUEST_TIMEOUT_S = 5.0
 
+# Derived from the phrasing prompts' own "under 20 words" instruction,
+# not a bare magic number: English averages roughly 1.3-1.5 tokens/word
+# for this kind of BPE tokenizer, so 20 words is ~26-30 tokens. Doubled
+# for headroom (punctuation, the model occasionally running a few words
+# over, PHRASE_SYSTEM_QUERY's own summarize-not-enumerate instruction
+# still needing room to name a count or a pattern) rather than tuned
+# tight -- a cut-off mid-word response ("...claude-held") is a real,
+# user-facing defect (found when the "what's running" QUERY had to
+# summarize 9 sessions and ran past a 40-token cap), and the fix has to
+# hold even when the facts given to the model are long, not just for the
+# short-answer common case this was originally sized for.
+PHRASE_MAX_TOKENS = 64
+
 CLASSIFY_SYSTEM = """You classify a single spoken instruction to a voice assistant named Jarvis into exactly one category. Answer with ONLY the category word, nothing else.
 
 CONTROL - a command about the conversation itself: cancel, never mind, stop, repeat that, say that again.
@@ -84,7 +97,9 @@ Examples:
 "has shipcheck finished yet" -> QUERY
 """
 
-PHRASE_SYSTEM_QUERY = """You are Jarvis, a voice assistant. Answer the user's question in ONE short spoken sentence (under 20 words), using ONLY the facts given below. Do not add any detail not present in the facts. If the facts say nothing relevant or state is unknown, say you don't have that information -- never guess.
+PHRASE_SYSTEM_QUERY = """You are Jarvis, a voice assistant. Answer the user's question in ONE short SPOKEN sentence (under 20 words), using ONLY the facts given below. Do not add any detail not present in the facts. If the facts say nothing relevant or state is unknown, say you don't have that information -- never guess.
+
+This gets read aloud, not displayed as text. If the facts contain a long list (many session names, many items), SUMMARIZE it instead of reading every item -- a count, a pattern, "mostly test sessions" -- nobody wants a list of names read to them one by one. Example: given "currently running sessions: claude-a, claude-b, claude-c, claude-d, claude-e", say something like "You've got 5 sessions running" or "5 sessions running, mostly test ones" -- not a recitation of all 5 names.
 
 Facts:
 {facts}
@@ -167,6 +182,6 @@ def phrase_answer(kind: str, text: str, facts: str = "") -> tuple[str, float]:
     report; the model is explicitly told it has no state access)."""
     template = PHRASE_SYSTEM_QUERY if kind == "QUERY" else PHRASE_SYSTEM_CHAT
     prompt = template.format(facts=facts, text=text)
-    response, elapsed_ms = _generate(prompt, num_predict=40, temperature=0.3)
+    response, elapsed_ms = _generate(prompt, num_predict=PHRASE_MAX_TOKENS, temperature=0.3)
     log_event("concierge_phrase_model_call", kind=kind, elapsed_ms=round(elapsed_ms, 1))
     return response, elapsed_ms
