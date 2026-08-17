@@ -46,7 +46,20 @@ OLLAMA_URL = "http://localhost:11434/api/generate"
 MODEL = "qwen2.5:7b-instruct-q4_K_M"
 # Re-sent on every call (not just once at startup) -- keeps the model
 # resident between turns without a separate keep-warm daemon/thread.
-KEEP_ALIVE = "30m"
+#
+# 5m, not the original 30m: `ollama ps` showed the 7B still resident with
+# 27 minutes left on a single test query Ayman never made -- 4.7GB of
+# real unified memory (Apple Silicon has no separate VRAM pool, so this
+# directly competes with his other 8+ Claude sessions and Office) held
+# for half an hour of non-use. 5m keeps a real back-and-forth dictation
+# session warm (the case that matters most) while giving the memory back
+# during any real gap -- coding, a meeting, anything longer than a few
+# minutes, which is most of his actual time. The tradeoff this costs: a
+# ~2.9s cold-load penalty (measured: 3.06s cold vs 0.19s warm) on the
+# first call after a 5m+ gap -- covered for the common "first dictation
+# of a session" case by daemon.py's startup warm-up, see warm_up()'s
+# call site there.
+KEEP_ALIVE = "5m"
 REQUEST_TIMEOUT_S = 5.0
 
 # Derived from the phrasing prompts' own "under 20 words" instruction,

@@ -869,6 +869,27 @@ if __name__ == "__main__":
     ap.add_argument("--target", default=None, help="orchestrator tmux session name (only used with --live-deliver)")
     args = ap.parse_args()
 
+    # Warm the L2.5 concierge's local model once at startup, not on the
+    # first real dictation. With KEEP_ALIVE now at 5m (down from 30m, to
+    # stop holding 4.7GB of real unified memory hostage through long idle
+    # gaps -- see ollama_client.py's KEEP_ALIVE comment), the cold-load
+    # penalty (measured: ~3s) would otherwise land on whichever dictation
+    # happens to be the first in a session, or the first after any 5m+
+    # gap mid-session -- and for a QUERY specifically, that 3s is pure
+    # silence before anything is spoken (transcribe -> classify -> answer
+    # is the order), exactly the "did it hear me?" moment this project
+    # has designed against everywhere else. Startup is different: Ayman
+    # is already watching terminal output and expecting things to
+    # initialize, so a few seconds here is invisible the way the same
+    # few seconds mid-conversation would not be. Printed, not silent --
+    # same "confidence from watching it react" reasoning as every other
+    # state transition in this file.
+    print(f"[{time.strftime('%H:%M:%S')}] warming classifier model...")
+    sys.path.insert(0, str(Path(__file__).parent.parent / "l2_5_concierge"))
+    from ollama_client import warm_up  # noqa: E402
+    warm_up()
+    print(f"[{time.strftime('%H:%M:%S')}] ready")
+
     kwargs = {"model_path": Path(args.model)} if args.model else {}
     with WhisperDaemon(**kwargs) as whisper:
         if args.simulate:
