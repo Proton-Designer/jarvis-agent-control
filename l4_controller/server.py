@@ -2,16 +2,17 @@
 L4 controller, exposed to the L3 orchestrator as an MCP stdio server.
 
 Tools:
-  list_sessions()               -- live discovery, for L3 to build a routing
-                                    plan before confirming/delivering anything.
-  confirm_plan(summary, window) -- speaks the plan summary, opens the
-                                    cancel window in parallel, returns
-                                    whether Ayman cancelled it.
-  deliver_batch(instructions)   -- delivers each {target, payload}, retries
-                                    a BUSY refusal once, speaks per-delivery
-                                    acks, and speaks + returns an explicit
-                                    summary of anything that still didn't go.
-                                    Never silently drops a partial failure.
+  list_sessions()                -- live discovery, for L3 to build a routing
+                                     plan before confirming/delivering anything.
+  confirm_plan(phrases, window)  -- speaks the plan as a paced sequence of
+                                     short phrases (one per instruction),
+                                     opens the cancel window in parallel,
+                                     returns whether Ayman cancelled it.
+  deliver_batch(instructions)    -- delivers each {target, payload}, retries
+                                     a BUSY refusal once, speaks per-delivery
+                                     acks, and speaks + returns an explicit
+                                     summary of anything that still didn't go.
+                                     Never silently drops a partial failure.
 
 Retry policy (only BUSY is retried): a busy target is very likely mid-tool-
 call and will clear on its own shortly. A PERMISSION_PROMPT or UNKNOWN/real-
@@ -91,34 +92,14 @@ def report_dispatch_stage(stage: str, detail: str = "") -> dict:
     return {"ok": True}
 
 
-@app.tool()
-def speak_now(text: str) -> dict:
-    """Speak a short, immediate status update -- for narrating each
-    instruction's resolution AS IT LANDS while you're still working
-    through the rest of a dictation, instead of staying silent until
-    confirm_plan's single end-of-turn summary (this is most of the felt
-    latency: Ayman standing in silence for a long routing turn, even
-    though individual resolutions happen well before the turn ends).
-
-    Purely informational -- no cancel window, no gating, does not affect
-    delivery in any way. confirm_plan's summary + cancel window and
-    deliver_batch's actual sends are completely unchanged by this;
-    calling speak_now describes an in-progress plan, it never commits or
-    delivers anything itself. Routes through the same say_feedback.speak()
-    as everything else, so JARVIS_MUTE governs it identically and every
-    call lands in ~/.jarvis/say_log.jsonl.
-
-    Keep it short (one instruction's worth, e.g. "Sending the deploy
-    command to the API gateway") -- this is a running commentary, not a
-    replacement for confirm_plan's actual summary."""
-    speak(text)
-    return {"ok": True}
+PHRASE_PAUSE_MARKER = " [[slnc 400]] "  # macOS `say` embedded-silence command, ~0.4s
 
 
 @app.tool()
-def confirm_plan(summary: str, cancel_window_s: float = 2.5) -> dict:
-    """Speak the routing plan summary (with a "say Hey Jarvis to cancel"
-    hint appended) and open a cancel window in parallel (not sequentially).
+def confirm_plan(phrases: list[str], cancel_window_s: float = 2.5) -> dict:
+    """Speak the routing plan as a paced sequence of short phrases -- one
+    per resolved or held instruction -- with a "say Hey Jarvis to cancel"
+    hint appended, and open a cancel window in parallel (not sequentially).
     cancel_window_s == 0 disables the window (config, not hardcoded).
     Returns {"confirmed": bool, "cancel_window_available": bool} --
     confirmed is False if Ayman re-said the "Hey Jarvis" wake word during
@@ -127,8 +108,24 @@ def confirm_plan(summary: str, cancel_window_s: float = 2.5) -> dict:
     False means there was no real cancel
     window at all (L1's socket down) -- this is spoken explicitly ("Cancel
     unavailable.") and deliver_batch independently refuses delivery to any
-    non-test target in that state, regardless of what this call returns."""
-    result = speak_with_cancel_window(summary, cancel_window_s)
+    non-test target in that state, regardless of what this call returns.
+
+    `phrases` is a LIST, not one flat sentence -- e.g. ["API gateway: run
+    its test suite and check its health endpoint.", "Mobile app: run its
+    tests -- the redeploy was dropped.", "Holding the backend restart --
+    ambiguous between three sessions."], one entry per resolved OR held
+    instruction. This replaced an earlier design (speak_now, called
+    mid-turn to narrate each resolution as it landed) that relied on you
+    remembering to call a second tool under load and turned out
+    unreliable specifically on complex turns -- exactly the turns where
+    a dense, hard-to-follow single sentence needs pacing most. Passing a
+    list here gets the same "hear it build up, not one run-on sentence"
+    benefit from code that paces deterministically (a short embedded
+    pause between each phrase) and cannot fail to run, instead of a
+    second tool call that can be skipped under instruction-following
+    load. Keep each phrase short and self-contained."""
+    joined = PHRASE_PAUSE_MARKER.join(p.strip() for p in phrases if p.strip())
+    result = speak_with_cancel_window(joined, cancel_window_s)
     return {"confirmed": not result["cancelled"], "cancel_window_available": result["available"]}
 
 
