@@ -34,6 +34,7 @@ import time
 from pathlib import Path
 
 from cancel_listener import listen_for_cancel
+from latency_log import log_event
 
 MUTE = os.environ.get("JARVIS_MUTE", "0") == "1"
 SAY_LOG_PATH = Path.home() / ".jarvis" / "say_log.jsonl"
@@ -97,7 +98,9 @@ def speak_with_cancel_window(text: str, cancel_window_s: float) -> dict:
     control.
     """
     if cancel_window_s <= 0:
+        log_event("confirm_spoken", cancel_window_s=cancel_window_s)
         speak(text)
+        log_event("cancel_window_closed", cancelled=False, available=True)
         return {"cancelled": False, "available": True}
 
     result = {}
@@ -107,10 +110,14 @@ def speak_with_cancel_window(text: str, cancel_window_s: float) -> dict:
 
     listener_thread = threading.Thread(target=_listen, daemon=True)
     listener_thread.start()
+    log_event("confirm_spoken", cancel_window_s=cancel_window_s)
     speak(f"{text} Say Hey Jarvis to cancel.")  # non-blocking Popen; overlaps with the listener
     listener_thread.join()
 
     cancel_result = result["cancel_result"]
     if not cancel_result.available:
         speak("Cancel unavailable.")
+    log_event(
+        "cancel_window_closed", cancelled=cancel_result.cancelled, available=cancel_result.available
+    )
     return {"cancelled": cancel_result.cancelled, "available": cancel_result.available}

@@ -37,6 +37,7 @@ from __future__ import annotations
 import time
 from pathlib import Path
 
+from latency_log import log_event
 from say_feedback import speak
 from transport import Transport
 
@@ -65,7 +66,10 @@ def deliver_transcript(
     transport: Transport,
     orchestrator_target: str = DEFAULT_ORCHESTRATOR_TARGET,
 ):
+    log_event("handoff_received", chars=len(text))
     speak("Got it, working on it.")
     path = write_dictation(text)
     pointer = f"New dictation at {path} — read it and route the instructions inside."
-    return transport.deliver(orchestrator_target, pointer)
+    result = transport.deliver(orchestrator_target, pointer)
+    log_event("pointer_delivered", ok=result.ok, target=orchestrator_target)
+    return result
