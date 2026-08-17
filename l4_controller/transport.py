@@ -22,6 +22,12 @@ from slash_guard import is_safe_slash_payload, load_known_commands
 class DeliveryResult:
     ok: bool
     detail: str = ""
+    # Structured reason code for callers that need to act on WHY a delivery
+    # failed (e.g. batch-delivery retry logic), without string-matching
+    # `detail`. One of: None (ok), "no_session", "unsafe_slash", "busy",
+    # "permission_prompt", "unknown" (real/ambiguous pane content, not
+    # classifiable as ready), "tmux_error".
+    reason: str | None = None
 
 
 class Transport(ABC):
@@ -83,7 +89,9 @@ class TmuxTransport(Transport):
 
     def deliver(self, target: str, payload: str) -> DeliveryResult:
         if not self.session_exists(target):
-            return DeliveryResult(ok=False, detail=f"no such tmux session: {target}")
+            return DeliveryResult(
+                ok=False, detail=f"no such tmux session: {target}", reason="no_session"
+            )
 
         # Embedded newlines are NOT safe to send literally: a raw \n inside a
         # single -l payload acts as an actual Enter keypress mid-instruction,
@@ -104,6 +112,7 @@ class TmuxTransport(Transport):
                 detail=f"refused: '{normalized}' looks like a slash command but isn't a "
                 "complete, known one — partial slash commands can submit a different "
                 "command than the one typed",
+                reason="unsafe_slash",
             )
 
         pane_text = self.capture_pane(target)
@@ -112,6 +121,7 @@ class TmuxTransport(Transport):
             return DeliveryResult(
                 ok=False,
                 detail=f"refused: {target} pane state is {state.value}, not ready",
+                reason=state.value,
             )
 
         try:
@@ -129,6 +139,7 @@ class TmuxTransport(Transport):
             return DeliveryResult(
                 ok=False,
                 detail=f"tmux send-keys failed: {e.stderr.decode(errors='replace')}",
+                reason="tmux_error",
             )
 
         return DeliveryResult(ok=True, detail=f"delivered to {target}")
