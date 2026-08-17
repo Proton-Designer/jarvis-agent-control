@@ -1,0 +1,145 @@
+VOICE-CONTROLLED CLAUDE ORCHESTRATOR - PROJECT CONTEXT
+=========================================================
+
+OVERALL OBJECTIVE
+------------------
+Build a hands-free voice control system that lets Ayman run multiple Claude
+Code sessions in parallel (whatever projects are active at the time) and issue
+commands to any of them using only his voice, with zero manual keyboard or
+button input during normal operation. The system should feel like talking to
+one persistent "orchestrator" agent that understands which underlying Claude
+Code session a spoken instruction is meant for, and delivers that instruction
+automatically.
+
+CORE PROBLEM BEING SOLVED
+---------------------------
+Currently, working with multiple Claude Code sessions requires manually
+switching terminal windows/tabs and typing or pasting prompts into each one.
+This is slow and breaks flow when juggling several active projects. The goal
+is to remove that manual switching and typing entirely, replacing it with
+continuous, always-on voice interaction.
+
+HIGH-LEVEL ARCHITECTURE (4 LAYERS)
+------------------------------------
+
+Layer 1: Always-On Wake Word Listener
+  - A lightweight background process running continuously on Ayman's MacBook.
+  - Uses a wake word detection engine (e.g. Porcupine, or an open-source
+    equivalent) to sit idle at near-zero CPU cost.
+  - Only activates audio capture when it detects a trigger phrase (e.g.
+    "Hey Orchestrator" or similar custom wake word).
+  - Avoids the need for any push-to-talk button.
+
+Layer 2: Local Speech-to-Text Transcription
+  - Once triggered, captures the spoken audio.
+  - Runs it through a locally-hosted Whisper model (small or medium size is
+    sufficient) for transcription.
+  - Runs entirely on-device (Apple Silicon), so it is free and has no token
+    cost, unlike using Claude for transcription.
+  - Output: plain text transcript of what Ayman said.
+
+Layer 3: Claude Orchestrator Session (the "brain")
+  - A dedicated Claude Code session running in its own tmux pane, whose sole
+    job is interpreting intent, not doing the actual project work.
+  - Receives the transcribed text as input.
+  - Determines:
+      a) Which target session/project the instruction is meant for,
+         inferred from context and natural language even if not
+         explicitly named. Target sessions are discovered live at
+         runtime - never hardcoded - so the system works for whatever
+         projects happen to be active.
+      b) What the actual payload/instruction to send is.
+      c) When one dictation contains instructions for several different
+         sessions, how to split it into per-target instructions.
+  - This is where Claude's reasoning advantage over a local/offline LLM
+    matters most - local models were considered for this role (zero cost)
+    but rejected in favor of Claude because loose/ambiguous references to
+    "which session" need strong contextual reasoning to route correctly.
+
+Layer 4: Execution / Delivery via Controller Script
+  - A small controller script (Python or Node) exposed to the orchestrator
+    Claude session as a callable tool/function.
+  - Discovers live tmux sessions at call time and resolves a spoken
+    friendly name to an actual tmux session identifier. The registry is
+    built dynamically from what is actually running; an optional alias
+    file may override or supplement it, but no project names are baked
+    into the system.
+  - When called by the orchestrator with a target session + text payload, it
+    shells out a `tmux send-keys` command that:
+      1. Targets the correct tmux session/pane by name.
+      2. Types the instruction text into that session.
+      3. Sends an Enter keypress as part of the same command so it submits
+         automatically, with no manual action needed.
+
+END-TO-END FLOW (SUMMARY)
+----------------------------
+1. Ayman speaks a wake word.
+2. Wake word engine detects it and begins capturing audio.
+3. Captured audio is transcribed locally via Whisper (free, no tokens).
+4. Transcribed text is piped into the dedicated Claude orchestrator session.
+5. Orchestrator reasons about which target Claude Code session is meant and
+   what instruction to send.
+6. Orchestrator calls the controller script (as a tool) with target session
+   + payload.
+7. Controller script runs `tmux send-keys` to inject the text into the
+   correct session and hits Enter automatically.
+8. Target Claude Code session receives and begins acting on the instruction,
+   with zero manual keyboard interaction from Ayman throughout the entire
+   loop.
+
+EXISTING ENVIRONMENT / CONSTRAINTS
+--------------------------------------
+- Platform: MacBook (Apple Silicon).
+- tmux is already installed and is the preferred session multiplexer -
+  each Claude Code project session should run in its own named tmux session,
+  named after whatever project it is running (convention: claude-<project>).
+  The set of projects changes over time and must never be hardcoded.
+- Ayman is already comfortable running Claude Code sessions independently;
+  this system sits on top of / alongside that existing workflow, it does not
+  replace it.
+- Ayman holds a Claude Max plan and uses Claude Code daily, so the
+  orchestrator session itself running as a Claude Code instance is assumed
+  acceptable from a usage/cost standpoint. Token cost is a consideration
+  only for the orchestrator's reasoning calls, not for transcription
+  (handled locally/free via Whisper) or wake word detection (also local/free).
+
+TECH STACK SUMMARY
+----------------------
+- Session multiplexing: tmux (already installed)
+- Wake word detection: Porcupine (or comparable open-source alternative)
+- Speech-to-text: Whisper (local, small/medium model), run on-device
+- Reasoning / routing / intent detection: Claude Code session (Claude Max
+  plan), acting as the orchestrator - not a local LLM, due to superior
+  contextual reasoning for ambiguous session references
+- Session control / execution: Custom controller script (Python or Node)
+  using `tmux send-keys`, exposed to the orchestrator as a callable tool
+
+KEY DESIGN DECISIONS AND RATIONALE
+---------------------------------------
+- Local LLM (e.g. an Ollama-hosted model) was considered for the orchestrator
+  role to avoid token costs, but rejected in favor of Claude because the
+  routing/intent-detection task requires nuanced natural language
+  understanding (inferring intended target session from loose, ambiguous
+  phrasing) that local models handle less reliably.
+- Whisper was chosen for transcription specifically because it is both
+  free/local AND high quality, so there is no need to trade off cost against
+  transcription accuracy the way there might be for the reasoning layer.
+- tmux send-keys was chosen as the delivery mechanism because it allows
+  programmatic text injection plus an automatic Enter keypress into any
+  named session, fully eliminating manual keyboard interaction at the final
+  delivery step.
+
+NEXT STEPS / OPEN ITEMS (FOR IMPLEMENTATION AGENT)
+--------------------------------------------------------
+1. Define exact wake word and evaluate Porcupine setup/licensing on macOS.
+2. Decide on Whisper implementation (e.g. whisper.cpp for on-device speed
+   vs. openai-whisper Python package) and benchmark latency.
+3. Build and test the controller script's tmux send-keys function in
+   isolation before wiring it to Claude.
+4. Design the tool/function schema so the orchestrator Claude Code session
+   can call the controller script reliably.
+5. Establish a naming convention for tmux sessions and a live-discovery
+   mechanism that maps spoken names to whatever sessions are running at
+   that moment. No project names are hardcoded anywhere in the system.
+6. Test end-to-end latency from wake word trigger to instruction delivery,
+   and iterate on any lag between layers.
