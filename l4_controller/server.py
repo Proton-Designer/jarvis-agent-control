@@ -52,11 +52,14 @@ def list_sessions() -> list[dict]:
 
 @app.tool()
 def confirm_plan(summary: str, cancel_window_s: float = 2.5) -> dict:
-    """Speak the routing plan summary and open a cancel window in parallel
-    (not sequentially). cancel_window_s == 0 disables the window (config,
-    not hardcoded). Returns {"confirmed": bool, "cancel_window_available":
-    bool} -- confirmed is False if Ayman said the cancel word during the
-    window. cancel_window_available False means there was no real cancel
+    """Speak the routing plan summary (with a "say Hey Jarvis to cancel"
+    hint appended) and open a cancel window in parallel (not sequentially).
+    cancel_window_s == 0 disables the window (config, not hardcoded).
+    Returns {"confirmed": bool, "cancel_window_available": bool} --
+    confirmed is False if Ayman re-said the "Hey Jarvis" wake word during
+    the window (that re-detection IS the cancel trigger, not a separate
+    "cancel" keyword -- see cancel_listener.py for why). cancel_window_available
+    False means there was no real cancel
     window at all (L1's socket down) -- this is spoken explicitly ("Cancel
     unavailable.") and deliver_batch independently refuses delivery to any
     non-test target in that state, regardless of what this call returns."""

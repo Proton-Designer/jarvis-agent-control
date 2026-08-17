@@ -2,8 +2,17 @@
 Client for L1's cancel-window listener, per the contract agreed with the
 L1/L2 owner: a unix domain socket at ~/.jarvis/l1.sock. Request:
 {"cmd": "listen_for_cancel", "timeout_s": <float>}. Response:
-{"cancelled": <bool>} once the word is heard or the window closes,
+{"cancelled": <bool>} once the trigger fires or the window closes,
 whichever is first.
+
+Trigger, as of the ruling on 2026-08-17: a re-detection of the "Hey Jarvis"
+wake word during the confirm window counts as cancel — NOT a separate
+"cancel"/"stop" keyword. openWakeWord ships no pretrained model for those,
+and "Hey Jarvis" already has a measured false-positive rate (0/5 on bare
+"Jarvis"), which matters because the failure that costs us here is a false
+NEGATIVE — Ayman says it, it isn't detected, delivery proceeds anyway.
+L4's protocol/shape is unaffected either way; only the acoustic trigger
+L1 listens for changed. See say_feedback.py for where this is spoken.
 
 FAILS CLOSED, not open. An earlier version of this returned a bare bool and
 degraded a missing/broken socket to `False` ("not cancelled") — which reads
