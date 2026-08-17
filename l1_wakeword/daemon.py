@@ -101,15 +101,18 @@ SILENCE_SAFETY_NET_S = 50.0
 SOCKET_PATH = Path.home() / ".jarvis" / "l1.sock"
 
 
-def default_deliver(text: str):
-    """Production hookup -- imports L4's real handoff. Deliberately NOT called
-    by --simulate (see below): that would fire a real `tmux send-keys` into
-    whatever "claude-orchestrator" session exists, which is not something a
-    test run should ever do by accident."""
+def default_deliver(text: str, orchestrator_target: str | None = None):
+    """Production hookup -- imports L4's real handoff. Only called by
+    --simulate when --live-deliver is explicitly passed (see below); the
+    default is still print-only, so an ordinary test run never fires a
+    real `tmux send-keys` by accident. --live-deliver exists specifically
+    for the coordinated end-to-end pipeline test with L4/L3, not for
+    routine testing."""
     sys.path.insert(0, str(Path(__file__).parent.parent / "l4_controller"))
-    from l2_l3_handoff import deliver_transcript  # noqa
+    from l2_l3_handoff import deliver_transcript, DEFAULT_ORCHESTRATOR_TARGET  # noqa
     from transport import TmuxTransport  # noqa
-    return deliver_transcript(text, TmuxTransport())
+    target = orchestrator_target or DEFAULT_ORCHESTRATOR_TARGET
+    return deliver_transcript(text, TmuxTransport(), orchestrator_target=target)
 
 
 class DictationSession:
@@ -208,10 +211,23 @@ def _write_wav(path: Path, pcm_i16: np.ndarray):
         wf.writeframes(pcm_i16.tobytes())
 
 
-def simulate(dictation_wav: str, whisper: WhisperDaemon):
+def _report_and_deliver(text: str, live_deliver: bool, orchestrator_target: str | None, stop_wall_time: float):
+    print(f"FULL TRANSCRIPT: {text!r}")
+    if not live_deliver:
+        print("(simulate mode: not calling deliver_transcript -- would send to L4 here; pass --live-deliver to actually send)")
+        return
+    result = default_deliver(text, orchestrator_target=orchestrator_target)
+    handoff_wall_time = time.time()
+    print(f"DELIVERED via deliver_transcript: {result!r}")
+    print(f"stop-word-to-handoff-return wall-clock: {handoff_wall_time - stop_wall_time:.3f}s")
+
+
+def simulate(dictation_wav: str, whisper: WhisperDaemon, live_deliver: bool = False, orchestrator_target: str | None = None):
     """Drives the IDLE -> CAPTURING -> IDLE state machine over a pre-recorded
-    file, as if it arrived from a live mic frame-by-frame. Uses a print-only
-    deliver stub -- this must never touch a real tmux session."""
+    file, as if it arrived from a live mic frame-by-frame. Print-only by
+    default -- live_deliver=True is an explicit opt-in for the coordinated
+    end-to-end pipeline test, not the default for routine testing, so an
+    ordinary run never touches a real tmux session by accident."""
     wake_model = load_model()
     vad = SileroVAD()
     tmp_wav = Path("/tmp/jarvis_daemon_chunk.wav")
@@ -250,20 +266,20 @@ def simulate(dictation_wav: str, whisper: WhisperDaemon):
                 print(f"[{t:.2f}s] wake word ignored -- inside post-stop cooldown (score={score:.3f})")
         elif state == "CAPTURING":
             if not session.in_guard(now=t) and stop_fired:
-                print(f"[{t:.2f}s] wake word (post-guard, score={score:.3f}) -> finalize")
+                stop_wall_time = time.time()  # real wall-clock: whisper/deliver calls take real time even in --simulate
+                print(f"[{t:.2f}s] wake word (post-guard, score={score:.3f}) -> finalize (stop detected at wall-clock {stop_wall_time:.3f})")
                 session.finalize_on_stop_word(tmp_wav)  # trims the stop phrase's own audio, keeps real content
                 text = session.full_transcript()
-                print(f"[{t:.2f}s] FULL TRANSCRIPT: {text!r}")
-                print(f"[{t:.2f}s] (simulate mode: not calling deliver_transcript -- would send to L4 here)")
+                _report_and_deliver(text, live_deliver, orchestrator_target, stop_wall_time)
                 state = "IDLE"
                 session = None
                 cooldown_until = t + POST_STOP_COOLDOWN_S
             elif session.silence_exceeds_safety_net():
+                stop_wall_time = time.time()
                 print(f"[{t:.2f}s] {SILENCE_SAFETY_NET_S}s silence safety net -> finalize (no stop word heard)")
                 session.flush_final(tmp_wav)  # no stop word to strip -- transcribe everything buffered
                 text = session.full_transcript()
-                print(f"[{t:.2f}s] FULL TRANSCRIPT: {text!r}")
-                print(f"[{t:.2f}s] (simulate mode: not calling deliver_transcript -- would send to L4 here)")
+                _report_and_deliver(text, live_deliver, orchestrator_target, stop_wall_time)
                 state = "IDLE"
                 session = None
                 cooldown_until = None  # no wake word involved in this ending, nothing to cool down from
@@ -276,6 +292,7 @@ def simulate(dictation_wav: str, whisper: WhisperDaemon):
         session.flush_final(tmp_wav)
         text = session.full_transcript()
         print(f"[end of file] FULL TRANSCRIPT (file ended mid-dictation, no stop word or safety-net timeout reached): {text!r}")
+        _report_and_deliver(text, live_deliver, orchestrator_target, time.time())
 
     tmp_wav.unlink(missing_ok=True)
 
@@ -317,12 +334,19 @@ if __name__ == "__main__":
     ap = argparse.ArgumentParser()
     ap.add_argument("--simulate", help="drive the state machine over a pre-recorded wav instead of live mic")
     ap.add_argument("--model", default=None, help="whisper.cpp model path override")
+    ap.add_argument(
+        "--live-deliver", action="store_true",
+        help="actually call deliver_transcript() at the end of the dictation (real tmux send-keys into the "
+             "orchestrator pane) instead of just printing. For the coordinated end-to-end pipeline test only "
+             "-- never the default, so routine testing can't touch a real session by accident.",
+    )
+    ap.add_argument("--target", default=None, help="orchestrator tmux session name (only used with --live-deliver)")
     args = ap.parse_args()
 
     kwargs = {"model_path": Path(args.model)} if args.model else {}
     with WhisperDaemon(**kwargs) as whisper:
         if args.simulate:
-            simulate(args.simulate, whisper)
+            simulate(args.simulate, whisper, live_deliver=args.live_deliver, orchestrator_target=args.target)
         else:
             print("Live mic + cancel-socket loop not wired up yet -- use --simulate <wav> for now.", file=sys.stderr)
             sys.exit(1)
