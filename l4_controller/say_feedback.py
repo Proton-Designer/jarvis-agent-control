@@ -39,6 +39,16 @@ from latency_log import log_event
 MUTE = os.environ.get("JARVIS_MUTE", "0") == "1"
 SAY_LOG_PATH = Path.home() / ".jarvis" / "say_log.jsonl"
 
+# Default `say` voice is a novelty/robotic system voice (Fred/Alex-class),
+# not something meant to be heard on every turn. Samantha is the best
+# quality voice actually installed on this machine (checked via `say -v
+# '?'` — no Siri/Enhanced/Premium voices are downloaded locally; those
+# require a one-time System Settings > Accessibility > Spoken Content
+# download this can't trigger headlessly). Overridable via JARVIS_VOICE so
+# picking a downloaded premium voice later is a config change, not a code
+# change.
+VOICE = os.environ.get("JARVIS_VOICE", "Samantha")
+
 
 def _log_say(text: str, muted: bool) -> None:
     SAY_LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
@@ -59,7 +69,9 @@ def speak(text: str) -> None:
     _log_say(text, MUTE)
     if MUTE:
         return
-    subprocess.Popen(["say", text], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    subprocess.Popen(
+        ["say", "-v", VOICE, text], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
+    )
 
 
 def speak_with_cancel_window(text: str, cancel_window_s: float) -> dict:
