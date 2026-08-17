@@ -45,21 +45,38 @@ def _has_dim_code(text: str) -> bool:
 
 @dataclass
 class PaneStatePatterns:
-    # Checked first — most dangerous state to misclassify. Captured from a
-    # real modal (the "Set up auto mode?" onboarding dialog): boxed numbered
-    # options with an explicit confirm/cancel footer. Structurally this is
-    # the same shape a real tool-permission approval box uses, but an actual
-    # tool-permission prompt was NOT captured (auto mode suppressed it for
-    # every tool call tested, including `rm`) — see validation notes.
+    # Checked first — most dangerous state to misclassify. Originally
+    # captured from a different real modal (the "Set up auto mode?"
+    # onboarding dialog: Enter-to-confirm + numbered options) -- an actual
+    # per-tool-call approval prompt was NOT captured at the time (auto
+    # mode suppressed it for every tool call tested).
+    #
+    # A REAL tool-approval prompt (manual mode, a Write request, v2.1.234,
+    # live-driven 2026-08-17 -- the onboarding-dialog shape is not the
+    # production hazard this state exists to guard) turned out to look
+    # completely different and matched NONE of the original patterns:
+    #   Do you want to create canary_probe2.txt?
+    #   ❯ 1. Yes
+    #     2. Yes, allow all edits during this session (shift+tab)
+    #     3. No
+    #
+    #   Esc to cancel · Tab to amend
+    # Numbered choice, no "Enter to confirm" text anywhere -- it fell
+    # through to persistent_view's "esc to cancel" match instead and was
+    # misclassified as PERSISTENT_VIEW. Not an active hazard today (both
+    # states currently refuse delivery the same way, and the one place
+    # PERSISTENT_VIEW auto-sends a key sends Escape, which this menu's own
+    # footer documents as safe-cancel) but clearly wrong, and dangerous
+    # the moment anything branches differently on the two states.
     #
     # NOTE: "esc to cancel" is deliberately NOT in this list on its own.
     # Real Claude Code persistent views (/cost, /usage, /config, /status,
     # /help) show "Esc to cancel" alone with no actionable choice attached
     # -- an earlier version of this pattern set matched on that phrase
     # alone and misclassified all of them as PERMISSION_PROMPT. The real
-    # discriminator is "Enter to confirm" co-occurring with it, which only
-    # happens on an actual actionable modal (a numbered choice Enter would
-    # commit to) -- see permission_prompt_pair below.
+    # discriminators are "Enter to confirm" (the onboarding-dialog shape)
+    # or "do you want to" / "tab to amend" (the real tool-approval shape)
+    # co-occurring with "esc to cancel" -- see permission_prompt_pairs.
     permission_prompt: list[str] = field(
         default_factory=lambda: [
             r"do you want to proceed",
@@ -71,31 +88,40 @@ class PaneStatePatterns:
     # is what "esc to cancel" alone (a persistent view) fails and a real
     # actionable modal passes.
     permission_prompt_pairs: list[tuple[str, str]] = field(
-        default_factory=lambda: [(r"enter to confirm", r"esc to cancel")]
+        default_factory=lambda: [
+            (r"enter to confirm", r"esc to cancel"),
+            (r"do you want to", r"esc to cancel"),
+            (r"tab to amend", r"esc to cancel"),
+        ]
     )
     # A persistent, non-input view is open (info display, nothing
-    # selectable -- see PERSISTENT_VIEW handling in transport.py). "Esc to
-    # cancel" alone, without "Enter to confirm", is the confirmed marker
-    # across every view command tested (2026-08-17): /cost, /usage,
-    # /config, /status, /help all show it.
+    # selectable -- see PERSISTENT_VIEW handling in transport.py).
     #
-    # Second marker added 2026-08-17 (Claude Code v2.1.234): the settings
-    # views gained a tab bar ("Settings  Status  Config  Usage  Stats")
-    # and grew taller, and /cost's and /usage's content now routinely
-    # exceeds a normal 80x24 tmux pane -- confirmed live, including at a
-    # much larger 220x50 pane, where it STILL didn't fit. That pushes
-    # "Esc to cancel" off the visible viewport, so it alone no longer
-    # reliably detects these two. The tab-bar row renders immediately
-    # near the top regardless of content height, so it's used as an
-    # additional, independent marker -- safe to OR in because
-    # PERMISSION_PROMPT is still checked first in classify_pane, so an
-    # actual actionable modal (if it ever shared this tab bar) would
-    # still be caught there before falling through to this check.
-    # /status's content still fits and still shows "Esc to cancel"
-    # directly, so it isn't affected, but the tab bar is a redundant hit
-    # there too.
+    # Deliberately does NOT include bare "esc to cancel" -- that footer
+    # turned out to be shared with the real tool-approval prompt (see
+    # permission_prompt_pairs above; found live 2026-08-17 testing the
+    # real prompt, not the onboarding-dialog substitute this state was
+    # originally validated against), so it is not a positive signature of
+    # a read-only view, just a UI convention both states happen to use.
+    # An earlier version of this pattern set matched on it alone and, in
+    # sequence, misclassified: first every /cost-style view as
+    # PERMISSION_PROMPT, then (after that was fixed) the real
+    # tool-approval prompt as PERSISTENT_VIEW. Same root cause both times
+    # -- defining a state by a shared, generic marker instead of
+    # something specific to it -- so this state now uses ONLY a marker
+    # confirmed unique to it: the settings-view tab bar ("Settings
+    # Status  Config  Usage  Stats"), confirmed present on /cost, /usage,
+    # and /status (2026-08-17, Claude Code v2.1.234) and absent from the
+    # real tool-approval prompt. If Claude Code changes this tab bar too,
+    # the intended failure mode is UNKNOWN (fail closed), not silently
+    # relabeling as some other known state -- that's the whole point of
+    # not matching on the shared footer.
+    #
+    # PERMISSION_PROMPT is checked first in classify_pane, so an actual
+    # actionable modal that happened to also carry this tab bar would
+    # still be caught there before ever reaching this check.
     persistent_view: list[str] = field(
-        default_factory=lambda: [r"esc to cancel", r"settings\s+status\s+config\s+usage\s+stats"]
+        default_factory=lambda: [r"settings\s+status\s+config\s+usage\s+stats"]
     )
 
     # Live/active indicator only. Real shape observed: a spinner glyph +
