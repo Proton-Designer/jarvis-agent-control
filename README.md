@@ -206,7 +206,19 @@ Consequences this codebase enforces, not just documents:
   the `say` subprocess is skipped, and every call (muted or not) is
   logged with an explicit `muted` field to `~/.jarvis/say_log.jsonl` so a
   clean muted test run is never mistaken for evidence the audio path
-  works.
+  works. **Set it via a server's declared `env` in `.mcp.json`
+  (`l3_orchestrator_test/.mcp.json`), not by exporting it in a shell.**
+  Found live: `export`ing it in one shell has no effect on an
+  already-running orchestrator process, which inherited its environment
+  from whenever its tmux session was created — a mute "confirmed" that
+  way is not actually in effect for the process that matters, and there
+  is no way to verify from outside that it is. A declared `env` value is
+  read fresh on every process spawn and is verifiable by reading the
+  config file; ambient shell state is neither. `l3_orchestrator_test`
+  ships muted by default for exactly this reason — audio for a real
+  session (like Ayman's live-voice test) is an explicit, considered
+  unmute, not something inherited from whatever shell happened to start
+  it.
 - **No unattended microphone capture, ever.** Live-mic testing only
   happens while Ayman is actively present and watching, and stops when
   watching stops — this is a standing rule, not a per-incident decision
@@ -227,6 +239,18 @@ target is genuinely at an input line.** Every place that gate gets
 relaxed or a new interaction shape gets added, re-derive from evidence
 whether the assumption still holds; don't extend a working pattern to a
 new case by analogy alone.
+
+**Second, related lesson, same underlying principle in a third context:**
+a safety-relevant setting that depends on ambient shell state is not
+actually a control — L1's "Hey Jarvis" state-machine invariant and L4's
+command classification table are both *verifiable by reading*; a mute
+flag `export`ed into one shell and assumed to reach an already-running
+process in a different one is not, and it fails silently (a "confirmed"
+mute can simply not be in effect, with nothing available to check that
+from outside). Prefer declared configuration a process carries with it —
+an `env` entry in `.mcp.json`, not a shell export — for anything where
+"is this actually on" needs to be answerable by reading a file rather
+than trusting a report.
 
 ## What isn't built yet
 
