@@ -1,0 +1,1 @@
+Tell the data pipeline to wrap up whatever it's working on, and then compact.

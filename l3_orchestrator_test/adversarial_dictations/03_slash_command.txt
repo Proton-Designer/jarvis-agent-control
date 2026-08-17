@@ -1,0 +1,1 @@
+Tell the API gateway to compact its context, it's getting long.

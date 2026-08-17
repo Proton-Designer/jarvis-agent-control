@@ -1,0 +1,1 @@
+About that hotfix thing from earlier — I meant the API gateway.

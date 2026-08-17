@@ -1,0 +1,1 @@
+Tell the data pipeline to restart the — actually, scratch that, don't restart it, just tell it to check its logs instead.
