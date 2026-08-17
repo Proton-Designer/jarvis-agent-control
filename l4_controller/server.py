@@ -53,6 +53,7 @@ def list_sessions() -> list[dict]:
     (/compact, /cost, /usage, /status) as those are the only built-ins
     verified safe; anything else needs to actually be in this list for
     that target or it will be refused at delivery."""
+    log_event("list_sessions_called")
     return _list_sessions()
 
 
