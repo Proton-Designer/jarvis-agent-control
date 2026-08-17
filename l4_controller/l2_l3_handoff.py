@@ -17,6 +17,19 @@ multiple targets in one utterance):
 L1/L2 does not need to change anything on their end for this — same
 function, same signature, same busy/rejected DeliveryResult contract they
 already agreed to.
+
+IMMEDIATE ACK: the real end-to-end pipeline run (2026-08-17) measured
+~2 minutes from Ayman finishing speaking to the last delivery landing,
+dominated by orchestrator reasoning, not audio processing. The actual UX
+failure isn't that duration -- it's the SILENCE: Ayman has no signal the
+system heard him until routing finishes, which risks him re-triggering
+the wake word and starting a second, overlapping dictation. So
+deliver_transcript speaks a short, generic acknowledgement (via
+say_feedback, so JARVIS_MUTE governs it like everything else) the instant
+it's called -- before writing the file, before the pointer delivery,
+before any orchestrator reasoning has happened. Deliberately generic, not
+"routing N instructions": at this point nothing has parsed the dictation
+yet, so a specific count would be a guess dressed up as a fact.
 """
 
 from __future__ import annotations
@@ -24,6 +37,7 @@ from __future__ import annotations
 import time
 from pathlib import Path
 
+from say_feedback import speak
 from transport import Transport
 
 DICTATIONS_DIR = Path.home() / ".jarvis" / "dictations"
@@ -51,6 +65,7 @@ def deliver_transcript(
     transport: Transport,
     orchestrator_target: str = DEFAULT_ORCHESTRATOR_TARGET,
 ):
+    speak("Got it, working on it.")
     path = write_dictation(text)
     pointer = f"New dictation at {path} — read it and route the instructions inside."
     return transport.deliver(orchestrator_target, pointer)
