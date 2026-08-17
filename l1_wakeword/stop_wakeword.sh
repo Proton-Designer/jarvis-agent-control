@@ -1,9 +1,9 @@
 #!/bin/bash
-# The real kill switch. `kill`/`pkill` on the daemon process will NOT
-# work as an off switch -- the LaunchAgent's KeepAlive is bare `true`,
-# so launchd just restarts it. This is the one command that actually
-# stops it and keeps it stopped (bootout unregisters the job; it won't
-# come back on the next login/reboot until re-loaded).
+# The documented off switch. A plain `kill`/Ctrl-C also works now
+# (daemon.py catches the signal and exits cleanly, and KeepAlive's
+# SuccessfulExit:false only restarts on a crash) -- this script does
+# that AND fully unloads the LaunchAgent (bootout unregisters the job),
+# so it won't come back on the next login/reboot until reloaded either.
 set -euo pipefail
 PLIST="$HOME/Library/LaunchAgents/com.jarvis.l1wakeword.plist"
 

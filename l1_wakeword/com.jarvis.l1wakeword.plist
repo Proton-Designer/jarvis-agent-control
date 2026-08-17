@@ -10,17 +10,26 @@
         <string>/Users/aymanmohammed/Desktop/Jarvis/l1_wakeword/run_daemon.sh</string>
     </array>
 
-    <!-- Survives reboot (RunAtLoad) and any exit, crash or clean (KeepAlive
-         bare true) -- deliberately not the SuccessfulExit:false dict form,
-         because "clean exit still restarts" is what makes launchctl
-         bootout/unload the ONE reliable way to actually stop this, rather
-         than there being a kill-vs-launchctl ambiguity about what "off"
-         means. See README's "How to turn this off" section -- do not try
-         to stop this with kill/pkill, it will just come back. -->
+    <!-- Survives reboot (RunAtLoad) and crashes/abnormal exits (KeepAlive
+         SuccessfulExit:false) -- but a CLEAN exit (daemon.py handles
+         SIGTERM/SIGINT and exits 0) stays down. This is deliberate, not
+         the bare-true form used in an earlier version of this file: a
+         microphone listener that resurrects itself after a deliberate
+         `kill` is, from the outside, indistinguishable from something
+         that can't be turned off -- a trust problem independent of
+         whether the code is correct. `kill`, stop_wakeword.sh (which
+         also fully unloads via launchctl bootout), and a wedged/crashed
+         process recovering on its own are now three properties that all
+         behave the way a reasonable person expects. See README's
+         "How to turn this off" section, which is first in the file on
+         purpose. -->
     <key>RunAtLoad</key>
     <true/>
     <key>KeepAlive</key>
-    <true/>
+    <dict>
+        <key>SuccessfulExit</key>
+        <false/>
+    </dict>
 
     <key>StandardOutPath</key>
     <string>/Users/aymanmohammed/Desktop/Jarvis/l1_wakeword/logs/wakeword.log</string>

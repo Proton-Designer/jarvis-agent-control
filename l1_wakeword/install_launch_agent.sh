@@ -25,5 +25,5 @@ echo "legitimately in use, per the standing rule):"
 echo
 echo "  launchctl bootstrap gui/\$(id -u) $PLIST_DST"
 echo
-echo "To stop it later, use stop_wakeword.sh -- see README, plain kill will"
-echo "not work (KeepAlive restarts it)."
+echo "To stop it later: kill <pid>, or ./stop_wakeword.sh to also fully"
+echo "unload it. See README's 'How to turn this off' section."

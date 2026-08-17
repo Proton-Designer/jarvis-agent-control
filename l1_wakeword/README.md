@@ -2,6 +2,26 @@
 
 Continuous "Hey Jarvis" detection via [openWakeWord](https://github.com/dscripka/openWakeWord).
 
+## How to turn this off
+
+Put first because someone reaching for this section is usually in a hurry.
+Three ways, all of them work:
+
+- **`kill <pid>` (or Ctrl-C if running in a terminal).** Stops it and it
+  stays stopped — `daemon.py` catches the signal and exits cleanly, and
+  the LaunchAgent's `KeepAlive` (`SuccessfulExit: false`) only restarts on
+  a *crash*, not a clean exit. If this is running as the LaunchAgent, it
+  won't come back on its own after this.
+- **`./stop_wakeword.sh`.** The documented method — same effect as `kill`
+  plus it fully unloads the LaunchAgent (`launchctl bootout`), so it also
+  won't come back on the next login/reboot until reloaded.
+- **Confirm it's actually off:** `launchctl list | grep jarvis` — no
+  output means it's not running and not registered to start.
+
+Full reasoning for why `KeepAlive` is configured this way (and why an
+earlier version of this file got it wrong) is in "Process lifecycle"
+below.
+
 ## Why openWakeWord, not Porcupine
 
 Porcupine (Picovoice) was the originally-planned engine. Checked live before
@@ -295,6 +315,12 @@ re-prompts across an interpreter path change is an empirical question
 that needs a real permission grant and a real trigger event to test, not
 something reasoning from documentation can settle. That session should
 also cover: idle CPU/battery measured over a real stretch (not claimed),
-and confirming `KeepAlive` genuinely survives a sleep/wake cycle — both
-also need the listener actually running, so one session covers all three
-asks instead of three separate interruptions.
+confirming `KeepAlive` genuinely survives a sleep/wake cycle, and
+verifying macOS's orange menu-bar mic indicator actually appears while
+this is listening. If it does, that's a real always-on trust signal we
+get for free and should be documented as the at-a-glance way to know
+whether Jarvis is live — if it somehow doesn't, that's worth knowing
+too, since the visible-indicator point above currently rests on
+`stop_wakeword.sh` and process-list checks alone. All three need the
+listener actually running, so one session covers them instead of three
+separate interruptions.

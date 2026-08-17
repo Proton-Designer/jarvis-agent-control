@@ -38,6 +38,7 @@ no benefit; one state machine sidesteps it entirely.
 import argparse
 import asyncio
 import json
+import signal
 import sys
 import time
 import wave
@@ -330,7 +331,24 @@ async def cancel_socket_server(wake_model, threshold: float = RECOVERABLE_THRESH
         await server.serve_forever()
 
 
+def _install_clean_shutdown_handler():
+    """A plain `kill`/Ctrl-C must actually stop this and stay stopped --
+    see com.jarvis.l1wakeword.plist's KeepAlive comment for why (a
+    microphone listener that resurrects itself after being deliberately
+    killed is a trust problem, not just a reliability one). Exiting 0
+    here is what makes launchd's SuccessfulExit:false treat this as a
+    clean stop rather than a crash to restart from. sys.exit() raises
+    SystemExit, which still unwinds the `with WhisperDaemon(...)` block
+    below normally, so whisper-server gets torn down too."""
+    def handle(signum, frame):
+        print(f"\nreceived signal {signum}, shutting down cleanly", file=sys.stderr)
+        sys.exit(0)
+    signal.signal(signal.SIGTERM, handle)
+    signal.signal(signal.SIGINT, handle)
+
+
 if __name__ == "__main__":
+    _install_clean_shutdown_handler()
     ap = argparse.ArgumentParser()
     ap.add_argument("--simulate", help="drive the state machine over a pre-recorded wav instead of live mic")
     ap.add_argument("--model", default=None, help="whisper.cpp model path override")
