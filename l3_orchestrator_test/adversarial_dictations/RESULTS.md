@@ -101,6 +101,25 @@ revisit if it feels wrong in practice. CLAUDE.md updated accordingly; both
 `held.json` entry fields (`surfaced_and_unresolved`, `timestamp`) are
 required going forward.
 
+**Observed validation of the dual-clock design (2026-08-17), not a
+hypothetical:** during unrelated mute-verification testing, an
+undelivered `/compact` (from scenario 09's real occurrence, logged
+17:18:00Z) was still sitting in `held.json` with
+`surfaced_and_unresolved: 0` — it had never once been spoken aloud in
+any subsequent dictation (the dictations run between then and now either
+didn't touch that target or didn't reach the point of speaking a
+summary). On the surfacing-count clock alone, that hold would have
+stayed live **indefinitely** — a zombie instruction with no lifetime
+bound, waiting to be delivered with 90-minutes-stale intent (or longer)
+whenever it eventually happened to get surfaced. Only the independent
+60-minute wall-clock bound caught it, correctly expired it at 97 minutes,
+and the orchestrator announced the drop aloud rather than either
+silently dropping it or leaving it live forever. This occurred in normal
+operation within hours of the rule shipping, not as a constructed edge
+case — the second clock is not belt-and-braces caution, it's the only
+thing that closes the "never surfaced" gap the first clock structurally
+cannot reach on its own. Do not simplify it away as redundant.
+
 ## Persistent-view control-plane commands (`/cost`, `/usage`, `/config`, `/model`, `/status`, `/help`)
 
 Characterized all six live (2026-08-17). `/cost`, `/usage`, `/config`,
