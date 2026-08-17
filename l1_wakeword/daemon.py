@@ -639,9 +639,31 @@ async def live(whisper: WhisperDaemon, live_deliver: bool = False, orchestrator_
     controller = LiveController(whisper, live_deliver, orchestrator_target)
     loop = asyncio.get_running_loop()
     frame_queue: asyncio.Queue = asyncio.Queue()
+    overflow_count = 0
 
     def audio_callback(indata, frames, time_info, status):
-        if status:
+        # This callback runs on PortAudio's own real-time thread, not the
+        # asyncio loop -- it must never block, so it does exactly two things:
+        # convert the frame and hand it off via call_soon_threadsafe (non-
+        # blocking, doesn't wait on the loop even if the loop is itself
+        # blocked inside on_frame()'s verification call). No locks, no I/O,
+        # no shared state with loop-side code beyond this one handoff. This
+        # is what makes the OS-level input buffer not a real overflow risk
+        # during the ~0.5s verification block -- the callback keeps firing
+        # on schedule regardless of what the loop is doing.
+        #
+        # input_overflow is the direct, measurable check on that claim
+        # rather than trusting the reasoning: if PortAudio ever couldn't
+        # hand off audio before the next block was ready, it sets this
+        # flag. Logged explicitly (not just the raw status object) and
+        # counted, so "zero overflows across a session with repeated
+        # triggers" is a real, checkable pass rather than absence of
+        # evidence.
+        nonlocal overflow_count
+        if status.input_overflow:
+            overflow_count += 1
+            print(f"[{time.strftime('%H:%M:%S')}] *** INPUT OVERFLOW #{overflow_count} *** (audio may have been dropped)", file=sys.stderr)
+        elif status:
             print(f"[audio] status: {status}", file=sys.stderr)
         pcm16 = (indata[:, 0] * 32767).astype(np.int16)
         loop.call_soon_threadsafe(frame_queue.put_nowait, pcm16)
@@ -659,6 +681,7 @@ async def live(whisper: WhisperDaemon, live_deliver: bool = False, orchestrator_
                 controller.on_frame(frame, time.time())
         finally:
             cancel_task.cancel()
+            print(f"[{time.strftime('%H:%M:%S')}] input overflow count this session: {overflow_count}")
 
 
 def _install_clean_shutdown_handler():
