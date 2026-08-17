@@ -170,7 +170,16 @@ def classify(text: str) -> Classification:
     for pat in _QUERY_PATTERNS:
         if pat.search(stripped):
             return Classification(QUERY, tier="keyword", matched_pattern=pat.pattern)
-    label = classify_with_model(stripped)
+    # Lowercased before every model call in this function, not just
+    # assess_retention's -- same fix, same reason. classify_with_model
+    # itself was re-verified stable across casing on the full 28-case
+    # adversarial set (0/28 flipped, same 1/20 residual either way), but
+    # a narrower reproduction on a different phrasing did flip DISPATCH
+    # vs UNSURE by capitalization alone. Normalizing removes the whole
+    # axis rather than trusting that the validated set covers every
+    # phrasing this will ever see in production.
+    normalized = stripped.lower()
+    label = classify_with_model(normalized)
     if label not in VALID_LABELS:
         label = UNSURE  # model returned something unrecognized -- fail toward forwarding, not toward chat
 
@@ -184,7 +193,7 @@ def classify(text: str) -> Classification:
         # or QUERY only, so the model still gets to distinguish "do this"
         # from "tell me about this" rather than everything becoming a
         # blind forward. See ollama_client.reclassify_dispatch_or_query.
-        label = reclassify_dispatch_or_query(stripped)
+        label = reclassify_dispatch_or_query(normalized)
         if label not in (DISPATCH, QUERY):
             label = UNSURE  # constrained re-ask still didn't land cleanly -- fail toward forwarding
         return Classification(label, tier="session_override")

@@ -169,9 +169,22 @@ def handle_transcript(
 
     if result.label in (DISPATCH, UNSURE):
         delivery = _forward(text, orchestrator_target, live_deliver)
+        # deliver_transcript() can now return None on a real failure (no
+        # jarvis-l4 tools connected -- gu2s6tnt's preflight), not only
+        # when live_deliver=False skipped the call entirely. Those are
+        # different things: one never tried, the other tried and failed
+        # (and already spoke the failure itself). `forwarded` here means
+        # "actually delivered," not "attempted" -- echoing live_deliver
+        # unconditionally would have reported a failed delivery as a
+        # success to everything downstream (this function's own caller,
+        # the l1_concierge_round_trip log).
+        delivered = live_deliver and delivery is not None and getattr(delivery, "ok", False)
         elapsed_ms = (time.monotonic() - t_start) * 1000
-        log_event("concierge_fast_path_done", label=result.label, elapsed_ms=round(elapsed_ms, 1), forwarded=live_deliver)
-        return {"label": result.label, "forwarded": live_deliver, "delivery": delivery}
+        log_event(
+            "concierge_fast_path_done", label=result.label, elapsed_ms=round(elapsed_ms, 1),
+            forwarded=delivered, live_deliver_requested=live_deliver,
+        )
+        return {"label": result.label, "forwarded": delivered, "delivery": delivery}
 
     if result.label == CHAT:
         # GUARD: never speak on CHAT. A false wake-word trigger on
@@ -210,12 +223,13 @@ def handle_transcript(
     except Exception as e:
         log_event("concierge_local_handling_error", label=result.label, error=str(e))
         delivery = _forward(text, orchestrator_target, live_deliver)
+        delivered = live_deliver and delivery is not None and getattr(delivery, "ok", False)
         elapsed_ms = (time.monotonic() - t_start) * 1000
         log_event(
             "concierge_fast_path_done", label=result.label, elapsed_ms=round(elapsed_ms, 1),
-            forwarded=live_deliver, fell_back_to_forward=True,
+            forwarded=delivered, live_deliver_requested=live_deliver, fell_back_to_forward=True,
         )
-        return {"label": result.label, "forwarded": live_deliver, "delivery": delivery, "error": str(e)}
+        return {"label": result.label, "forwarded": delivered, "delivery": delivery, "error": str(e)}
 
     _last_utterance["text"] = response
     speak(response)
