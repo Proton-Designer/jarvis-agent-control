@@ -228,6 +228,121 @@ the guard never actually lifted during a simulated run. Fixed by making
 the clock itself, so simulated-time and wall-clock-time callers get
 identical behavior.
 
+## Wake-word detection sensitivity: one mechanism explaining three findings
+
+Discovered while running the full-length (~5 min) pipeline test and chasing
+why the closing "Hey Jarvis" wasn't detected. Took three rounds of
+self-correction to get right — recording the wrong turns too, since they're
+part of why the final conclusion is trustworthy.
+
+**The single governing principle: a confident utterance carries enough
+signal margin that unfavorable conditions can't push it under threshold; a
+marginal one doesn't.** Everything below is a consequence of that.
+
+**What it isn't (retracted after testing):**
+- *Not* weak TTS prosody on one specific phrase — the first hypothesis,
+  killed by finding a frame-alignment bug in the test that produced it.
+- *Not* cumulative stream duration ("5 minutes of accumulated state"). Measured
+  directly: a curve across 0-283s of prior audio, frame phase held constant
+  via exact-512-sample-boundary truncation at every point, scored
+  **0.455, 0.841, 0.343, 0.943, 0.212, 0.951, 0.325, 0.684, 0.474, 0.627**
+  at 0/30/60/90/120/150/180/210/240/270s. No relationship to elapsed time —
+  a real duration-based mechanism wouldn't look like that.
+
+**What it is:** sensitivity to the audio in roughly the **last 1-3 seconds**
+before the phrase. Confirmed by holding cumulative duration at zero and
+varying only local context: 1/2/3/5/10s of real recent audio (no earlier
+stream at all) reproduced the *same* wild variance (0.246-0.933) as the
+283s "cumulative" test. Silence immediately before scores highest measured
+(0.94-0.97); speech immediately before is variable, sometimes badly
+suppressive.
+
+**This explains three separate findings under one cause:**
+1. The original stop-word miss (0.214) — a long dictation's closing phrase,
+   in `say`'s rendering, happened to follow speech-like content rather than
+   a clean pause.
+2. Alignment sensitivity — a 24ms frame-grid shift moved the same marginal
+   phrase from 0.323 to 0.168, a ~2x swing from windowing alone, nothing to
+   do with the audio.
+3. TTS-interrupt safety (tested per the Lead's ask, see below) — didn't
+   reproduce, because the tested cancel phrase was confident-baseline, not
+   marginal.
+
+**Why the toggle design was already right, now for an understood reason
+rather than luck:** the design asks for a deliberate pause before the wake
+word. A pause is exactly the condition — silence immediately before —
+that scores highest. Not a coincidence in retrospect.
+
+## Fix 1 (built): multi-offset ensemble for the cancel window
+
+`CANCEL_ENSEMBLE_OFFSETS = [0, 171, 341]` in `daemon.py` — three fresh
+detector instances per cancel-window arm, frame grids staggered by ~1/3 of
+the 512-sample hop each, max score taken across them. Addresses alignment
+luck specifically: measured, the ensemble max recovered the 0.323 case (a
+single arbitrary offset could have landed as low as 0.168 on the identical
+audio). Scoring logic (`fresh_ensemble`/`score_frame_ensemble`) is built
+and unit-testable without a mic; wiring it to the live audio source is the
+one remaining TODO, marked in code, blocked on the live-mic session.
+
+## Fix 2 (considered, NOT built): rolling detector rotation
+
+Was the Lead's proposed fix for "cumulative stream duration" suppression —
+correctly cancelled once the duration curve above showed that mechanism
+doesn't hold. A rotation scheme would have been real code, shipped, and
+defended in this README, mitigating something that isn't happening — and
+critically, a freshly-rotated instance still meets the same unfavorable
+*local* context right before the phrase, so it wouldn't have caught the
+original 0.214 case anyway. Documenting the near-miss because "we built a
+fix for the wrong model of the problem" is a failure mode worth naming,
+not just avoiding quietly.
+
+## TTS-interrupt safety test (the scenario that matters most)
+
+The cancel window opens right after the system finishes speaking a plan
+summary through the speakers — if the mic picks up that TTS (it will,
+speakers on), the worst case is Ayman interrupting mid-summary to cancel,
+meaning his "Hey Jarvis" is preceded by *our own active TTS* with zero gap.
+Tested directly: a synthesized ~11.4s plan summary, with a confident
+"Hey Jarvis, cancel." spliced in at **9 different points** — mid-summary
+interrupts at 15/35/50/60/75/95% through, plus 0ms/300ms/1000ms gaps after
+the summary ends. **Every condition scored 0.999-1.000.** No exceptions.
+
+Consistent with the governing principle above: "Hey Jarvis, cancel." is a
+confident-baseline phrase (0.965-0.999 fresh, same range as every clean
+opener tested this session), so it carries enough margin that TTS bleed-
+through in the last 1-3s doesn't suppress it below threshold. TTS
+interference is not a measured risk for a normally-spoken cancel.
+
+**The residual risk that IS real, per the same principle:** a *quiet or
+half-hearted* cancel — marginal-baseline, the way the earlier stop-word
+and alignment tests were — could plausibly be suppressed the same way a
+weak phrase was throughout this investigation. Not tested directly (would
+need a genuinely quiet synthetic rendering, and the variance seen today
+across "controlled" synthetic conditions means that test likely wouldn't
+be conclusive either) — flagged for the live-mic session instead.
+
+**Design recommendation for Ayman, not implemented here (his call, not
+mine — Lead is raising it):** widen the cancel window from ~2.5s to ~4-5s.
+Reasoning: if a quiet first attempt is missed, there's currently no room
+for a firmer second try within the window — the failure mode is "quiet
+cancel missed, no second chance, delivery proceeds." A wider window turns
+an unrecoverable miss into a recoverable one, at a cost of 1.5-2.5s added
+to a loop that's already ~90s and dominated by orchestrator reasoning —
+close to invisible in context. The original 2.5s was chosen when the
+design read back a full transcript rather than a plan summary; worth
+re-deciding with what's now known about detection risk, not treating as
+already settled.
+
+## Real-voice validation items from this investigation (live-mic session)
+
+- Whether real human speech reliably produces the helpful pre-phrase
+  silence the way `say`'s rendering does when a deliberate pause is taken.
+- Whether a rushed/quiet real cancel behaves like the marginal synthetic
+  phrases tested here (the one residual risk not resolved by synthetic
+  testing — variance was too high in "controlled" conditions to trust a
+  synthetic quiet-speech test as conclusive).
+- The cancel-window-width recommendation above, pending Ayman's decision.
+
 ```
 .venv/bin/python daemon.py --simulate clip.wav     # drives the full state machine over a pre-recorded file
 ```

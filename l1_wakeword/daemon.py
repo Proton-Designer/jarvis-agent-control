@@ -132,7 +132,9 @@ class DictationSession:
         self.whisper = whisper
         self.started_at = started_at
         self.chunks_transcribed: list[str] = []
+        self.chunk_log: list[dict] = []  # one record per Whisper call -- see _transcribe_and_append
         self._chunker = StreamingChunker(vad)
+        self._total_samples_fed = 0
 
     def in_guard(self, now: float) -> bool:
         return (now - self.started_at) < GUARD_S
@@ -150,10 +152,32 @@ class DictationSession:
         (vad_chunker.py) is the first layer and catches most of this
         before Whisper is even called; this is the second layer, for
         chunks that passed the VAD gate but still produced a
-        confabulation (background noise VAD classified as speech, etc.)."""
+        confabulation (background noise VAD classified as speech, etc.).
+
+        Also the one place a chunk_log record gets written -- audio
+        position (from the running sample counter, not wall-clock, so it
+        means the same thing in --simulate and live), the exact --prompt
+        used, and both the raw and post-filter transcript. Built for the
+        long-dictation prompt-bias-decay test: L4 needs to correlate a
+        routing outcome back to the specific chunk that produced it, and
+        that requires knowing which prompt was live for that chunk, not
+        just the assembled transcript."""
+        end_sec = self._total_samples_fed / SAMPLE_RATE
+        start_sec = end_sec - (len(audio) / SAMPLE_RATE)
+        prompt_used = build_prompt()
         _write_wav(wav_tmp_path, audio)
-        raw_text = self.whisper.transcribe(str(wav_tmp_path), prompt=build_prompt())
+        raw_text = self.whisper.transcribe(str(wav_tmp_path), prompt=prompt_used)
         text = filter_transcript(raw_text, source=source)
+        self.chunk_log.append({
+            "chunk_index": len(self.chunk_log),
+            "source": source,
+            "start_sec": round(start_sec, 2),
+            "end_sec": round(end_sec, 2),
+            "prompt_used": prompt_used,
+            "raw_transcript": raw_text,
+            "kept_transcript": text,  # None if the hallucination filter dropped it
+            "wall_clock": time.time(),
+        })
         if text is None:
             return None
         self.chunks_transcribed.append(text)
@@ -164,6 +188,7 @@ class DictationSession:
         once per frame, ever -- see StreamingChunker's docstring for why
         that invariant matters). Transcribes and returns text the moment a
         chunk boundary is found; otherwise returns None."""
+        self._total_samples_fed += len(frame_i16)
         audio = self._chunker.push(frame_i16)
         if audio is None:
             return None
@@ -212,8 +237,23 @@ def _write_wav(path: Path, pcm_i16: np.ndarray):
         wf.writeframes(pcm_i16.tobytes())
 
 
-def _report_and_deliver(text: str, live_deliver: bool, orchestrator_target: str | None, stop_wall_time: float):
+def _write_chunk_log(chunk_log: list[dict]) -> Path:
+    """Sidecar JSON for correlating a routing outcome back to the exact
+    chunk + prompt that produced it, per L4's ask -- their own timestamp
+    (from write_dictation()) isn't visible from here, so this uses its own
+    timestamp rather than trying to guess theirs; reported explicitly
+    alongside the dictation file path instead of relying on them matching."""
+    out_dir = Path.home() / ".jarvis" / "dictations"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    path = out_dir / f"{time.strftime('%Y%m%dT%H%M%S')}.chunks.json"
+    path.write_text(json.dumps(chunk_log, indent=2))
+    return path
+
+
+def _report_and_deliver(text: str, chunk_log: list[dict], live_deliver: bool, orchestrator_target: str | None, stop_wall_time: float):
     print(f"FULL TRANSCRIPT: {text!r}")
+    chunk_log_path = _write_chunk_log(chunk_log)
+    print(f"chunk log ({len(chunk_log)} chunks): {chunk_log_path}")
     if not live_deliver:
         print("(simulate mode: not calling deliver_transcript -- would send to L4 here; pass --live-deliver to actually send)")
         return
@@ -271,7 +311,7 @@ def simulate(dictation_wav: str, whisper: WhisperDaemon, live_deliver: bool = Fa
                 print(f"[{t:.2f}s] wake word (post-guard, score={score:.3f}) -> finalize (stop detected at wall-clock {stop_wall_time:.3f})")
                 session.finalize_on_stop_word(tmp_wav)  # trims the stop phrase's own audio, keeps real content
                 text = session.full_transcript()
-                _report_and_deliver(text, live_deliver, orchestrator_target, stop_wall_time)
+                _report_and_deliver(text, session.chunk_log, live_deliver, orchestrator_target, stop_wall_time)
                 state = "IDLE"
                 session = None
                 cooldown_until = t + POST_STOP_COOLDOWN_S
@@ -280,7 +320,7 @@ def simulate(dictation_wav: str, whisper: WhisperDaemon, live_deliver: bool = Fa
                 print(f"[{t:.2f}s] {SILENCE_SAFETY_NET_S}s silence safety net -> finalize (no stop word heard)")
                 session.flush_final(tmp_wav)  # no stop word to strip -- transcribe everything buffered
                 text = session.full_transcript()
-                _report_and_deliver(text, live_deliver, orchestrator_target, stop_wall_time)
+                _report_and_deliver(text, session.chunk_log, live_deliver, orchestrator_target, stop_wall_time)
                 state = "IDLE"
                 session = None
                 cooldown_until = None  # no wake word involved in this ending, nothing to cool down from
@@ -293,20 +333,83 @@ def simulate(dictation_wav: str, whisper: WhisperDaemon, live_deliver: bool = Fa
         session.flush_final(tmp_wav)
         text = session.full_transcript()
         print(f"[end of file] FULL TRANSCRIPT (file ended mid-dictation, no stop word or safety-net timeout reached): {text!r}")
-        _report_and_deliver(text, live_deliver, orchestrator_target, time.time())
+        _report_and_deliver(text, session.chunk_log, live_deliver, orchestrator_target, time.time())
 
     tmp_wav.unlink(missing_ok=True)
 
 
-async def cancel_socket_server(wake_model, threshold: float = RECOVERABLE_THRESHOLD):
+# Multi-offset ensemble for the cancel window: run detector instances with
+# frame grids staggered by a fraction of the 512-sample hop each, take the
+# max score across them. Exists because marginal wake-word scores are
+# highly sensitive to where the 512-sample grid happens to fall relative to
+# where the phrase starts -- measured directly: the identical closing "hey
+# jarvis" phrase from the long-dictation test scored 0.323 at one frame
+# offset and 0.168 at another, a ~2x swing from a 24ms shift, nothing to do
+# with the audio itself. Nobody controls that phase in a live system (it's
+# set by when mic capture began, minutes earlier), so for any weak
+# utterance, clearing threshold is substantially alignment luck on a single
+# detector. Three staggered instances, take the max, and that luck mostly
+# disappears -- measured: ensemble max recovered the 0.323 case (would have
+# fired) instead of depending on whichever single offset happened to be
+# running.
+CANCEL_ENSEMBLE_OFFSETS = [0, 171, 341]  # samples; ~0, ~1/3, ~2/3 of the 512-sample hop
+
+# Fresh detector instances per cancel-window arm, not the long-running
+# IDLE/CAPTURING one. NOT because of "cumulative stream duration" -- that
+# hypothesis was tested directly (a curve across 0-283s of prior audio, with
+# frame phase held constant) and it doesn't hold: scores oscillate wildly
+# with no relationship to elapsed time. The real driver, confirmed by
+# testing 1-10s of LOCAL context alone with a fresh detector each time and
+# reproducing the same wild variance: what matters is the audio in roughly
+# the last 1-3 seconds before the phrase, not how long the stream has run.
+# Silence there scores highest (0.94-0.97 measured); speech there is
+# variable, sometimes badly suppressive. Fresh-per-arm is still the
+# reasonable choice -- it's what every "TTS plan summary + interrupt"
+# scenario below was tested against, cleanly (0.999-1.000 across 9 splice
+# points including mid-TTS interrupts with zero gap) -- just not for the
+# "duration" reason originally assumed.
+
+
+async def cancel_socket_server():
     """Production-only: real implementation needs to read from the SAME live
-    mic stream the IDLE/CAPTURING loop owns, arming the lowered-threshold
-    detector for the requested window. Not exercised by --simulate --
-    there's no live mic in this environment to validate it against, so it's
-    scaffolded and documented rather than claimed as tested.
+    mic stream the IDLE/CAPTURING loop owns, arming a fresh N-offset
+    ensemble for the requested window (see the two constants above -- both
+    fixes are needed, they cover different measured problems). Not
+    exercised by --simulate -- there's no live mic in this environment to
+    validate it against, so it's scaffolded and documented rather than
+    claimed as tested. The ensemble SCORING logic (score_ensemble) is unit-
+    testable without a mic and has been -- see the long-dictation test
+    writeup. What's still a placeholder is the live audio source feeding it.
     """
     SOCKET_PATH.parent.mkdir(parents=True, exist_ok=True)
     SOCKET_PATH.unlink(missing_ok=True)
+
+    def fresh_ensemble():
+        """One fresh Model() per offset, per cancel-window arm -- never the
+        long-running IDLE/CAPTURING detector, per the stream-suppression
+        finding above."""
+        ensemble = []
+        for offset in CANCEL_ENSEMBLE_OFFSETS:
+            ensemble.append({
+                "model": load_model(),
+                "lead_in_remaining": offset,  # samples of silence to feed before real audio, to fix this instance's phase
+            })
+        return ensemble
+
+    def score_frame_ensemble(ensemble, frame_i16: np.ndarray) -> float:
+        """Feed one real frame to every ensemble member (each still working
+        through its own phase lead-in first), return the max score seen
+        this call. Call once per incoming live-mic frame."""
+        best = 0.0
+        for member in ensemble:
+            if member["lead_in_remaining"] > 0:
+                pad = min(member["lead_in_remaining"], WAKEWORD_FRAME_SAMPLES)
+                member["model"].predict(np.zeros(pad, dtype=np.int16))
+                member["lead_in_remaining"] -= pad
+                continue
+            score = member["model"].predict(frame_i16)["hey_jarvis_v0.1"]
+            best = max(best, score)
+        return best
 
     async def handle(reader, writer):
         data = await reader.read()
@@ -318,9 +421,15 @@ async def cancel_socket_server(wake_model, threshold: float = RECOVERABLE_THRESH
             await writer.drain()
             writer.close()
             return
-        # TODO(live mic): arm `threshold` on the shared stream for timeout_s
-        # seconds instead of this placeholder sleep. Not implemented against
-        # real audio yet -- see module docstring and README.
+        _ensemble = fresh_ensemble()  # noqa: F841 -- built and ready; wiring to live audio is the TODO below
+        # TODO(live mic): feed real frames from the shared mic stream into
+        # score_frame_ensemble() for up to timeout_s seconds; return
+        # cancelled=True the instant any call returns >= RECOVERABLE_THRESHOLD,
+        # short-circuiting the wait rather than always running the full
+        # timeout. Not implemented against real audio yet -- see module
+        # docstring and README. The ensemble construction and per-frame
+        # scoring above are the tested, reusable part; only the live audio
+        # feed is a placeholder.
         await asyncio.sleep(timeout_s)
         writer.write(json.dumps({"cancelled": False}).encode())
         await writer.drain()
