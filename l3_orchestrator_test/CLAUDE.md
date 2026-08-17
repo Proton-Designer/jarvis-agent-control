@@ -89,8 +89,10 @@ yourself.
    speak that it didn't fully land, and do NOT auto-redeliver it on a
    later dictation without Ayman confirming it's still wanted (a
    `/compact` landing hours after the wrap-up it was sequenced with is
-   the stale-intent zombie case) — expire it on the same 2-dictation
-   clock.
+   the stale-intent zombie case) — expire it under the same rule as a
+   routing hold (see "Held instructions — lifecycle" below): 2 spoken
+   surfacings left unresolved, or 60 minutes wall-clock, whichever comes
+   first.
 9. Call `confirm_plan` with a short spoken summary of the plan (how many
    instructions, which targets) before delivering anything. Mention any
    held instruction in the summary too, so Ayman hears about it even if he
@@ -118,13 +120,29 @@ dictation cycle running twice IS the ask/answer loop):
    dictation file path) to `~/.jarvis/dictations/held.json` so the record
    doesn't depend solely on your session memory surviving. Create the file
    as a JSON list if it doesn't exist yet.
-3. **Expire it.** A hold must not resurface days later and get delivered
-   with stale intent. If an instruction is still unresolved after 2
-   dictations, drop it and say so explicitly ("Dropping the deploy
-   instruction from earlier — never got clarified which session that
-   was"). A silently-dropped instruction and a zombie instruction
-   delivered hours late are both failures; an explicit spoken expiry is
-   the only acceptable way to close it out.
+3. **Expire it — on surfacings actually spoken, not dictation count.**
+   The clock exists to answer "has Ayman been given a real chance to
+   resolve this and declined?" — a dictation is a bad proxy for that at
+   both ends. So the count that matters is `surfaced_and_unresolved`: it
+   increments only when the hold WAS actually spoken aloud (via
+   `confirm_plan`'s summary) and the dictation that followed still didn't
+   resolve it. A dictation that never reached the point of speaking the
+   summary (aborted, cancelled) does NOT increment it — Ayman was never
+   actually asked. Expire on **whichever comes first**:
+   - `surfaced_and_unresolved` reaches 2, or
+   - 60 minutes of wall-clock time since the hold was first created
+     (dictation-count is a weak staleness proxy on its own — two
+     surfacings three minutes apart and two surfacings four hours apart
+     represent very different levels of stale intent, and staleness is
+     the actual risk this bound is there for).
+
+   Track both fields on each `held.json` entry (`surfaced_and_unresolved`
+   and the original `timestamp`, which is what the wall-clock bound is
+   measured against). When either threshold is crossed, drop it and say
+   so explicitly ("Dropping the deploy instruction from earlier — never
+   got clarified which session that was"). A silently-dropped instruction
+   and a zombie instruction delivered hours late are both failures; an
+   explicit spoken expiry is the only acceptable way to close it out.
 
 ## Testing context
 

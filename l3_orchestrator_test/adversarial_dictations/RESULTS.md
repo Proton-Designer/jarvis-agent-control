@@ -61,3 +61,41 @@ Recommendation: (1), already effectively implemented at the CLAUDE.md
 level in this run — no L4/transport changes needed. Log as undelivered,
 speak it, don't auto-redeliver without reconfirmation, expire on the same
 clock as a routing hold.
+
+**Decided (Lead, 2026-08-17):** (1) approved. A fourth option — reorder so
+the control-plane instruction lands first — was considered and rejected:
+the model's reasoning that compacting before the wrap-up would destroy the
+context the wrap-up needs was correct, and a general reorder rule would
+need to know which orderings are semantically safe, which neither the
+model nor the system currently does. Also decided: no background watcher
+that retries once the pane goes READY — it would fire without Ayman
+present and without a cancel window, breaking the safety model. Deferral
+to the next dictation keeps every delivery inside a moment Ayman is
+actually attending to; that property is worth more than the convenience
+of auto-retry. Confirmed the "speak the deferral at the time it happens"
+requirement needs no server.py change — `deliver_batch` already speaks
+every failure reason (including a busy-after-retry refusal) at the point
+it occurs, via the existing per-instruction `speak()` call.
+
+## Expiry clock — decided
+
+**Not resolved by either framing in the open question above. The clock now
+counts spoken surfacings left unresolved, not dictations, plus an
+independent wall-clock bound.**
+
+The clock exists to answer "has Ayman been given a real chance to resolve
+this and declined?" — "dictations" was the wrong unit, a bad proxy at both
+ends (an empty dictation where the hold WAS announced is a real chance
+that was declined; a dictation aborted before the summary was ever spoken
+is not a chance at all). Fixed: the counter (`surfaced_and_unresolved`)
+increments only when the hold was actually spoken via `confirm_plan`'s
+summary and the following dictation still didn't resolve it.
+
+A count-only clock is still a weak staleness proxy on its own — two
+surfacings three minutes apart and two four hours apart represent very
+different levels of stale intent. Added a second, independent expiry: 60
+minutes of wall-clock time since the hold was created. Whichever bound is
+crossed first wins. 60 minutes is a config value, not a deep decision —
+revisit if it feels wrong in practice. CLAUDE.md updated accordingly; both
+`held.json` entry fields (`surfaced_and_unresolved`, `timestamp`) are
+required going forward.
