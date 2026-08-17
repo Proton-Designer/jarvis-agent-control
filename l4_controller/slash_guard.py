@@ -1,25 +1,56 @@
 """
-Guards against partial/unrecognized slash-command payloads reaching a
-live Claude Code input box.
+Guards against slash-command payloads that could do something other than
+"become text" when typed into a target session.
 
-Why this exists (confirmed live, not theoretical): typing a COMPLETE but
-unrecognized slash word ("/zzz-not-a-real-command-99") submits safely —
-Claude Code responds "Unknown command: ..." with no side effect. But typing
-a PARTIAL slash word ("/comp") leaves Claude Code's own command-completion
-overlay open with a suggestion highlighted, and pressing Enter at that point
-submits the HIGHLIGHTED SUGGESTION ("/compact"), not the literal text that
-was typed. A malformed/truncated payload reaching this transport — an L3
-bug, a bad voice-transcript resolution, anything — could therefore execute
-a completely different command than the one actually resolved. So: any
-payload that looks like a slash command must exactly match a known,
-complete command, or it gets refused rather than typed.
+Three distinct hazards found here, live, not theoretical -- each one is
+why this file exists in its current shape:
 
-The known-commands list is necessarily a static snapshot (built-ins plus
-whatever skills happen to be installed) — it will go stale as skills are
-added/removed. That's fine: staleness only ever causes an over-cautious
-refusal (a legitimate new slash command gets rejected until the list is
-updated), never an unsafe delivery. Update known_slash_commands.json as
-new commands are added to the target sessions.
+1. **Partial/unrecognized slash fragments hijack Enter.** Typing "/comp"
+   with Claude Code's completion overlay open and pressing Enter submits
+   the HIGHLIGHTED SUGGESTION ("/compact"), not the literal text typed.
+   A malformed payload could execute a different command than resolved.
+
+2. **Some commands open a persistent, non-input view** (`/cost`, `/usage`,
+   `/status`, `/config`, `/help`, ...) rather than running inline. The
+   target pane is not accepting normal chat input while one is open.
+
+3. **Inside an interactive view, injected keystrokes are UI INPUT, not
+   text.** Confirmed live: sending "/model" while a Config view was still
+   open landed on a highlighted settings row, and Enter TOGGLED it --
+   disabled a real, global Claude Code preference (Ayman's auto-compact
+   setting), not scoped to the throwaway test session. The entire
+   transport rests on the assumption that send-keys produces characters
+   in an input box; inside a picker view that assumption is false.
+
+So the policy is not just "is this payload well-formed" -- it's "do we
+know, from direct verification, what kind of view (if any) this command
+opens, and is that kind safe to interact with unsupervised":
+
+- `none`   -- runs inline, no view opens. Always safe to send.
+- `readonly` -- opens a persistent view that only displays information,
+  nothing selectable that Enter could commit. Safe to send AND safe to
+  read back (see server.py's view-read-back flow) -- but the transport
+  still owns dismissing it (Escape, verify empty prompt) before treating
+  delivery as complete.
+- `interactive` -- opens a view containing a selectable/toggleable list.
+  NEVER send. The value of a voice-driven settings change is close to
+  zero; the risk is a silent, global mutation.
+- unknown (not in `allowed` at all) -- default DENY. An unrecognized
+  command is exactly what caused finding #3 above; verifying before
+  sending is the fix, not sending and hoping.
+
+`known_slash_commands.json`'s `blocked` section records commands
+explicitly tested and found dangerous, as a distinct case from "just not
+yet verified" -- both refuse, but a `blocked` entry carries a specific,
+useful reason.
+
+Per-target custom commands (project-specific `.claude/commands/*.md`,
+plugin/skill-provided commands) are a second, separate allowlist source:
+see registry.py's discovery of them. They're treated as `view: none`
+by default -- they're user-authored prompt templates, not new UI code,
+so they structurally can't render an interactive picker the way Claude
+Code's own built-ins can. That assumption is about custom commands
+specifically; it does not extend to unverified built-ins (rule above).
 """
 
 from __future__ import annotations
@@ -30,18 +61,54 @@ from pathlib import Path
 DEFAULT_KNOWN_COMMANDS_PATH = Path(__file__).parent / "known_slash_commands.json"
 
 
-def load_known_commands(path: Path = DEFAULT_KNOWN_COMMANDS_PATH) -> set[str]:
-    return set(json.loads(path.read_text()))
+class KnownCommands:
+    def __init__(self, allowed: dict[str, str], blocked: dict[str, str]):
+        self.allowed = allowed  # command -> view ("none" | "readonly")
+        self.blocked = blocked  # command -> reason
 
 
-def is_safe_slash_payload(payload: str, known_commands: set[str]) -> bool:
+def load_known_commands(path: Path = DEFAULT_KNOWN_COMMANDS_PATH) -> KnownCommands:
+    data = json.loads(path.read_text())
+    return KnownCommands(allowed=data.get("allowed", {}), blocked=data.get("blocked", {}))
+
+
+def check_slash_payload(
+    payload: str,
+    known: KnownCommands,
+    extra_allowed: set[str] = frozenset(),
+) -> tuple[bool, str, str | None]:
     """
-    payload is assumed already normalized (stripped, no embedded newlines).
-    Only the leading token (up to the first space) is checked against the
-    known-commands list — everything after is the command's own arguments,
-    which the command itself is responsible for parsing.
+    Returns (is_safe, view, reason). `view` is "none" for anything that
+    isn't a slash command at all, or the resolved view type ("none" /
+    "readonly") when it is safe. `reason` is set (and is_safe is False)
+    for any refusal.
     """
     if not payload.startswith("/"):
-        return True  # not a slash command at all, guard doesn't apply
+        return True, "none", None
+
     leading = payload.split(" ", 1)[0]
-    return leading in known_commands
+
+    if leading in known.blocked:
+        return False, "interactive", known.blocked[leading]
+
+    if leading in known.allowed:
+        return True, known.allowed[leading], None
+
+    if leading in extra_allowed:
+        return True, "none", None
+
+    return (
+        False,
+        "unknown",
+        f"'{leading}' is not a verified command for this target -- refusing rather than "
+        "guessing what it would do (unverified commands are exactly the case that has "
+        "caused real incidents here)",
+    )
+
+
+def is_safe_slash_payload(
+    payload: str, known_commands: KnownCommands, extra_allowed: set[str] = frozenset()
+) -> bool:
+    """Back-compat boolean wrapper around check_slash_payload."""
+    is_safe, _view, _reason = check_slash_payload(payload, known_commands, extra_allowed)
+    return is_safe

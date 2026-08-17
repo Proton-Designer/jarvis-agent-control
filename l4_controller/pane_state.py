@@ -23,6 +23,7 @@ class PaneState(Enum):
     READY = "ready"
     BUSY = "busy"
     PERMISSION_PROMPT = "permission_prompt"
+    PERSISTENT_VIEW = "persistent_view"
     UNKNOWN = "unknown"
 
 
@@ -50,15 +51,34 @@ class PaneStatePatterns:
     # the same shape a real tool-permission approval box uses, but an actual
     # tool-permission prompt was NOT captured (auto mode suppressed it for
     # every tool call tested, including `rm`) — see validation notes.
+    #
+    # NOTE: "esc to cancel" is deliberately NOT in this list on its own.
+    # Real Claude Code persistent views (/cost, /usage, /config, /status,
+    # /help) show "Esc to cancel" alone with no actionable choice attached
+    # -- an earlier version of this pattern set matched on that phrase
+    # alone and misclassified all of them as PERMISSION_PROMPT. The real
+    # discriminator is "Enter to confirm" co-occurring with it, which only
+    # happens on an actual actionable modal (a numbered choice Enter would
+    # commit to) -- see permission_prompt_pair below.
     permission_prompt: list[str] = field(
         default_factory=lambda: [
-            r"enter to confirm",
-            r"esc to cancel",
             r"do you want to proceed",
             r"\(y\/n\)",
             r"allow this (tool|command)",
         ]
     )
+    # Both patterns in EVERY pair must match for PERMISSION_PROMPT -- this
+    # is what "esc to cancel" alone (a persistent view) fails and a real
+    # actionable modal passes.
+    permission_prompt_pairs: list[tuple[str, str]] = field(
+        default_factory=lambda: [(r"enter to confirm", r"esc to cancel")]
+    )
+    # A persistent, non-input view is open (info display, nothing
+    # selectable -- see PERSISTENT_VIEW handling in transport.py). "Esc to
+    # cancel" alone, without "Enter to confirm", is the confirmed marker
+    # across every view command tested (2026-08-17): /cost, /usage,
+    # /config, /status, /help all show it.
+    persistent_view: list[str] = field(default_factory=lambda: [r"esc to cancel"])
 
     # Live/active indicator only. Real shape observed: a spinner glyph +
     # present-participle verb + ellipsis, e.g. "✢ Pouncing… (7s · ↓ 220
@@ -101,9 +121,17 @@ def classify_pane(pane_text: str, patterns: PaneStatePatterns) -> PaneState:
         if re.search(pat, tail, re.IGNORECASE):
             return PaneState.PERMISSION_PROMPT
 
+    for pat_a, pat_b in patterns.permission_prompt_pairs:
+        if re.search(pat_a, tail, re.IGNORECASE) and re.search(pat_b, tail, re.IGNORECASE):
+            return PaneState.PERMISSION_PROMPT
+
     for pat in patterns.busy:
         if re.search(pat, tail, re.IGNORECASE):
             return PaneState.BUSY
+
+    for pat in patterns.persistent_view:
+        if re.search(pat, tail, re.IGNORECASE):
+            return PaneState.PERSISTENT_VIEW
 
     if patterns.prompt_glyph:
         prompt_lines = [
@@ -150,7 +178,8 @@ def classify_pane_ansi(ansi_pane_text: str, patterns: PaneStatePatterns) -> Pane
     plain = _strip_ansi(ansi_pane_text)
     state = classify_pane(plain, patterns)
     if state != PaneState.READY and state != PaneState.UNKNOWN:
-        # BUSY / PERMISSION_PROMPT already decided from the plain-text scan.
+        # BUSY / PERMISSION_PROMPT / PERSISTENT_VIEW already decided from
+        # the plain-text scan.
         return state
     if not patterns.prompt_glyph:
         return state

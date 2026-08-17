@@ -29,11 +29,12 @@ from cancel_listener import cancel_socket_available
 from registry import SessionRegistry, UnknownSessionError
 from say_feedback import speak, speak_with_cancel_window
 from transport import TmuxTransport
+from view_parsers import summarize_view
 
 app = MCPServer(name="jarvis-l4-controller")
 
 registry = SessionRegistry()
-transport = TmuxTransport()
+transport = TmuxTransport(registry=registry)
 
 RETRY_DELAY_S = 3.0
 BATCH_RETRY_BUDGET_S = 10.0  # shared across the whole batch, not per-instruction
@@ -43,9 +44,20 @@ BATCH_RETRY_BUDGET_S = 10.0  # shared across the whole batch, not per-instructio
 def list_sessions() -> list[dict]:
     """Enumerate real, currently-running tmux sessions with their working
     directory, for resolving loose voice references to a live target.
-    Never returns a session that isn't actually running."""
+    Never returns a session that isn't actually running. custom_commands
+    lists that target's project-specific slash commands
+    (.claude/commands/*.md at its cwd) -- consult this before routing a
+    control-plane instruction to a command that isn't universal
+    (/compact, /cost, /usage, /status) as those are the only built-ins
+    verified safe; anything else needs to actually be in this list for
+    that target or it will be refused at delivery."""
     return [
-        {"session_id": s.session_id, "working_dir": s.working_dir, "alias": s.alias}
+        {
+            "session_id": s.session_id,
+            "working_dir": s.working_dir,
+            "alias": s.alias,
+            "custom_commands": s.custom_commands,
+        }
         for s in registry.list_sessions()
     ]
 
@@ -127,11 +139,45 @@ def deliver_batch(instructions: list[dict], retry_busy_once: bool = True) -> dic
             result = transport.deliver(session_id, payload)
 
         results.append(
-            {"target": session_id, "ok": result.ok, "detail": result.detail, "reason": result.reason}
+            {
+                "target": session_id,
+                "ok": result.ok,
+                "detail": result.detail,
+                "reason": result.reason,
+                "view_content": result.view_content,
+            }
         )
 
-        if result.ok:
+        if result.ok and result.view_content is not None:
+            # A read-only view command (/cost, /usage, ...) -- speak the
+            # parsed answer, not "Sent to X.": the value here is the
+            # figure Ayman asked for, not confirmation of delivery.
+            command = payload.strip().split(" ", 1)[0]
+            summary = summarize_view(command, result.view_content)
+            if summary is not None:
+                speak(f"{target_name}: {summary}")
+            else:
+                speak(
+                    f"{target_name}'s {command} is on screen but I couldn't parse a clean "
+                    "answer from it."
+                )
+        elif result.ok:
             speak(f"Sent to {target_name}.")
+        elif result.reason == "dismiss_failed" and result.view_content is not None:
+            # The view was read successfully (so surface the answer we
+            # have) but Escape didn't verifiably close it -- the pane is
+            # left in an uncertain state, which still counts as a
+            # delivery failure per policy, so it's still in `failures`.
+            command = payload.strip().split(" ", 1)[0]
+            summary = summarize_view(command, result.view_content)
+            failures.append(f"{target_name} ({result.reason})")
+            if summary is not None:
+                speak(
+                    f"{target_name}: {summary} But its {command} view didn't close cleanly "
+                    "and needs manual attention."
+                )
+            else:
+                speak(f"{target_name}'s {command} view didn't close cleanly and needs manual attention.")
         else:
             failures.append(f"{target_name} ({result.reason})")
             speak(f"{target_name} not sent: {result.detail}.")

@@ -1,13 +1,14 @@
-[
-  "/compact",
-  "/clear",
-  "/init",
-  "/release-notes",
-  "/mcp",
-  "/cost",
-  "/usage",
-  "/model",
-  "/rc",
-  "/agents",
-  "/loop"
-]
+{
+  "allowed": {
+    "/compact": "none",
+    "/clear": "none",
+    "/cost": "readonly",
+    "/usage": "readonly",
+    "/status": "readonly"
+  },
+  "blocked": {
+    "/config": "interactive settings picker -- confirmed live that Enter on a highlighted row toggles a real, global setting (disabled Ayman's auto-compact preference by accident during testing, 2026-08-17). Never send.",
+    "/model": "falls through into the same Config picker (bare /model, no args, in this Claude Code version) -- same hazard as /config until specifically re-verified safe with an argument. Blocked wholesale, including '/model <name>' forms, until that verification happens.",
+    "/help": "opens a persistent view with no input prompt, same dismissal hazard class as /config -- not yet classified readonly vs interactive, blocked pending that classification."
+  }
+}

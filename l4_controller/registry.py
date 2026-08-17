@@ -24,7 +24,7 @@ from __future__ import annotations
 
 import json
 import subprocess
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 DEFAULT_ALIAS_PATH = Path(__file__).parent / "sessions.json"
@@ -36,6 +36,7 @@ class SessionInfo:
     session_id: str  # real tmux session name, e.g. "claude-shipcheck"
     working_dir: str  # pane_current_path of that session's active pane
     alias: str | None = None  # matching alias from sessions.json, if any
+    custom_commands: list[str] = field(default_factory=list)  # project-specific /commands here
 
 
 class UnknownSessionError(Exception):
@@ -70,6 +71,22 @@ class SessionRegistry:
             return False
         return session_id in set(json.loads(self.test_targets_path.read_text()))
 
+    def custom_commands_for(self, cwd: str) -> list[str]:
+        """Project-specific slash commands available at this working
+        directory: one per `.md` file in `<cwd>/.claude/commands/`, per
+        Claude Code's convention. This is the per-target verification
+        needed before a control-plane command outside the small hand-
+        verified built-in set is treated as safe to send -- see
+        slash_guard.py. Does NOT enumerate plugin- or skill-provided
+        commands (no generic way to inspect those from outside a live
+        Claude Code session); only project-local `.claude/commands/`."""
+        if not cwd:
+            return []
+        commands_dir = Path(cwd) / ".claude" / "commands"
+        if not commands_dir.is_dir():
+            return []
+        return sorted(f"/{p.stem}" for p in commands_dir.glob("*.md"))
+
     def list_sessions(self) -> list[SessionInfo]:
         """Enumerate real, currently-running tmux sessions. Never guesses at
         a session that isn't actually running."""
@@ -96,7 +113,12 @@ class SessionRegistry:
             )
             cwd = cwd_result.stdout.decode(errors="replace").strip() if cwd_result.returncode == 0 else ""
             sessions.append(
-                SessionInfo(session_id=name, working_dir=cwd, alias=alias_by_target.get(name))
+                SessionInfo(
+                    session_id=name,
+                    working_dir=cwd,
+                    alias=alias_by_target.get(name),
+                    custom_commands=self.custom_commands_for(cwd),
+                )
             )
         return sessions
 
