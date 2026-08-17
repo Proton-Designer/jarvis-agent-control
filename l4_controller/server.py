@@ -25,6 +25,7 @@ import time
 
 from mcp.server.mcpserver import MCPServer
 
+from cancel_listener import cancel_socket_available
 from registry import SessionRegistry, UnknownSessionError
 from say_feedback import speak, speak_with_cancel_window
 from transport import TmuxTransport
@@ -53,10 +54,14 @@ def list_sessions() -> list[dict]:
 def confirm_plan(summary: str, cancel_window_s: float = 2.5) -> dict:
     """Speak the routing plan summary and open a cancel window in parallel
     (not sequentially). cancel_window_s == 0 disables the window (config,
-    not hardcoded). Returns {"confirmed": bool} -- confirmed is False if
-    Ayman said the cancel word during the window."""
-    cancelled = speak_with_cancel_window(summary, cancel_window_s)
-    return {"confirmed": not cancelled}
+    not hardcoded). Returns {"confirmed": bool, "cancel_window_available":
+    bool} -- confirmed is False if Ayman said the cancel word during the
+    window. cancel_window_available False means there was no real cancel
+    window at all (L1's socket down) -- this is spoken explicitly ("Cancel
+    unavailable.") and deliver_batch independently refuses delivery to any
+    non-test target in that state, regardless of what this call returns."""
+    result = speak_with_cancel_window(summary, cancel_window_s)
+    return {"confirmed": not result["cancelled"], "cancel_window_available": result["available"]}
 
 
 @app.tool()
@@ -73,10 +78,19 @@ def deliver_batch(instructions: list[dict], retry_busy_once: bool = True) -> dic
     wait), and — critically — never lets a partial batch failure pass
     silently: an explicit summary is always spoken at the end, success or
     not, so silence never has to be interpreted as either outcome.
+
+    Enforces the cancel-window safety property AT THE POINT OF DELIVERY,
+    independent of whether/how confirm_plan was called: if L1's cancel
+    socket is down, there is no real human-in-the-loop control anywhere in
+    the system (auto-mode targets have no permission prompts either), so
+    delivery to any target not explicitly marked as a throwaway test
+    target (registry.is_test_target) is refused, loudly, rather than
+    proceeding on the assumption that confirm_plan already covered it.
     """
     results = []
     failures = []
     retry_budget_s = BATCH_RETRY_BUDGET_S
+    socket_up = cancel_socket_available()
 
     for instr in instructions:
         target_name = instr["target"]
@@ -88,6 +102,13 @@ def deliver_batch(instructions: list[dict], retry_busy_once: bool = True) -> dic
             results.append({"target": target_name, "ok": False, "detail": str(e), "reason": "no_session"})
             failures.append(f"{target_name} (no such session)")
             speak(f"Could not find a session for {target_name}, not sent.")
+            continue
+
+        if not socket_up and not registry.is_test_target(session_id):
+            detail = f"cancel window unavailable and {target_name} is not a test target"
+            results.append({"target": session_id, "ok": False, "detail": detail, "reason": "cancel_unavailable"})
+            failures.append(f"{target_name} (cancel_unavailable)")
+            speak(f"Cancel unavailable, {target_name} not sent.")
             continue
 
         result = transport.deliver(session_id, payload)

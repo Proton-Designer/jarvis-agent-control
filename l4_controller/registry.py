@@ -28,6 +28,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 DEFAULT_ALIAS_PATH = Path(__file__).parent / "sessions.json"
+DEFAULT_TEST_TARGETS_PATH = Path(__file__).parent / "test_targets.json"
 
 
 @dataclass
@@ -42,15 +43,32 @@ class UnknownSessionError(Exception):
 
 
 class SessionRegistry:
-    def __init__(self, tmux_bin: str = "tmux", alias_path: Path = DEFAULT_ALIAS_PATH):
+    def __init__(
+        self,
+        tmux_bin: str = "tmux",
+        alias_path: Path = DEFAULT_ALIAS_PATH,
+        test_targets_path: Path = DEFAULT_TEST_TARGETS_PATH,
+    ):
         self.tmux_bin = tmux_bin
         self.alias_path = alias_path
+        self.test_targets_path = test_targets_path
 
     def _load_aliases(self) -> dict[str, str]:
         if not self.alias_path.exists():
             return {}
         data = json.loads(self.alias_path.read_text())
         return {k.lower(): v for k, v in data.items()}
+
+    def is_test_target(self, session_id: str) -> bool:
+        """Integration-testing scaffolding: sessions explicitly marked as
+        throwaway in test_targets.json are the only ones that may receive a
+        degraded delivery (e.g. no real cancel window available). Empty by
+        default — nothing is a test target unless explicitly listed. This
+        allowlist should not be needed once L1's cancel socket is a stable,
+        always-up part of the deployed system; revisit removing it then."""
+        if not self.test_targets_path.exists():
+            return False
+        return session_id in set(json.loads(self.test_targets_path.read_text()))
 
     def list_sessions(self) -> list[SessionInfo]:
         """Enumerate real, currently-running tmux sessions. Never guesses at
