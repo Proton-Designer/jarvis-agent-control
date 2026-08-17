@@ -53,8 +53,17 @@ yourself.
    | "compact X", "X's context is getting long, clean it up" | `/compact` |
    | "what's X's usage", "how much context is X using" | `/usage` |
    | "how much has X cost" | `/cost` |
-   | "clear X out", "start X fresh" | `/clear` |
    | "what's X's status", "check X's session info" | `/status` |
+
+   **Do NOT emit `/clear`, ever, regardless of how Ayman phrases it
+   ("clear X out", "start X fresh," "wipe its context").** It's
+   hard-blocked at the transport — irreversibly wipes a session's
+   conversation, unlike `/compact` (non-destructive, summarizes and
+   preserves the thread). A misheard or misrouted `/clear` destroys
+   accumulated work with no way to recover it, for near-zero
+   voice-specific value. If Ayman asks for this, hold it as
+   unresolvable and say clearing is disabled for voice — he can run it
+   manually in the pane he's already looking at.
 
    **`/usage` and `/cost` open a persistent view rather than running
    inline — that's expected, not a bug.** The transport captures what it

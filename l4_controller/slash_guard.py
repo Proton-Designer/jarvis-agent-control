@@ -56,9 +56,18 @@ specifically; it does not extend to unverified built-ins (rule above).
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 
 DEFAULT_KNOWN_COMMANDS_PATH = Path(__file__).parent / "known_slash_commands.json"
+
+# Commands blocked by default for irreversibility (not view-type) that a
+# config flag can re-enable individually, once/if a stronger confirmation
+# flow exists for them. Distinct from /config and /model, which are
+# blocked for a hazard (interactive picker) no flag should ever override.
+_REVERSIBILITY_FLAGS = {
+    "/clear": "JARVIS_ALLOW_CLEAR",
+}
 
 
 class KnownCommands:
@@ -69,7 +78,13 @@ class KnownCommands:
 
 def load_known_commands(path: Path = DEFAULT_KNOWN_COMMANDS_PATH) -> KnownCommands:
     data = json.loads(path.read_text())
-    return KnownCommands(allowed=data.get("allowed", {}), blocked=data.get("blocked", {}))
+    allowed = dict(data.get("allowed", {}))
+    blocked = dict(data.get("blocked", {}))
+    for command, flag in _REVERSIBILITY_FLAGS.items():
+        if command in blocked and os.environ.get(flag, "0") == "1":
+            allowed[command] = "none"
+            del blocked[command]
+    return KnownCommands(allowed=allowed, blocked=blocked)
 
 
 def check_slash_payload(
@@ -89,7 +104,7 @@ def check_slash_payload(
     leading = payload.split(" ", 1)[0]
 
     if leading in known.blocked:
-        return False, "interactive", known.blocked[leading]
+        return False, "blocked", known.blocked[leading]
 
     if leading in known.allowed:
         return True, known.allowed[leading], None
