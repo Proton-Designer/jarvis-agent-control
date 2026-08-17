@@ -1,5 +1,9 @@
 """
-L2 -> L3 handoff: deliver_transcript(text) -> DeliveryResult.
+L2 -> L3 handoff: deliver_transcript(text) -> DeliveryResult | None.
+None means the handoff never reached the transport at all -- currently
+only when the orchestrator's jarvis-l4 MCP tools aren't connected (see
+orchestrator_has_tools()); the failure is spoken directly in that case,
+same as every other failure path this function handles.
 
 Contract agreed with the L1/L2 owner: a plain importable function, called
 from their daemon after VAD-endpointed capture + STT. Signature is stable;
@@ -34,6 +38,7 @@ yet, so a specific count would be a guess dressed up as a fact.
 
 from __future__ import annotations
 
+import subprocess
 import sys
 import time
 from pathlib import Path
@@ -43,6 +48,8 @@ from latency_log import log_event
 from providers import list_sessions
 from say_feedback import speak
 from transport import Transport
+
+SERVER_PROCESS_PATTERN = "l4_controller/server.py"
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 from jarvis_paths import jarvis_home  # noqa: E402
@@ -69,6 +76,27 @@ def _format_session_list(sessions: list[dict]) -> str:
         bit += ")"
         parts.append(bit)
     return "; ".join(parts)
+
+
+def orchestrator_has_tools() -> bool:
+    """Whether ANY jarvis-l4 MCP server process is currently running --
+    the observable signal that the orchestrator's MCP trust prompt was
+    actually answered (see README's note on it). Claude Code only spawns
+    this process once its project's .mcp.json entry is approved; declining
+    or leaving the prompt unanswered means the process never starts at
+    all. Confirmed BOTH directions live (2026-08-17), not assumed from the
+    working case: approving a fresh project's prompt spawned a new
+    server.py process within seconds; declining it left none, and that
+    session's own orchestrator turn independently confirmed "the
+    jarvis-l4 MCP tools are not available."
+
+    Matches by command-line substring only (not scoped to one orchestrator
+    session's PID) -- with a single orchestrator this is sufficient; if
+    multiple orchestrators are ever run concurrently, this would need to
+    match a specific server process to its session instead of merely
+    confirming SOME jarvis-l4 server is up somewhere."""
+    result = subprocess.run(["pgrep", "-f", SERVER_PROCESS_PATTERN], capture_output=True)
+    return result.returncode == 0
 
 
 def write_dictation(text: str) -> Path:
@@ -103,6 +131,22 @@ def deliver_transcript(
     this explicitly on every call, so removing the default cost them
     nothing and closes the footgun for whoever writes the next one."""
     log_event("handoff_received", chars=len(text))
+    if not orchestrator_has_tools():
+        # Preflight, before the ack -- not after. Confirmed live
+        # (2026-08-17, cold-start validation): an orchestrator whose
+        # jarvis-l4 MCP prompt was never answered reasons through the
+        # whole dictation correctly and even declines to fabricate a
+        # delivery -- but every bit of that stays in its pane's text,
+        # because ALL spoken output routes through the now-unavailable
+        # MCP tools. From a voice-only user's side that's total silence.
+        # This is the one channel that can speak here, because it's the
+        # only code in the path that isn't itself downstream of those
+        # missing tools -- speaking "Got it, working on it" first would
+        # just be a confusing lie immediately followed by this, so this
+        # check comes before it, not after.
+        log_event("handoff_no_tools", chars=len(text))
+        speak("The orchestrator has no tools connected -- check its MCP prompt.")
+        return None
     speak("Got it, working on it.")
     path = write_dictation(text)
     # Pre-inject the live session list rather than making L3 spend a full
