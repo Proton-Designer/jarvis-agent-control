@@ -273,8 +273,21 @@ def simulate(dictation_wav: str, whisper: WhisperDaemon, live_deliver: bool = Fa
     vad = SileroVAD()
     tmp_wav = Path("/tmp/jarvis_daemon_chunk.wav")
 
-    with wave.open(dictation_wav, "rb") as wf:
-        assert wf.getframerate() == SAMPLE_RATE and wf.getnchannels() == 1
+    convert_hint = (
+        f"  ffmpeg -i {dictation_wav} -ar {SAMPLE_RATE} -ac 1 -c:a pcm_s16le fixed.wav\n"
+        f"then run again with fixed.wav. Needs {SAMPLE_RATE}Hz mono 16-bit WAV -- "
+        f"Voice Memos/QuickTime recordings (.m4a, .caf, .mov) always need this conversion."
+    )
+    try:
+        wf = wave.open(dictation_wav, "rb")
+    except wave.Error:
+        raise SystemExit(f"{dictation_wav}: not a WAV file (or not a format Python's wave module reads). Convert it:\n{convert_hint}")
+    with wf:
+        if wf.getframerate() != SAMPLE_RATE or wf.getnchannels() != 1:
+            raise SystemExit(
+                f"{dictation_wav}: needs to be {SAMPLE_RATE}Hz mono, got "
+                f"{wf.getframerate()}Hz {wf.getnchannels()}ch. Convert first:\n{convert_hint}"
+            )
         pcm = np.frombuffer(wf.readframes(wf.getnframes()), dtype=np.int16)
 
     state = "IDLE"
