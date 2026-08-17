@@ -78,7 +78,25 @@ class PaneStatePatterns:
     # cancel" alone, without "Enter to confirm", is the confirmed marker
     # across every view command tested (2026-08-17): /cost, /usage,
     # /config, /status, /help all show it.
-    persistent_view: list[str] = field(default_factory=lambda: [r"esc to cancel"])
+    #
+    # Second marker added 2026-08-17 (Claude Code v2.1.234): the settings
+    # views gained a tab bar ("Settings  Status  Config  Usage  Stats")
+    # and grew taller, and /cost's and /usage's content now routinely
+    # exceeds a normal 80x24 tmux pane -- confirmed live, including at a
+    # much larger 220x50 pane, where it STILL didn't fit. That pushes
+    # "Esc to cancel" off the visible viewport, so it alone no longer
+    # reliably detects these two. The tab-bar row renders immediately
+    # near the top regardless of content height, so it's used as an
+    # additional, independent marker -- safe to OR in because
+    # PERMISSION_PROMPT is still checked first in classify_pane, so an
+    # actual actionable modal (if it ever shared this tab bar) would
+    # still be caught there before falling through to this check.
+    # /status's content still fits and still shows "Esc to cancel"
+    # directly, so it isn't affected, but the tab bar is a redundant hit
+    # there too.
+    persistent_view: list[str] = field(
+        default_factory=lambda: [r"esc to cancel", r"settings\s+status\s+config\s+usage\s+stats"]
+    )
 
     # Live/active indicator only. Real shape observed: a spinner glyph +
     # present-participle verb + ellipsis, e.g. "✢ Pouncing… (7s · ↓ 220
@@ -129,8 +147,15 @@ def classify_pane(pane_text: str, patterns: PaneStatePatterns) -> PaneState:
         if re.search(pat, tail, re.IGNORECASE):
             return PaneState.BUSY
 
+    # Scanned against the FULL pane text, not just `tail` -- unlike
+    # busy/permission markers (which are about the latest few lines),
+    # a persistent-view marker can legitimately sit anywhere on screen.
+    # Confirmed necessary live (2026-08-17): the tab-bar marker added
+    # above renders near the TOP of the pane, several lines outside the
+    # last-10-lines tail window, on an ordinary 80x24 pane -- the actual
+    # size the real orchestrator and target sessions run at.
     for pat in patterns.persistent_view:
-        if re.search(pat, tail, re.IGNORECASE):
+        if re.search(pat, pane_text, re.IGNORECASE):
             return PaneState.PERSISTENT_VIEW
 
     if patterns.prompt_glyph:
