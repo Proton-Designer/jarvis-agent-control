@@ -228,7 +228,7 @@ def verify_wake_trigger(whisper: WhisperDaemon, preroll_frames: "collections.deq
     return accepted, transcript
 
 
-def default_deliver(text: str, orchestrator_target: str | None = None, live_deliver: bool = False):
+def default_deliver(text: str, orchestrator_target: str | None = None, live_deliver: bool = False, wake_score: float | None = None):
     """Production hookup -- routes every finished dictation through the
     L2.5 concierge (classify -> answer locally, or forward unchanged)
     instead of calling deliver_transcript directly. `live_deliver` only
@@ -239,19 +239,27 @@ def default_deliver(text: str, orchestrator_target: str | None = None, live_deli
     JARVIS_MUTE, same as everything else that calls say_feedback.speak).
     See l2_5_concierge/concierge.py's own --live-deliver flag and the
     incident that motivated it: a smoke test without this flag delivered
-    fake test text into a real live orchestrator session by accident."""
+    fake test text into a real live orchestrator session by accident.
+
+    wake_score passes the START trigger's acoustic score through to the
+    concierge purely for its NOT_ADDRESSED discard-event logging -- see
+    concierge.handle_transcript's docstring."""
     sys.path.insert(0, str(Path(__file__).parent.parent / "l2_5_concierge"))
     from concierge import handle_transcript, DEFAULT_ORCHESTRATOR_TARGET  # noqa
     target = orchestrator_target or DEFAULT_ORCHESTRATOR_TARGET
-    return handle_transcript(text, orchestrator_target=target, live_deliver=live_deliver)
+    return handle_transcript(text, orchestrator_target=target, live_deliver=live_deliver, wake_score=wake_score)
 
 
 class DictationSession:
     """Owns the state for one CAPTURING episode: rolling VAD chunker +
     accumulated transcript text."""
 
-    def __init__(self, vad: SileroVAD, whisper: WhisperDaemon):
+    def __init__(self, vad: SileroVAD, whisper: WhisperDaemon, wake_score: float | None = None):
         self.whisper = whisper
+        # float(...) matters, not cosmetic: openWakeWord's predict() returns
+        # numpy.float32, and json.dumps (via log_event) can't serialize that
+        # -- found by testing, crashed the NOT_ADDRESSED discard-event log.
+        self.wake_score = float(wake_score) if wake_score is not None else None
         self.chunks_transcribed: list[str] = []
         self.chunk_log: list[dict] = []  # one record per Whisper call -- see _transcribe_and_append
         self._chunker = StreamingChunker(vad)
@@ -393,29 +401,51 @@ def _write_chunk_log(chunk_log: list[dict]) -> Path:
     return path
 
 
-def _report_and_deliver(text: str, chunk_log: list[dict], live_deliver: bool, orchestrator_target: str | None, stop_wall_time: float):
+def _report_and_deliver(
+    text: str, chunk_log: list[dict], live_deliver: bool, orchestrator_target: str | None,
+    stop_wall_time: float, wake_score: float | None = None,
+):
     """Always routes through the L2.5 concierge now, regardless of
     live_deliver -- CONTROL/QUERY/CHAT get classified and answered on
     every run (including plain --simulate testing with no flags), since
     none of that touches a real orchestrator session. live_deliver only
     reaches the concierge's own DISPATCH/UNSURE forwarding gate (see
     default_deliver / concierge.handle_transcript's --live-deliver
-    semantics) -- there is no separate short-circuit here any more."""
+    semantics) -- there is no separate short-circuit here any more.
+
+    The chunk log is written AFTER default_deliver() returns, not
+    before, and only if the concierge says retain=True (the default for
+    everything except a high-confidence NOT_ADDRESSED discard -- see
+    classifier.assess_retention). This is the actual fix for "a false
+    trigger persists a transcription of Ayman's private conversation to
+    disk permanently": a discarded dictation is now never written in the
+    first place, not written-then-deleted. Printing the transcript to
+    this process's own console is unaffected either way -- during any
+    session where this daemon is running, Ayman (or whoever's watching,
+    per the standing no-unattended-mic rule) is already present in the
+    room the audio came from, so this isn't a new disclosure the way a
+    durable file would be."""
     print(f"FULL TRANSCRIPT: {text!r}")
-    chunk_log_path = _write_chunk_log(chunk_log)
-    print(f"chunk log ({len(chunk_log)} chunks): {chunk_log_path}")
     last_whisper_ms = chunk_log[-1]["whisper_ms"] if chunk_log else None
     sys.path.insert(0, str(Path(__file__).parent.parent / "l4_controller"))
     from latency_log import log_event  # noqa: E402
     log_event("l1_dictation_end", chars=len(text), last_chunk_whisper_ms=last_whisper_ms)
-    result = default_deliver(text, orchestrator_target=orchestrator_target, live_deliver=live_deliver)
+    result = default_deliver(text, orchestrator_target=orchestrator_target, live_deliver=live_deliver, wake_score=wake_score)
+
+    if result.get("retain", True):
+        chunk_log_path = _write_chunk_log(chunk_log)
+        print(f"chunk log ({len(chunk_log)} chunks): {chunk_log_path}")
+    else:
+        print(f"NOT_ADDRESSED (high confidence): discarding transcript, chunk log NOT written ({len(chunk_log)} chunks dropped)")
+
     handoff_wall_time = time.time()
     end_to_end_s = handoff_wall_time - stop_wall_time
     print(f"concierge result: {result!r}")
     print(f"stop-word-to-handoff-return wall-clock: {end_to_end_s:.3f}s")
     log_event(
         "l1_concierge_round_trip", label=result.get("label"), spoken=bool(result.get("response")),
-        forwarded=result.get("forwarded", False), end_to_end_s=round(end_to_end_s, 3),
+        forwarded=result.get("forwarded", False), retained=result.get("retain", True),
+        end_to_end_s=round(end_to_end_s, 3),
     )
 
 
@@ -474,7 +504,7 @@ def simulate(dictation_wav: str, whisper: WhisperDaemon, live_deliver: bool = Fa
                 if accepted:
                     print(f"[{t:.2f}s] wake word (score={score:.3f}) verified ({verify_text!r}) -> CAPTURING")
                     state = "CAPTURING"
-                    session = DictationSession(vad, whisper)
+                    session = DictationSession(vad, whisper, wake_score=score)
                     preroll.clear()
                 else:
                     print(f"[{t:.2f}s] wake word (score={score:.3f}) REJECTED by verification (heard: {verify_text!r}) -- staying IDLE")
@@ -492,7 +522,7 @@ def simulate(dictation_wav: str, whisper: WhisperDaemon, live_deliver: bool = Fa
                     print(f"[{t:.2f}s] stop phrase matched in chunk transcript {partial!r} -> finalize (remainder={remainder!r})")
                     session.strip_stop_phrase(partial, remainder)
                     text = session.full_transcript()
-                    _report_and_deliver(text, session.chunk_log, live_deliver, orchestrator_target, stop_wall_time)
+                    _report_and_deliver(text, session.chunk_log, live_deliver, orchestrator_target, stop_wall_time, wake_score=session.wake_score)
                     state = "IDLE"
                     session = None
                 else:
@@ -505,7 +535,7 @@ def simulate(dictation_wav: str, whisper: WhisperDaemon, live_deliver: bool = Fa
                 print(f"[{t:.2f}s] {SILENCE_SAFETY_NET_S}s silence safety net -> finalize (no stop phrase heard)")
                 session.flush_final(tmp_wav)  # no stop phrase to strip -- transcribe everything buffered
                 text = session.full_transcript()
-                _report_and_deliver(text, session.chunk_log, live_deliver, orchestrator_target, stop_wall_time)
+                _report_and_deliver(text, session.chunk_log, live_deliver, orchestrator_target, stop_wall_time, wake_score=session.wake_score)
                 state = "IDLE"
                 session = None
 
@@ -513,7 +543,7 @@ def simulate(dictation_wav: str, whisper: WhisperDaemon, live_deliver: bool = Fa
         session.flush_final(tmp_wav)
         text = session.full_transcript()
         print(f"[end of file] FULL TRANSCRIPT (file ended mid-dictation, no stop word or safety-net timeout reached): {text!r}")
-        _report_and_deliver(text, session.chunk_log, live_deliver, orchestrator_target, time.time())
+        _report_and_deliver(text, session.chunk_log, live_deliver, orchestrator_target, time.time(), wake_score=session.wake_score)
 
     tmp_wav.unlink(missing_ok=True)
 
@@ -657,7 +687,7 @@ class LiveController:
                 if accepted:
                     print(f"[{time.strftime('%H:%M:%S')}] wake word (score={score:.3f}) verified ({verify_text!r}) -> CAPTURING")
                     self.state = "CAPTURING"
-                    self.session = DictationSession(self.vad, self.whisper)
+                    self.session = DictationSession(self.vad, self.whisper, wake_score=score)
                     self.preroll.clear()
                 else:
                     print(f"[{time.strftime('%H:%M:%S')}] wake word (score={score:.3f}) REJECTED by verification (heard: {verify_text!r}) -- staying IDLE")
@@ -675,7 +705,7 @@ class LiveController:
                     print(f"[{time.strftime('%H:%M:%S')}] stop phrase matched in chunk transcript {partial!r} -> finalize (remainder={remainder!r})")
                     self.session.strip_stop_phrase(partial, remainder)
                     text = self.session.full_transcript()
-                    _report_and_deliver(text, self.session.chunk_log, self.live_deliver, self.orchestrator_target, stop_wall_time)
+                    _report_and_deliver(text, self.session.chunk_log, self.live_deliver, self.orchestrator_target, stop_wall_time, wake_score=self.session.wake_score)
                     self.state = "IDLE"
                     self.session = None
                 else:
@@ -688,7 +718,7 @@ class LiveController:
                 print(f"[{time.strftime('%H:%M:%S')}] {SILENCE_SAFETY_NET_S}s silence safety net -> finalize")
                 self.session.flush_final(self.tmp_wav)
                 text = self.session.full_transcript()
-                _report_and_deliver(text, self.session.chunk_log, self.live_deliver, self.orchestrator_target, stop_wall_time)
+                _report_and_deliver(text, self.session.chunk_log, self.live_deliver, self.orchestrator_target, stop_wall_time, wake_score=self.session.wake_score)
                 self.state = "IDLE"
                 self.session = None
 

@@ -29,13 +29,20 @@ failures were both a real instruction, naming a real session, landing on
 CHAT -- silently speaking nothing and forwarding nothing. CHAT is
 structurally unavailable in that case; see mentions_live_session and the
 constrained re-ask in classify().
+
+Third addition: assess_retention(), NOT_ADDRESSED's retention half
+(SPEC-L2.5's sixth intent class). Not a 6th label in classify()'s return
+value -- CHAT is already fully suppressed (never speaks, never forwards,
+see concierge.py's guard), so the only remaining question for a
+CHAT-classified transcript is whether it stays on disk. See
+assess_retention's own docstring for the asymmetric confidence bar.
 """
 from __future__ import annotations
 
 import re
 from dataclasses import dataclass
 
-from ollama_client import classify_with_model, reclassify_dispatch_or_query
+from ollama_client import assess_addressed, classify_with_model, reclassify_dispatch_or_query
 from session_match import mentions_live_session
 
 CONTROL = "CONTROL"
@@ -88,6 +95,71 @@ _QUERY_PATTERNS = [
         r"what'?s\s+the\s+status\b",
     ]
 ]
+
+
+# A second, independent, deterministic gate on discarding -- not on
+# classification. Applies only inside assess_retention(), which is only
+# ever called for a CHAT-classified transcript (mentions_live_session
+# already keeps anything naming a real session out of CHAT in the first
+# place, per the hard rule above -- this catches the case where an
+# instruction has no named target at all, e.g. "can you check on that").
+# Deliberately loose/over-inclusive: a false positive here just means an
+# ambient remark gets kept on disk instead of discarded (harmless, per
+# the retention asymmetry below), so there's no cost to casting wide.
+_IMPERATIVE_PATTERNS = [
+    re.compile(p, re.IGNORECASE) for p in [
+        r"\b(please\s+)?(check|run|restart|redeploy|fix|stop|start|compact|pull|deploy|update|revert|retry)\b",
+        r"\b(can|could|would)\s+you\b",
+        r"\bgo\s+ahead\s+and\b",
+        r"\bi\s+want\s+you\s+to\b",
+        r"\bmake\s+it\b",
+    ]
+]
+
+
+def _looks_imperative(text: str) -> bool:
+    return any(p.search(text) for p in _IMPERATIVE_PATTERNS)
+
+
+def assess_retention(text: str) -> tuple[bool, str]:
+    """Only meaningful for a CHAT-classified transcript. Decides whether
+    the dictation gets written to ~/.jarvis/dictations/ at all, or
+    discarded -- the retention half of NOT_ADDRESSED (SPEC-L2.5's sixth
+    intent class). CHAT itself already never speaks or forwards (see
+    concierge.py's guard); this is purely about whether an artifact
+    survives.
+
+    The one place the project's usual fail-toward-dispatch asymmetry
+    inverts, and inverts for a specific reason: forwarding an ambiguous
+    turn to L3 costs nothing but time and is fully recoverable.
+    Discarding a transcript is not -- there is no artifact left to
+    diagnose from if the discard was wrong. So discard only on HIGH
+    confidence (an independent deterministic imperative check AND the
+    model both have to agree it's ambient); anything else -- including a
+    plain model UNSURE -- keeps the file. A kept-but-silent transcript
+    and a genuinely-addressed kept transcript are behaviorally identical
+    from Ayman's side (neither speaks); the only stakes are the retention
+    decision, so there's no harm in defaulting to keep whenever unsure.
+
+    Returns (retain, reason) -- reason is for the log event and must
+    never be or contain the transcript text itself (see
+    concierge.py's retention-decision logging, "log the event, never the
+    content")."""
+    if _looks_imperative(text):
+        return True, "imperative-shaped despite CHAT classification, retaining"
+    # Lowercased before the model call -- found by testing, not a
+    # theoretical concern: "Thanks, appreciate it." (capital T, the exact
+    # shape Whisper always produces -- it capitalizes sentence starts)
+    # verdicts AMBIENT, while the semantically identical "thanks,
+    # appreciate it" verdicts UNSURE, every time, deterministically (not
+    # sampling noise -- reproduced 3x each way). A decision this
+    # consequential can't ride on capitalization Whisper adds for free on
+    # every real transcript; lowercasing removes that whole axis of
+    # instability rather than trying to prompt around it.
+    verdict = assess_addressed(text.lower())
+    if verdict == "AMBIENT":
+        return False, "high confidence not-addressed (ambient + no imperative pattern)"
+    return True, f"retaining, insufficient confidence to discard (verdict={verdict})"
 
 
 def classify(text: str) -> Classification:

@@ -97,6 +97,15 @@ Examples:
 "has shipcheck finished yet" -> QUERY
 """
 
+ASSESS_ADDRESSED_SYSTEM = """A voice assistant named Jarvis was triggered by hearing its own name and captured this transcript. Decide whether it was actually spoken TO Jarvis (a remark, question, or request directed at the assistant) or whether it's AMBIENT speech Jarvis merely overheard (a conversation between other people, a project or product name that happens to contain "Jarvis", talk ABOUT Jarvis rather than TO it). Answer with ONLY one word: ADDRESSED, AMBIENT, or UNSURE. If genuinely unclear, answer UNSURE -- do not guess between the other two.
+
+Examples:
+"how's it going Jarvis" -> ADDRESSED
+"thanks Jarvis, appreciate it" -> ADDRESSED
+"that's true, what's up, we're creating Iron Man IRL Iron Man Jarvis, Dino, Dino Transcripted" -> AMBIENT
+"I think Jarvis needs a better wake word detector" -> UNSURE
+"""
+
 PHRASE_SYSTEM_QUERY = """You are Jarvis, a voice assistant. Answer the user's question in ONE short SPOKEN sentence (under 20 words), using ONLY the facts given below. Do not add any detail not present in the facts. If the facts say nothing relevant or state is unknown, say you don't have that information -- never guess.
 
 This gets read aloud, not displayed as text. If the facts contain a long list (many session names, many items), SUMMARIZE it instead of reading every item -- a count, a pattern, "mostly test sessions" -- nobody wants a list of names read to them one by one. Example: given "currently running sessions: claude-a, claude-b, claude-c, claude-d, claude-e", say something like "You've got 5 sessions running" or "5 sessions running, mostly test ones" -- not a recitation of all 5 names.
@@ -173,6 +182,23 @@ def reclassify_dispatch_or_query(text: str) -> str:
     if not response.strip():
         return ""
     return response.strip().split()[0].upper().rstrip(".,:;")
+
+
+def assess_addressed(text: str) -> str:
+    """Called only for a CHAT-classified transcript, by
+    classifier.assess_retention() -- the retention half of NOT_ADDRESSED.
+    Deliberately three-way (ADDRESSED/AMBIENT/UNSURE), not binary: a
+    forced binary choice on a genuinely hard case just means the model
+    guesses, and this decision's whole design (see assess_retention) only
+    discards on AMBIENT specifically so it can treat "the model isn't
+    sure" as its own real answer rather than rounding it to one side."""
+    prompt = ASSESS_ADDRESSED_SYSTEM + f'\n"{text}" -> '
+    response, elapsed_ms = _generate(prompt, num_predict=6)
+    log_event("concierge_assess_addressed", elapsed_ms=round(elapsed_ms, 1), raw_response=response)
+    if not response.strip():
+        return "UNSURE"
+    label = response.strip().split()[0].upper().rstrip(".,:;")
+    return label if label in ("ADDRESSED", "AMBIENT", "UNSURE") else "UNSURE"
 
 
 def phrase_answer(kind: str, text: str, facts: str = "") -> tuple[str, float]:

@@ -421,19 +421,59 @@ one layer up, with actual dialogue-act/addressee understanding, which is
 out of scope for L1.
 
 **Where the real fix lives, and why it changes the consequence rather
-than the mechanism:** gu2s6tnt's observation (credited) — a stray
-"Jarvis" in ambient conversation is much less likely to *also* contain a
-dispatch-shaped sentence (a live session name, an imperative). The L2.5
-concierge (`SPEC-L2.5-concierge.md`) is adding a `NOT_ADDRESSED` intent
-class on exactly that discriminator: no session reference and no
-imperative shape → treat as ambient, **delete the transcript rather than
-writing it to `~/.jarvis/dictations/`**, log only the event (timestamp,
-score, character count) for false-trigger-rate measurement. This doesn't
-close the acoustic gap above — L1 still can't tell "said the name" from
-"addressed the system" — but it changes what a false trigger costs: from
-*persists a transcript of Ayman's private conversation to disk* to
-*briefly opens the mic, finds nothing addressed to it, and discards it*.
-Being built now; this entry should be revisited once it ships.
+than the mechanism — shipped, not just planned.** The gap itself is
+unchanged: L1's verification still can't tell "said the name" from
+"addressed the system," and no version of `verify_wake_trigger()` fixes
+that on its own. What changed is what a false trigger now *costs*.
+
+The L2.5 concierge (`l2_5_concierge/`) already suppresses speech on any
+CHAT-classified turn — see `concierge.py`'s guard — so the audible-
+interjection risk this entry originally worried about (Jarvis speaking an
+opinion into a private conversation) is closed regardless of anything
+below. What remained open was retention: a false trigger still wrote a
+full transcript of whatever was overheard to
+`~/.jarvis/dictations/`, permanently, with no expiry.
+
+`classifier.assess_retention()` (called only for CHAT-classified
+transcripts — a transcript naming a live session structurally can't reach
+CHAT at all, see the hard rule above) now makes that call, on gu2s6tnt's
+original discriminator (credited) plus one more independent check:
+
+1. A deterministic imperative-pattern check ("can you...", "please
+   check...", a bare action verb) — if it fires, the transcript is kept
+   regardless of anything else. Cheap, over-inclusive on purpose (a false
+   positive here just means an ambient remark gets kept, not discarded,
+   which is free).
+2. If that doesn't fire, one model call decides ADDRESSED / AMBIENT /
+   UNSURE — deliberately three-way so "genuinely unclear" is its own
+   answer, not a coin flip between the other two.
+
+Only `AMBIENT`, with no imperative match, discards. Everything else —
+including a plain `UNSURE` — keeps the file. This is the one place the
+project's usual fail-toward-dispatch asymmetry inverts: forwarding an
+ambiguous turn to L3 costs nothing but time and is fully recoverable;
+discarding a transcript is not, so the bar for discarding is deliberately
+higher than the bar for every other decision in this system.
+
+**Found and fixed during testing, worth recording because it's the kind
+of thing that's easy to validate against the wrong input shape:** the
+addressee judgment was measurably unstable to capitalization alone —
+`"Thanks, appreciate it."` (capital T) verdicted AMBIENT, while the
+semantically identical `"thanks, appreciate it"` (lowercase) verdicted
+UNSURE, reproducibly, every time. Whisper *always* capitalizes sentence
+starts, so every real transcript would have hit the capitalized, more
+discard-prone path — a synthetic lowercase test string would have looked
+fine while the real input shape didn't. Fixed by lowercasing before the
+model call, verified against the exact case that exposed it plus the
+real "Iron Man" transcript (still correctly discards) and genuinely-
+addressed capitalized cases (still correctly keep).
+
+Discard events are logged (event, timestamp, wake-word score,
+classification, character count) to `~/.jarvis/latency_log.jsonl` for
+measuring the real false-trigger rate — never the transcript content.
+What a false trigger now costs: from *persists a transcript of Ayman's
+private conversation to disk permanently* to *briefly opens the mic,
+finds nothing addressed to it, and forgets it*.
 
 ## Wake-word detection sensitivity: one mechanism explaining three findings
 

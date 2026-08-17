@@ -17,12 +17,15 @@ at most one local model call + a non-blocking speak()) before daemon.py
 returns to listening is the deliberate, measured-latency design -- same
 precedent as verify_wake_trigger's ~0.5s block on the START side.
 
-NOT YET WIRED: the NOT_ADDRESSED intent class and the retention decision
-it drives (discard an ambient-conversation transcript instead of writing
-it to ~/.jarvis/dictations/) -- sequenced after this core classifier
-per the Lead's explicit instruction ("don't let it complicate the first
-version"). daemon.py's chunk-log write is unconditional today and stays
-that way until that follow-up lands.
+NOT_ADDRESSED (SPEC-L2.5's sixth intent class) is wired as a retention
+decision on top of CHAT, not a 7th label: CHAT already never speaks or
+forwards, so the only thing left to decide for a CHAT-classified
+transcript is whether it survives to disk at all. See
+classifier.assess_retention() for the (deliberately asymmetric)
+confidence bar, and daemon.py's _report_and_deliver -- the chunk-log
+write now happens AFTER this decision, not before, so a discarded
+transcript is never written in the first place rather than being written
+then deleted.
 """
 from __future__ import annotations
 
@@ -39,7 +42,7 @@ from say_feedback import speak  # noqa: E402
 from transport import TmuxTransport  # noqa: E402
 
 sys.path.insert(0, str(Path(__file__).parent))
-from classifier import classify, Classification, CONTROL, QUERY, CHAT, DISPATCH, UNSURE  # noqa: E402
+from classifier import assess_retention, classify, Classification, CONTROL, QUERY, CHAT, DISPATCH, UNSURE  # noqa: E402
 from ollama_client import phrase_answer  # noqa: E402
 from session_match import resolve_session as _resolve_session  # noqa: E402
 
@@ -133,6 +136,7 @@ def handle_transcript(
     text: str,
     orchestrator_target: str = DEFAULT_ORCHESTRATOR_TARGET,
     live_deliver: bool = False,
+    wake_score: float | None = None,
 ) -> dict:
     """Entry point daemon.py calls once per finished dictation. Never
     raises for an ordinary classification/handling failure: a bug in this
@@ -146,7 +150,14 @@ def handle_transcript(
     daemon.py's real integration passes its own --live-deliver value
     straight through here, so the whole L1->L2.5 pipeline is gated by one
     consistent, explicitly-opted-in flag rather than each layer defaulting
-    differently."""
+    differently.
+
+    wake_score is the acoustic START trigger's score (from L1, purely for
+    the NOT_ADDRESSED discard-event log -- measuring the real false-
+    trigger rate needs it correlated with the outcome). Optional and
+    never required for correctness: a caller that doesn't have it (the
+    CLI below, any other test harness) just gets a log entry with
+    wake_score=None rather than a broken retention decision."""
     t_start = time.monotonic()
     try:
         result = classify(text)
@@ -163,22 +174,33 @@ def handle_transcript(
         return {"label": result.label, "forwarded": live_deliver, "delivery": delivery}
 
     if result.label == CHAT:
-        # GUARD, temporary until NOT_ADDRESSED exists (see
-        # l1_wakeword/README.md's known-limitation entry): never speak on
-        # CHAT. A false wake-word trigger on ambient conversation reaching
-        # this far would otherwise make Jarvis audibly interject an
-        # opinion into a conversation that was never addressed to it --
-        # not recoverable the way staying silent is (Ayman can always ask
-        # again if he actually wanted an answer). Classified and logged,
-        # not silently dropped -- just not spoken. CONTROL and QUERY still
-        # speak: both are unambiguously addressed to the system (a real
-        # command word, a real question about system state), unlike CHAT,
-        # where "was this even meant for me?" is exactly what's unresolved.
-        # Skips the phrase-generation model call entirely too, not just
-        # the speak() -- nothing needs an answer nobody will hear.
+        # GUARD: never speak on CHAT. A false wake-word trigger on
+        # ambient conversation reaching this far would otherwise make
+        # Jarvis audibly interject an opinion into a conversation that
+        # was never addressed to it -- not recoverable the way staying
+        # silent is (Ayman can always ask again if he actually wanted an
+        # answer). Classified and logged, not silently dropped -- just
+        # not spoken. CONTROL and QUERY still speak: both are
+        # unambiguously addressed to the system, unlike CHAT, where "was
+        # this even meant for me?" is exactly what's unresolved. Skips
+        # the phrase-generation model call entirely too -- nothing needs
+        # an answer nobody will hear.
+        #
+        # NOT_ADDRESSED: the retention question this guard doesn't answer
+        # on its own. assess_retention() decides whether the transcript
+        # is worth keeping on disk at all -- see its docstring for the
+        # asymmetric confidence bar (discard only on high confidence,
+        # default to keep). Logged as an EVENT, never the content: only
+        # the decision, the reason (itself never the transcript text),
+        # char count, and the acoustic wake score for measuring the real
+        # false-trigger rate over time.
+        retain, reason = assess_retention(text)
         elapsed_ms = (time.monotonic() - t_start) * 1000
-        log_event("concierge_chat_suppressed", chars=len(text), elapsed_ms=round(elapsed_ms, 1))
-        return {"label": result.label, "forwarded": False, "response": None, "spoken": False}
+        log_event(
+            "concierge_chat_suppressed", chars=len(text), elapsed_ms=round(elapsed_ms, 1),
+            retain=retain, retention_reason=reason, wake_score=wake_score,
+        )
+        return {"label": result.label, "forwarded": False, "response": None, "spoken": False, "retain": retain}
 
     try:
         if result.label == CONTROL:
