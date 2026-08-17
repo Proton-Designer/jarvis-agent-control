@@ -92,6 +92,30 @@ def report_dispatch_stage(stage: str, detail: str = "") -> dict:
 
 
 @app.tool()
+def speak_now(text: str) -> dict:
+    """Speak a short, immediate status update -- for narrating each
+    instruction's resolution AS IT LANDS while you're still working
+    through the rest of a dictation, instead of staying silent until
+    confirm_plan's single end-of-turn summary (this is most of the felt
+    latency: Ayman standing in silence for a long routing turn, even
+    though individual resolutions happen well before the turn ends).
+
+    Purely informational -- no cancel window, no gating, does not affect
+    delivery in any way. confirm_plan's summary + cancel window and
+    deliver_batch's actual sends are completely unchanged by this;
+    calling speak_now describes an in-progress plan, it never commits or
+    delivers anything itself. Routes through the same say_feedback.speak()
+    as everything else, so JARVIS_MUTE governs it identically and every
+    call lands in ~/.jarvis/say_log.jsonl.
+
+    Keep it short (one instruction's worth, e.g. "Sending the deploy
+    command to the API gateway") -- this is a running commentary, not a
+    replacement for confirm_plan's actual summary."""
+    speak(text)
+    return {"ok": True}
+
+
+@app.tool()
 def confirm_plan(summary: str, cancel_window_s: float = 2.5) -> dict:
     """Speak the routing plan summary (with a "say Hey Jarvis to cancel"
     hint appended) and open a cancel window in parallel (not sequentially).
