@@ -7,20 +7,57 @@ doesn't hear is functionally identical to a lost instruction, and with auto
 mode removing tool-permission prompts, the cancel window is the only
 human-in-the-loop control left in the system, so it must never be silently
 skipped on any code path.
+
+MUTE MODE — a real product feature, not test scaffolding. Ayman will want
+to route instructions silently when he's on a call, in a meeting, or
+around other people, not just during testing (this module's audio firing
+mid-adversarial-test-run on his own laptop, unannounced, is what prompted
+building this properly rather than as a workaround). Set JARVIS_MUTE=1 to
+suppress the `say` subprocess. What mute does NOT do: skip the cancel
+window. Suppressing the audio is fine; suppressing the human-in-the-loop
+control itself would just be another quiet way to remove it — the same
+failure class as the cancel_listener fail-open bug. speak_with_cancel_window
+still arms listen_for_cancel and honors the timeout under mute; only the
+`say` subprocess is skipped. Every speak() call, muted or not, is logged to
+~/.jarvis/say_log.jsonl with an explicit `muted` field, so a clean muted
+test run is never mistaken for evidence that the audio path itself works —
+it hasn't been exercised.
 """
 
 from __future__ import annotations
 
+import json
+import os
 import subprocess
 import threading
+import time
+from pathlib import Path
 
 from cancel_listener import listen_for_cancel
 
+MUTE = os.environ.get("JARVIS_MUTE", "0") == "1"
+SAY_LOG_PATH = Path.home() / ".jarvis" / "say_log.jsonl"
+
+
+def _log_say(text: str, muted: bool) -> None:
+    SAY_LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
+    entry = {
+        "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        "muted": muted,
+        "text": text,
+    }
+    with SAY_LOG_PATH.open("a") as f:
+        f.write(json.dumps(entry) + "\n")
+
 
 def speak(text: str) -> None:
-    """Fire-and-forget TTS. Non-blocking: callers that need to do something
-    else (like listen for the cancel trigger) while speech plays must not
-    wait on this."""
+    """Fire-and-forget TTS, unless JARVIS_MUTE=1 -- then this only logs what
+    would have been spoken. Non-blocking either way: callers that need to
+    do something else (like listen for the cancel trigger) while speech
+    plays must not wait on this."""
+    _log_say(text, MUTE)
+    if MUTE:
+        return
     subprocess.Popen(["say", text], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
 
@@ -53,6 +90,11 @@ def speak_with_cancel_window(text: str, cancel_window_s: float) -> dict:
     with available=True (the window was deliberately not requested, which
     is a different, intentional case from the socket being down) and no
     cancel hint appended.
+
+    Under JARVIS_MUTE=1, the listener still arms and the timeout is still
+    honored (this function's control flow doesn't change) -- only speak()'s
+    internal `say` call is suppressed. Mute silences the room, not the
+    control.
     """
     if cancel_window_s <= 0:
         speak(text)
