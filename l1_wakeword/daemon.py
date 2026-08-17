@@ -43,6 +43,7 @@ no benefit; one state machine sidesteps it entirely.
 import argparse
 import asyncio
 import collections
+import difflib
 import json
 import re
 import signal
@@ -132,6 +133,49 @@ def match_stop_phrase(text: str) -> tuple[bool, str]:
             remainder = " ".join(words[:-n_words_to_strip]).strip()
             return True, remainder
     return False, text
+
+
+# How close a silence-closed chunk's trailing words need to be to an
+# accepted variant to flag as a NEAR-miss in the chunk log -- diagnostic
+# only, this never gates the actual stop transition or changes control
+# flow. Exists for the real risk the Lead flagged: Ayman's actual voice
+# could render "that's it" outside STOP_PHRASE_VARIANTS (a trailing
+# "...that's it, thanks", a run-together "thassit") and the failure mode
+# for that would otherwise be silent -- "it didn't stop, no idea why."
+# This surfaces it in ~/.jarvis/dictations/*.chunks.json immediately
+# instead. Threshold picked to catch obviously-close variants without
+# flagging every unrelated silence-closed chunk; not empirically tuned --
+# no real near-miss data exists yet, expect to revisit once it does.
+STOP_PHRASE_NEAR_MISS_SIMILARITY = 0.55
+_NEAR_MISS_WINDOW_WORDS = max(len(v.split()) for v in STOP_PHRASE_VARIANTS) + 2
+
+
+def stop_phrase_near_miss(text: str) -> bool:
+    """Diagnostic only -- call after match_stop_phrase() already returned
+    False. Two distinct near-miss shapes, both real risks on real speech:
+
+    1. The variant appears verbatim but NOT at the very end (e.g. Ayman
+       adds a trailing word Whisper picks up too -- "...that's it,
+       thanks."). Caught by plain substring containment in a wider
+       trailing window; a ratio comparison against the same wide window
+       would dilute below threshold on the extra words and miss this.
+    2. The variant doesn't appear verbatim anywhere -- Whisper mangled it
+       (a run-together "thassit"). Caught by a fuzzy ratio against a
+       window sized to the variant itself, not the wider window, so extra
+       trailing words can't dilute this one either."""
+    normalized = _normalize_for_stop_match(text)
+    words = normalized.split()
+    if not words:
+        return False
+    wide_tail = " ".join(words[-_NEAR_MISS_WINDOW_WORDS:])
+    for variant in STOP_PHRASE_VARIANTS:
+        if variant in wide_tail:
+            return True
+        narrow_tail = " ".join(words[-len(variant.split()):])
+        if difflib.SequenceMatcher(None, narrow_tail, variant).ratio() >= STOP_PHRASE_NEAR_MISS_SIMILARITY:
+            return True
+    return False
+
 
 # --- Start-trigger verification: fails CLOSED, unlike stop/cancel below ---
 #
@@ -254,6 +298,7 @@ class DictationSession:
             "raw_transcript": raw_text,
             "kept_transcript": text,  # None if the hallucination filter dropped it
             "stop_phrase_matched": False,  # overwritten by strip_stop_phrase() if this chunk ended the dictation
+            "stop_phrase_near_miss": False,  # overwritten by mark_stop_phrase_near_miss() -- diagnostic only
             "wall_clock": time.time(),
         })
         if text is None:
@@ -307,6 +352,14 @@ class DictationSession:
             self.chunks_transcribed.append(remainder)
         self.chunk_log[-1]["kept_transcript"] = remainder or None
         self.chunk_log[-1]["stop_phrase_matched"] = True
+
+    def mark_stop_phrase_near_miss(self):
+        """Diagnostic only, see stop_phrase_near_miss() -- flags the just-
+        appended chunk's log record so a rendering-variant miss on real
+        speech is visible in the chunk log immediately, instead of only
+        being inferable later from "it didn't stop, no idea why."""
+        if self.chunk_log:
+            self.chunk_log[-1]["stop_phrase_near_miss"] = True
 
     def full_transcript(self) -> str:
         return " ".join(t for t in self.chunks_transcribed if t)
@@ -424,6 +477,9 @@ def simulate(dictation_wav: str, whisper: WhisperDaemon, live_deliver: bool = Fa
                     session = None
                 else:
                     print(f"[{t:.2f}s] chunk transcribed: {partial!r}")
+                    if session.last_cut_reason == "silence" and stop_phrase_near_miss(partial):
+                        print(f"[{t:.2f}s] *** possible stop-phrase near-miss (not matched): {partial!r} ***")
+                        session.mark_stop_phrase_near_miss()
             elif session.silence_exceeds_safety_net():
                 stop_wall_time = time.time()
                 print(f"[{t:.2f}s] {SILENCE_SAFETY_NET_S}s silence safety net -> finalize (no stop phrase heard)")
@@ -604,6 +660,9 @@ class LiveController:
                     self.session = None
                 else:
                     print(f"[{time.strftime('%H:%M:%S')}] chunk transcribed: {partial!r}")
+                    if self.session.last_cut_reason == "silence" and stop_phrase_near_miss(partial):
+                        print(f"[{time.strftime('%H:%M:%S')}] *** possible stop-phrase near-miss (not matched): {partial!r} ***")
+                        self.session.mark_stop_phrase_near_miss()
             elif self.session.silence_exceeds_safety_net():
                 stop_wall_time = time.time()
                 print(f"[{time.strftime('%H:%M:%S')}] {SILENCE_SAFETY_NET_S}s silence safety net -> finalize")
