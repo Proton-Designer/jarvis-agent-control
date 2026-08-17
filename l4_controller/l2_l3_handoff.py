@@ -37,6 +37,7 @@ from __future__ import annotations
 import time
 from pathlib import Path
 
+from dispatch_state import mark_dispatch_forwarded
 from latency_log import log_event
 from say_feedback import speak
 from transport import Transport
@@ -70,6 +71,12 @@ def deliver_transcript(
     speak("Got it, working on it.")
     path = write_dictation(text)
     pointer = f"New dictation at {path} — read it and route the instructions inside."
+    # Code-driven "forwarded" marker for the concierge's dispatch-in-flight
+    # state -- written here, not by L3, because this is the actual moment
+    # of handoff and this call already fires exactly once per real
+    # forward. See dispatch_state.py for why this must not be an
+    # LLM self-report.
+    mark_dispatch_forwarded(str(path))
     result = transport.deliver(orchestrator_target, pointer)
     log_event("pointer_delivered", ok=result.ok, target=orchestrator_target)
     return result
