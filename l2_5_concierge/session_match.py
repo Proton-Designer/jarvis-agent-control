@@ -15,8 +15,21 @@ testing: a throwaway session named "claude-heldfix-a" tokenizes to
 "What a nice day today" -- an entirely unrelated, ordinary sentence.
 Single- and double-character tokens are too generic to be a meaningful
 "this text is about that session" signal; excluding them below this
-length removes that whole class of false positive without needing a
-stopword list.
+length removes that whole class of false positive.
+
+_NAMING_STOPWORDS exists for a second, related false positive found
+later (gu2s6tnt's review): "let me test something real quick" matched a
+session named "claude-<project>-test", because "test" -- long enough to
+survive MIN_TOKEN_LEN, but a naming-convention SUFFIX here, not a
+distinguishing project name -- is also just an ordinary English word.
+Over-triggers into the DISPATCH-or-QUERY hard rule rather than dropping
+anything (a nuisance, not a loss), but the same family of bug as the
+single-letter one: a token that's technically part of a session's name
+but carries no real "this is about that session" signal on its own.
+Scoped narrowly to this project's actual naming convention (environment/
+lifecycle suffixes seen in practice: -test, -dev, -staging, -prod,
+-demo), not a general English stopword list -- broadening it risks
+suppressing a real project name that happens to also be a common word.
 """
 from __future__ import annotations
 
@@ -28,12 +41,16 @@ sys.path.insert(0, str(Path(__file__).parent.parent / "l4_controller"))
 from providers import list_sessions  # noqa: E402
 
 MIN_TOKEN_LEN = 3
+_NAMING_STOPWORDS = {"test", "tests", "dev", "staging", "prod", "demo", "temp", "tmp"}
 
 
 def session_tokens(session_id: str, alias: str | None) -> set[str]:
     name = session_id[len("claude-"):] if session_id.lower().startswith("claude-") else session_id
-    tokens = {t for t in re.split(r"[-_\s]+", name.lower()) if len(t) >= MIN_TOKEN_LEN}
-    if alias and len(alias) >= MIN_TOKEN_LEN:
+    tokens = {
+        t for t in re.split(r"[-_\s]+", name.lower())
+        if len(t) >= MIN_TOKEN_LEN and t not in _NAMING_STOPWORDS
+    }
+    if alias and len(alias) >= MIN_TOKEN_LEN and alias.lower() not in _NAMING_STOPWORDS:
         tokens.add(alias.lower())
     return tokens
 

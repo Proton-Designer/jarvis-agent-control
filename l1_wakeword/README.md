@@ -498,6 +498,23 @@ What a false trigger now costs: from *persists a transcript of Ayman's
 private conversation to disk permanently* to *briefly opens the mic,
 finds nothing addressed to it, and forgets it*.
 
+**A second general lesson, found immediately after the first and worth
+stating on its own:** fixing the classifier's keyword tier (anchoring
+`_QUERY_PATTERNS` so a compound utterance falls through to the model
+instead of matching a substring) exposed that the *model tier* had the
+same underlying failure — "what's the gateway doing, oh and also have it
+restart" classified QUERY, 3/3, even once it correctly reached the model.
+That path had never actually been exercised before the keyword-tier fix,
+because the keyword tier always intercepted compound utterances first.
+"It passed" had only ever meant "it was never called." **When a filter
+in front of something gets fixed, re-test what's behind it — a case that
+now reaches it for the first time may have been silently failing there
+the whole time.** Same shape as the capitalization lesson above, and the
+same shape as `pane_state.py`'s PERMISSION_PROMPT detector once being
+validated against the onboarding dialog instead of a real tool-approval
+prompt: something that looks validated because the case that would break
+it never actually arrived.
+
 ## Wake-word detection sensitivity: one mechanism explaining three findings
 
 Discovered while running the full-length (~5 min) pipeline test and chasing
