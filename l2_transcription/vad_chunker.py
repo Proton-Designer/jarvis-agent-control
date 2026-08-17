@@ -15,19 +15,38 @@ for L1's wake-word detection.
 """
 import argparse
 import json
+import logging
 import wave
 from pathlib import Path
 
 import numpy as np
 import onnxruntime as ort
 
+log = logging.getLogger(__name__)
+
 VAD_MODEL_PATH = Path(__file__).parent.parent / "l1_wakeword" / "models" / "silero_vad.onnx"
 SAMPLE_RATE = 16000
 FRAME_SAMPLES = 512  # Silero VAD's recommended window at 16kHz
 SPEECH_THRESHOLD = 0.5
 SILENCE_MS_TO_CUT = 700  # pause length that ends a chunk (mid-dictation boundary, not end-of-speech)
-MIN_CHUNK_MS = 500  # don't emit a chunk shorter than this (avoids cutting on a stray blip)
 MAX_CHUNK_MS = 30_000  # hard cap so one long unbroken sentence still gets cut for transcription
+
+# Minimum count of speech-classified frames ANY chunk must contain before
+# it's allowed to reach Whisper -- not just trimmed remainders. Applies
+# structurally, inside _cut() itself, so every code path that can emit a
+# chunk (silence-triggered cut, maxlen cut, flush, trimmed-tail) goes
+# through the same gate rather than each caller having to remember to
+# check. Exists because a chunk can satisfy every duration/silence-run
+# condition while being almost entirely non-speech -- a pause containing a
+# cough or keyboard clatter that VAD marginally misclassified, a chunk at
+# the edge of a long silence -- and Whisper does not return empty on
+# low-speech audio, it hallucinates (confirmed directly: "TV Gelderland
+# 2021" out of what should have been near-silence). A hallucinated
+# sentence reaching L3 becomes a routed instruction with no signal that
+# Ayman never said it -- worth being deliberately conservative about.
+MIN_CHUNK_MS = 500  # don't emit a chunk shorter than this (avoids cutting on a stray blip)
+MIN_CHUNK_SAMPLES = int(MIN_CHUNK_MS / 1000 * SAMPLE_RATE)
+MIN_SPEECH_FRAMES_PER_CHUNK = 5  # ~160ms of actual speech, not just duration
 
 
 class SileroVAD:
@@ -109,18 +128,6 @@ class StreamingChunker:
             return self._cut()
         return None
 
-    # Minimum count of speech-classified frames a trimmed remainder must
-    # contain before it's worth sending to Whisper at all. Exists because a
-    # remainder can pass the duration check (min_chunk_samples) while being
-    # almost entirely silence -- e.g. a paused-before-stop case, where the
-    # pending buffer is [long pause][short wake word] and trimming a fixed
-    # tail off the end leaves mostly the pause behind. Whisper hallucinates
-    # on near-silent input rather than returning nothing (confirmed by
-    # testing: got back "TV Gelderland 2021" from what should have been an
-    # empty remainder) -- so silence has to be filtered out explicitly,
-    # not left to the model to notice there's nothing to transcribe.
-    _MIN_SPEECH_FRAMES_IN_REMAINDER = 5  # ~160ms of actual speech
-
     def flush(self) -> np.ndarray | None:
         """Call at dictation end: returns any buffered speech as a final chunk."""
         if self._buf and self._saw_speech:
@@ -159,13 +166,8 @@ class StreamingChunker:
         trim_samples = int(trim_s * SAMPLE_RATE)
         keep_samples = max(0, len(audio) - trim_samples)
         remainder = audio[:keep_samples]
-        if len(remainder) < self._min_chunk_samples:
-            return None
-
         keep_frames = keep_samples // FRAME_SAMPLES
-        if sum(speech_flags[:keep_frames]) < self._MIN_SPEECH_FRAMES_IN_REMAINDER:
-            return None  # mostly/entirely silence -- would just feed Whisper hallucination bait
-        return remainder
+        return self._gate(remainder, speech_flags[:keep_frames], source="trimmed-tail")
 
     def _reset_buffer(self):
         self._buf = []
@@ -173,9 +175,30 @@ class StreamingChunker:
         self._silence_run = 0
         self._saw_speech = False
 
-    def _cut(self) -> np.ndarray:
+    def _cut(self) -> np.ndarray | None:
         audio = np.concatenate(self._buf)
+        speech_flags = self._frame_is_speech
         self._reset_buffer()
+        return self._gate(audio, speech_flags, source="chunk")
+
+    @staticmethod
+    def _gate(audio: np.ndarray, speech_flags: list, source: str) -> np.ndarray | None:
+        """The one place a chunk is allowed to leave this class. Every
+        emission path (silence-cut, maxlen-cut, flush, trimmed-tail) routes
+        through here so the min-speech-content requirement is a structural
+        guarantee, not a convention each caller has to apply -- same
+        reasoning that made "advance the VAD once per frame" a class
+        invariant instead of something call sites could get wrong."""
+        if len(audio) < MIN_CHUNK_SAMPLES:
+            log.info("vad_chunker: dropped %s chunk (%.2fs, too short)", source, len(audio) / SAMPLE_RATE)
+            return None
+        speech_frames = sum(speech_flags)
+        if speech_frames < MIN_SPEECH_FRAMES_PER_CHUNK:
+            log.warning(
+                "vad_chunker: dropped %s chunk (%.2fs, only %d speech frames) -- would risk Whisper hallucination on low-speech audio",
+                source, len(audio) / SAMPLE_RATE, speech_frames,
+            )
+            return None
         return audio
 
 
@@ -183,6 +206,14 @@ def chunk_pcm(pcm_i16: np.ndarray, vad: SileroVAD | None = None):
     """Yield (start_sample, end_sample, audio_i16) for a complete, already-
     recorded file. Used by the offline CLI / tests below -- for the live
     daemon, use StreamingChunker.push() directly, one frame at a time.
+
+    Note: if the gate in StreamingChunker._gate drops a chunk (too little
+    speech content), this generator's chunk_start bookkeeping doesn't
+    advance past it, so a subsequent real chunk's reported start_sec can
+    be earlier than where its audio actually begins. Cosmetic only --
+    daemon.py drives StreamingChunker directly and doesn't use these
+    offsets, so production behavior is unaffected. Not fixed here because
+    it'd add real complexity to a debug/reporting-only path.
     """
     chunker = StreamingChunker(vad)
     n_frames = len(pcm_i16) // FRAME_SAMPLES

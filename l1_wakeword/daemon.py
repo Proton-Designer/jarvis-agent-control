@@ -52,6 +52,7 @@ from listener import load_model, FRAME_SAMPLES as WAKEWORD_FRAME_SAMPLES, SAMPLE
 from vad_chunker import SileroVAD, StreamingChunker, FRAME_SAMPLES as VAD_FRAME_SAMPLES  # noqa: E402
 from whisper_daemon import WhisperDaemon  # noqa: E402
 from session_vocab import build_prompt  # noqa: E402
+from hallucination_filter import filter_transcript  # noqa: E402
 
 IDLE_THRESHOLD = 0.5
 # Lowered threshold, shared by two states for the same reason: the Lead's
@@ -135,6 +136,25 @@ class DictationSession:
     def silence_exceeds_safety_net(self) -> bool:
         return self._chunker.silence_duration_s >= SILENCE_SAFETY_NET_S
 
+    def _transcribe_and_append(self, audio: np.ndarray, wav_tmp_path: Path, source: str) -> str | None:
+        """The one place a chunk's audio becomes text in the assembled
+        transcript. Every caller (feed/flush_final/finalize_on_stop_word)
+        routes through here so the hallucination filter is a structural
+        guarantee on the transcript-assembly path, not a convention each
+        call site has to remember to apply -- same reasoning as
+        StreamingChunker's VAD-gate invariant. The VAD speech-content gate
+        (vad_chunker.py) is the first layer and catches most of this
+        before Whisper is even called; this is the second layer, for
+        chunks that passed the VAD gate but still produced a
+        confabulation (background noise VAD classified as speech, etc.)."""
+        _write_wav(wav_tmp_path, audio)
+        raw_text = self.whisper.transcribe(str(wav_tmp_path), prompt=build_prompt())
+        text = filter_transcript(raw_text, source=source)
+        if text is None:
+            return None
+        self.chunks_transcribed.append(text)
+        return text
+
     def feed(self, frame_i16: np.ndarray, wav_tmp_path: Path) -> str | None:
         """Push exactly one frame into the chunker (the VAD advances exactly
         once per frame, ever -- see StreamingChunker's docstring for why
@@ -143,10 +163,7 @@ class DictationSession:
         audio = self._chunker.push(frame_i16)
         if audio is None:
             return None
-        _write_wav(wav_tmp_path, audio)
-        text = self.whisper.transcribe(str(wav_tmp_path), prompt=build_prompt())
-        self.chunks_transcribed.append(text)
-        return text
+        return self._transcribe_and_append(audio, wav_tmp_path, source="chunk")
 
     def flush_final(self, wav_tmp_path: Path):
         """Called after the dictation ends normally (silence safety net) --
@@ -154,8 +171,7 @@ class DictationSession:
         to strip it out."""
         audio = self._chunker.flush()
         if audio is not None and len(audio) > 0:
-            _write_wav(wav_tmp_path, audio)
-            self.chunks_transcribed.append(self.whisper.transcribe(str(wav_tmp_path), prompt=build_prompt()))
+            self._transcribe_and_append(audio, wav_tmp_path, source="final-flush")
 
     def finalize_on_stop_word(self, wav_tmp_path: Path):
         """Called when the dictation ends via the stop wake word. The still-
@@ -178,8 +194,7 @@ class DictationSession:
         """
         audio = self._chunker.pop_trimming_tail(WAKE_WORD_TAIL_TRIM_S)
         if audio is not None:
-            _write_wav(wav_tmp_path, audio)
-            self.chunks_transcribed.append(self.whisper.transcribe(str(wav_tmp_path), prompt=build_prompt()))
+            self._transcribe_and_append(audio, wav_tmp_path, source="trimmed-tail")
 
     def full_transcript(self) -> str:
         return " ".join(t for t in self.chunks_transcribed if t)

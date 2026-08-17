@@ -144,6 +144,44 @@ heuristics sized from synthetic `say` timing — real-voice validation
 should confirm them against how Ayman actually speaks, not just assume
 these numbers hold.
 
+**Two-layer hallucination defense, because the "TV Gelderland 2021"
+finding above generalizes.** That wasn't a one-off: Whisper doesn't
+return empty on low-speech audio, it confabulates, and any confabulated
+sentence that reaches L3 becomes a routed instruction with no signal
+that Ayman never said it. Fixed at two layers, deliberately not just one:
+
+1. **`MIN_SPEECH_FRAMES_PER_CHUNK` is now enforced on every chunk, not
+   just trimmed remainders.** Moved into `StreamingChunker._gate`, which
+   every emission path (silence-cut, maxlen-cut, flush, trimmed-tail)
+   routes through — same "class invariant, not convention" reasoning as
+   the VAD-advance-once-per-frame fix. Re-ran the original "TV
+   Gelderland 2021" scenario after this change: the chunk is now dropped
+   *before Whisper is ever called* (`vad_chunker: dropped trimmed-tail
+   chunk (0.73s, only 0 speech frames)`), not caught after the fact.
+
+2. **`../l2_transcription/hallucination_filter.py` — a second layer for
+   whatever passes the VAD gate but is still confabulated** (background
+   noise the VAD classified as speech, etc.). Two independent signals:
+   a pattern list of Whisper's well-documented subtitle-corpus
+   confabulations ("thanks for watching," "subtitles by," channel/credit
+   patterns), and a structural n-gram repetition check (a 1-4 word
+   phrase repeating 4+ times consecutively — degenerate decoding loops
+   repeat phrases as often as single words, so this checks both). Every
+   drop is logged with the reason and the dropped text, not silently
+   swallowed, so the false-drop rate is observable rather than assumed.
+   Wired into `daemon.py` at the one place a chunk's audio becomes
+   transcript text (`DictationSession._transcribe_and_append`), so
+   every caller gets it structurally rather than needing to remember.
+
+Explicitly not claiming full coverage: the pattern list catches known,
+previously-reported hallucination phrasings, not arbitrary novel ones —
+that's what layer 1 (the VAD gate) and the repetition check are for,
+since neither depends on Whisper's output matching something already
+seen. Fails toward dropping throughout, per the same asymmetry as
+everything else on this project: a dropped real sentence costs a
+re-dictation Ayman will notice missing at the plan-confirmation summary;
+a hallucinated one that gets through is silent and can't be un-delivered.
+
 **Bug found and fixed during this build, logged here because it's the
 kind of thing worth being able to point to later:** an earlier version
 re-ran the VAD chunker over the *entire* accumulated buffer on every new
