@@ -291,7 +291,9 @@ class DictationSession:
         start_sec = end_sec - (len(audio) / SAMPLE_RATE)
         prompt_used = build_prompt()
         _write_wav(wav_tmp_path, audio)
+        whisper_t0 = time.monotonic()
         raw_text = self.whisper.transcribe(str(wav_tmp_path), prompt=prompt_used)
+        whisper_ms = (time.monotonic() - whisper_t0) * 1000
         text = filter_transcript(raw_text, source=source)
         self.chunk_log.append({
             "chunk_index": len(self.chunk_log),
@@ -303,6 +305,7 @@ class DictationSession:
             "kept_transcript": text,  # None if the hallucination filter dropped it
             "stop_phrase_matched": False,  # overwritten by strip_stop_phrase() if this chunk ended the dictation
             "stop_phrase_near_miss": False,  # overwritten by mark_stop_phrase_near_miss() -- diagnostic only
+            "whisper_ms": round(whisper_ms, 1),  # for the L2.5 latency budget's "Whisper" row -- the LAST chunk's value is what's on the critical path to first audio out
             "wall_clock": time.time(),
         })
         if text is None:
@@ -401,10 +404,19 @@ def _report_and_deliver(text: str, chunk_log: list[dict], live_deliver: bool, or
     print(f"FULL TRANSCRIPT: {text!r}")
     chunk_log_path = _write_chunk_log(chunk_log)
     print(f"chunk log ({len(chunk_log)} chunks): {chunk_log_path}")
+    last_whisper_ms = chunk_log[-1]["whisper_ms"] if chunk_log else None
+    sys.path.insert(0, str(Path(__file__).parent.parent / "l4_controller"))
+    from latency_log import log_event  # noqa: E402
+    log_event("l1_dictation_end", chars=len(text), last_chunk_whisper_ms=last_whisper_ms)
     result = default_deliver(text, orchestrator_target=orchestrator_target, live_deliver=live_deliver)
     handoff_wall_time = time.time()
+    end_to_end_s = handoff_wall_time - stop_wall_time
     print(f"concierge result: {result!r}")
-    print(f"stop-word-to-handoff-return wall-clock: {handoff_wall_time - stop_wall_time:.3f}s")
+    print(f"stop-word-to-handoff-return wall-clock: {end_to_end_s:.3f}s")
+    log_event(
+        "l1_concierge_round_trip", label=result.get("label"), spoken=bool(result.get("response")),
+        forwarded=result.get("forwarded", False), end_to_end_s=round(end_to_end_s, 3),
+    )
 
 
 def simulate(dictation_wav: str, whisper: WhisperDaemon, live_deliver: bool = False, orchestrator_target: str | None = None):
