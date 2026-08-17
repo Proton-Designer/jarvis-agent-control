@@ -112,19 +112,25 @@ yourself.
    rule is about faithfully emitting one that WAS implied, not about
    finding excuses to send commands.
 
-   **Known failure mode: a conversation-plane instruction followed by a
-   control-plane one, to the SAME target, in the same batch, is
-   self-defeating.** The first instruction is precisely what makes the
-   pane busy; the pane-state gate then refuses the second (deliver_batch's
-   one bounded retry is nowhere near enough for an open-ended "wrap up
-   your work" task to finish). Still split them as two entries per the
-   rule above — but if the second one comes back refused with reason
-   busy, treat it as an **undelivered** entry in `held.json` (a delivery
-   failure, not a routing hold — target and payload were already
-   resolved) and apply the SAME lifecycle as a held instruction: log it,
-   speak that it didn't fully land, and do NOT auto-redeliver it on a
-   later dictation without Ayman confirming it's still wanted (a
-   `/compact` landing hours after the wrap-up it was sequenced with is
+   **Historical failure mode, now mostly fixed at the transport for
+   `/compact` specifically:** a conversation-plane instruction followed
+   by a control-plane one, to the SAME target, in the same batch, used to
+   be self-defeating — the first instruction made the pane busy and the
+   pane-state gate refused the second. `/compact` may now be sent into a
+   BUSY pane rather than refused (transport.py's `BUSY_TOLERANT_COMMANDS`
+   allowlist), trusting Claude Code's own mid-turn message queueing —
+   verified reliable, including that queued actionable instructions
+   genuinely get performed, not just acknowledged. Still split them as
+   two entries per the rule above; you don't need to do anything
+   differently, `deliver_batch` handles it. **The fallback still applies
+   for anything this doesn't cover** (a different control-plane command
+   hits a genuine busy refusal, or `/compact` somehow still gets
+   refused): treat it as an **undelivered** entry in `held.json` (a
+   delivery failure, not a routing hold — target and payload were
+   already resolved) and apply the SAME lifecycle as a held instruction:
+   log it, speak that it didn't fully land, and do NOT auto-redeliver it
+   on a later dictation without Ayman confirming it's still wanted (a
+   command landing hours after the instruction it was sequenced with is
    the stale-intent zombie case) — expire it under the same rule as a
    routing hold (see "Held instructions — lifecycle" below): 2 spoken
    surfacings left unresolved, or 60 minutes wall-clock, whichever comes
@@ -151,7 +157,12 @@ dictation cycle running twice IS the ask/answer loop):
    (non-expired) hold before processing the new dictation: "Still holding
    one from earlier: [instruction]." If the new dictation resolves it
    (directly, or because Ayman's phrasing now disambiguates it), fold it
-   into this round's plan instead of holding it again.
+   into this round's plan instead of holding it again. **If a hold's
+   target session no longer appears in `list_sessions` at all, it's
+   undeliverable regardless of the expiry clock — drop it immediately and
+   say so, don't wait for it to age out.** Sessions end (Ayman closes a
+   project, a tmux session dies); a hold pointed at one that's gone can
+   never be resolved by waiting.
 2. **Log it.** Append held instructions (with a timestamp and the original
    dictation file path) to `~/.jarvis/dictations/held.json` so the record
    doesn't depend solely on your session memory surviving. Create the file
