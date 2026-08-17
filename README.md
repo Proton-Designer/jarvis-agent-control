@@ -325,6 +325,32 @@ state on every run for exactly this reason; if you add a fixture-based
 check anywhere in this codebase, label it explicitly as a parser test,
 never as coverage for "does this still match the real UI."
 
+## Contributing — shared working tree
+
+Multiple engineers (and their agents) work in this same checkout at the
+same time, not separate clones. That means `git`'s staging area is
+**shared state**, not per-person — anything anyone `git add`s sits in one
+index until someone commits, and it doesn't matter who runs the commit.
+Confirmed the hard way (2026-08-17): a bare `git commit` swept up another
+engineer's staged-but-uncommitted files under an unrelated commit
+message. Caught before anything was pushed and split cleanly, but the
+next one might not be caught.
+
+Two rules, not suggestions:
+
+- **Always commit with an explicit pathspec — `git commit <paths> -m
+  "..."`, never a bare `git commit`, `git commit -a`, or `git add .`.**
+  Committing specific paths only touches those paths, regardless of what
+  anyone else has staged in the shared index. This removes the hazard
+  structurally; it doesn't depend on anyone remembering to check `git
+  status` first.
+- **No destructive git operations in this tree, ever — no `reset --hard`,
+  `checkout .`, `clean -fd`, or `stash` that could touch another
+  engineer's files.** A messy commit is recoverable; those aren't — they
+  silently delete someone else's uncommitted work with no way to get it
+  back. `reset --soft` (rewinds commits, keeps everything staged) is
+  fine. If you think you need anything stronger, stop and ask first.
+
 ## What isn't built yet
 
 - Live-mic end-to-end integration test (blocked on Ayman's explicit
