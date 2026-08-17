@@ -219,6 +219,29 @@ Consequences this codebase enforces, not just documents:
   session (like Ayman's live-voice test) is an explicit, considered
   unmute, not something inherited from whatever shell happened to start
   it.
+- **Every pane-state pattern is scraped from a UI that changes without
+  notice, and a broken detector can go silent.** Found the hard way,
+  2026-08-17, within the same session: a Claude Code point release
+  (v2.1.234) grew `/cost`/`/usage`'s view tall enough that its footer
+  marker scrolled off an ordinary 80x24 pane, silently breaking
+  PERSISTENT_VIEW detection — every read-back timed out with the view
+  left open, and nothing surfaced it until someone happened to be
+  testing that exact path. Investigating it surfaced a second, more
+  serious gap in the same pass: PERMISSION_PROMPT — the detector guarding
+  the single most dangerous interaction in this system, unauthorized
+  keystrokes landing on a live approval prompt — had never actually been
+  validated against a real per-tool-call approval prompt at all, only
+  against a differently-shaped onboarding dialog captured once, months
+  earlier. The real prompt was silently misclassified as PERSISTENT_VIEW.
+  Harmless that particular day only by coincidence (both states currently
+  refuse delivery the same way, and Escape happens to be documented as
+  safe-cancel on both) — not a property either state was designed to
+  have. `l4_controller/pane_state_canary.py` exists so this class of
+  regression is a thirty-second command after any Claude Code update, not
+  a discovery made by luck weeks later: it live-drives a real throwaway
+  session through every known state (including a real manual-mode
+  approval prompt, declined, with an explicit assertion that nothing was
+  actually written) and asserts the classifier still agrees with reality.
 - **No unattended microphone capture, ever.** Live-mic testing only
   happens while Ayman is actively present and watching, and stops when
   watching stops — this is a standing rule, not a per-incident decision
@@ -251,6 +274,38 @@ from outside). Prefer declared configuration a process carries with it —
 an `env` entry in `.mcp.json`, not a shell export — for anything where
 "is this actually on" needs to be answerable by reading a file rather
 than trusting a report.
+
+**Third, related lesson, from the two pane-state regressions above:**
+**a position-independent marker beats a position-dependent one, and a
+shared marker isn't a positive signature.** The `/cost` fix moved from a
+footer that can scroll out of a short pane to a tab-bar row that
+renders at a fixed position regardless of content height — that
+generalizes to every pattern this codebase keys on, and it's a cheap
+review question to ask of any new one. The PERMISSION_PROMPT fix is the
+sharper version of the same lesson: PERSISTENT_VIEW's original "esc to
+cancel" marker wasn't wrong because of *where* it sat on screen, it was
+wrong because that footer is a shared UI convention, not something
+unique to a read-only view — so it silently caught states it was never
+meant to describe, in both directions, at different times. Every pattern
+in `pane_state.py` should describe something structurally unique to the
+state it names, checked positively, not "whatever's left after the
+other checks didn't match" and not "a phrase that happens to appear
+there today."
+
+**Fourth: a test that cannot fail when the world changes is not
+protecting you from the world changing.** The instinct after finding the
+PERSISTENT_VIEW regression was to fixture the exact pane text that had
+just been captured and assert the parser handles it — a fine unit test
+of parsing logic, and a false sense of coverage for anything else. A
+golden fixture of the *old* PERMISSION_PROMPT shape (the onboarding
+dialog) would have passed on every run, forever, while the real
+per-tool-call prompt stayed misclassified as PERSISTENT_VIEW the whole
+time — canary green, gate wrong, which is worse than no canary at all
+because it produces false confidence instead of an honest unknown.
+`pane_state_canary.py` live-drives a real Claude Code pane into each
+state on every run for exactly this reason; if you add a fixture-based
+check anywhere in this codebase, label it explicitly as a parser test,
+never as coverage for "does this still match the real UI."
 
 ## What isn't built yet
 
