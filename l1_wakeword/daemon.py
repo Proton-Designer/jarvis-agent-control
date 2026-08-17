@@ -8,13 +8,18 @@ One process, one mic, one wake-word model, three states:
   CAPTURING     -- buffering audio, VAD-chunking it as it arrives, each
                    completed chunk transcribed immediately (whisper-server,
                    warm) with a freshly-rebuilt --prompt from live tmux
-                   session names. First ~3s of this state ignores a repeat
-                   "hey jarvis" (so the opener "Jarvis, tell shipcheck to..."
-                   doesn't immediately end the dictation it just started).
-                   A second "hey jarvis" after the guard, OR ~50s of
+                   session names. Ends when a chunk that closed on silence
+                   (not the 30s hard cap) has a transcript ending in the
+                   stop phrase ("that's it", see STOP_PHRASE_VARIANTS) --
+                   matched on TEXT, not acoustics, so none of the wake-word
+                   fragility (marginal scores, frame-alignment luck,
+                   acoustic name collisions) applies to stopping a
+                   dictation. "Hey jarvis" said again mid-dictation does
+                   nothing special here -- it's just more content, unless it
+                   happens to also end with the stop phrase. ~50s of
                    continuous silence (safety net, not the primary
-                   mechanism): -> IDLE, transcript assembled and handed to
-                   L4 via deliver_transcript().
+                   mechanism) also ends it: -> IDLE, transcript assembled
+                   and handed to L4 via deliver_transcript().
   CANCEL_ARMED  -- entered only via the listen_for_cancel unix-socket RPC
                    from L4 (~/.jarvis/l1.sock), for the duration of L4's
                    confirm window. Same "hey jarvis" detector, LOWERED
@@ -58,50 +63,75 @@ from session_vocab import build_prompt  # noqa: E402
 from hallucination_filter import filter_transcript  # noqa: E402
 
 IDLE_THRESHOLD = 0.5
-# Lowered threshold, shared by two states for the same reason: the Lead's
-# ruling on the cancel window ("bias toward over-triggering, a false
-# positive is cheap, a false negative is the failure being guarded
-# against") applies just as much to the STOP half of the dictation toggle.
-# Measured directly: a standalone closing "Hey Jarvis." peaked at 0.348 in
-# one real test clip -- comfortably below IDLE_THRESHOLD (0.5), meaning the
-# stop trigger would have been missed and the dictation would have run to
-# the 50s silence safety net instead of ending when Ayman actually stopped
-# talking. A false-positive stop just costs "say Hey Jarvis again to
-# resume"; a false-negative stop leaves the mic open over whatever comes
-# next. Same asymmetry as the cancel window -- same fix.
+# Cancel-window-only now (see CANCEL_ARMED below). Used to gate the STOP
+# transition too until this session's stop-phrase rework: the acoustic
+# "hey jarvis" stop trigger had the same marginal-score/alignment problems
+# documented for cancel (a standalone closing "Hey Jarvis." measured 0.348,
+# below IDLE_THRESHOLD -- would have missed) -- moot now, stop is matched
+# on Whisper's transcript text, not a second acoustic score. Left in place,
+# unchanged, because the cancel window still needs it and inherits the
+# same "false accept is cheap, false reject is expensive" reasoning: the
+# Lead's ruling on the cancel window ("bias toward over-triggering") still
+# applies there.
 RECOVERABLE_THRESHOLD = 0.3
 # Measured, not assumed: 20 diverse synthetic "ordinary conversation"
 # sentences (no wake-word-like phrasing) scored a max of 0.002 against this
-# model -- zero false positives anywhere near 0.3. The one real risk
-# category found this session ("Hey Travis") scores 0.82-0.99, comfortably
-# above 0.5 too, so a lower threshold doesn't meaningfully worsen that risk
-# either. Conclusion: no evidence to split the stop threshold higher than
-# the cancel threshold, despite stop-FP being a worse failure than
-# cancel-FP (truncates a real dictation vs. a free re-dictate) -- the
-# asymmetry argument doesn't change the answer when the measured FP rate
-# at the lower threshold is already ~zero on realistic content.
-GUARD_S = 3.0
-
-# How much of the end of the pending audio buffer to assume is the stop
-# wake word's own acoustic content when trimming it out (see
-# StreamingChunker.pop_trimming_tail). Sized from every "hey jarvis"
-# detection observed this session spanning roughly 0.5-0.6s of
-# above-threshold scoring; 1.0s adds margin for the quieter lead-in before
-# the score crosses threshold. A fixed heuristic on synthetic timing --
-# confirm against real speech before trusting it precisely.
-WAKE_WORD_TAIL_TRIM_S = 1.0
-
-# After a dictation ends (either way), ignore wake-word starts for this
-# long. Exists because a single spoken "hey jarvis" scores above threshold
-# across several consecutive frames (observed spans up to ~0.4s) -- without
-# this, the same utterance that just fired the STOP transition can cross
-# IDLE_THRESHOLD again on the very next frame and immediately open a new,
-# unintended dictation. Found by testing, not anticipated: a no-pause test
-# clip showed exactly this -- CAPTURING -> IDLE -> CAPTURING again within
-# 40ms of simulated time, on what was acoustically one utterance.
-POST_STOP_COOLDOWN_S = 1.5
+# model -- zero false positives anywhere near 0.3 for the cancel window.
 SILENCE_SAFETY_NET_S = 50.0
 SOCKET_PATH = Path.home() / ".jarvis" / "l1.sock"
+
+# --- Stop phrase: matched on TRANSCRIPT TEXT, not acoustics ---
+#
+# Ayman ends a dictation by pausing and saying "that's it" instead of a
+# second "hey jarvis". Deliberately NOT a second acoustic wake-word model:
+# every acoustic problem fought this session (marginal-score suppression,
+# frame-alignment luck needing a 3-offset ensemble, "Hey Charles"/"Hey
+# Travis" scoring indistinguishably from "Hey Jarvis") is a property of
+# scoring PROSODIC SHAPE against a small trained model -- none of it
+# applies to checking whether Whisper's own transcript, which we already
+# produce for every chunk, ends with a specific short phrase.
+#
+# Matched only against a chunk that closed because the StreamingChunker
+# detected a pause (last_cut_reason == "silence"), never a chunk that hit
+# the 30s hard cap (last_cut_reason == "maxlen") -- a maxlen cut can land
+# anywhere, including mid-sentence, so "ends with the stop phrase" would be
+# coincidence, not Ayman actually stopping. And matched only at the END of
+# the chunk's transcript: "that's it for the gateway, now mobile..." does
+# not match, and is inherently safe regardless -- more speech in the same
+# chunk means the VAD never saw the pause that would let this fire early.
+STOP_PHRASE_VARIANTS = {"that's it", "thats it", "that is it"}
+
+
+def _normalize_for_stop_match(text: str) -> str:
+    """lowercase, drop punctuation (keep apostrophes so "that's" survives
+    intact), collapse whitespace. For matching only -- the transcript kept
+    in DictationSession retains its original punctuation/casing."""
+    text = text.lower()
+    text = re.sub(r"[^\w\s']", "", text)
+    text = re.sub(r"\s+", " ", text).strip()
+    return text
+
+
+def match_stop_phrase(text: str) -> tuple[bool, str]:
+    """Does `text` END with an accepted stop-phrase variant? Returns
+    (matched, remainder) -- remainder is `text` with the matched trailing
+    words removed, word-count-based on the ORIGINAL text (not the
+    normalized one) so the kept remainder keeps its real punctuation and
+    casing. Not byte-precise -- good enough for a dictation transcript
+    with "that's it" stripped off the end, not a general-purpose parser.
+    Every match (and the raw transcript it matched against) gets logged by
+    the caller into chunk_log, per the Lead's ask, so which spoken/rendered
+    forms actually occur is something we learn from data, not guesswork."""
+    normalized = _normalize_for_stop_match(text)
+    for variant in STOP_PHRASE_VARIANTS:
+        if normalized == variant:
+            return True, ""
+        if normalized.endswith(" " + variant):
+            n_words_to_strip = len(variant.split())
+            words = text.split()
+            remainder = " ".join(words[:-n_words_to_strip]).strip()
+            return True, remainder
+    return False, text
 
 # --- Start-trigger verification: fails CLOSED, unlike stop/cancel below ---
 #
@@ -172,31 +202,26 @@ class DictationSession:
     """Owns the state for one CAPTURING episode: rolling VAD chunker +
     accumulated transcript text."""
 
-    def __init__(self, vad: SileroVAD, whisper: WhisperDaemon, started_at: float):
-        """started_at is caller-supplied, not sampled internally via
-        time.monotonic() -- this class must work identically whether "now"
-        is wall-clock time (live mic) or simulated audio position
-        (--simulate, which processes 10s of audio in a fraction of a real
-        second, so wall-clock guard timing would never actually expire
-        during a simulated run). Caught by testing, not by inspection --
-        an earlier version used time.monotonic() internally and the guard
-        silently never lifted in --simulate mode."""
+    def __init__(self, vad: SileroVAD, whisper: WhisperDaemon):
         self.whisper = whisper
-        self.started_at = started_at
         self.chunks_transcribed: list[str] = []
         self.chunk_log: list[dict] = []  # one record per Whisper call -- see _transcribe_and_append
         self._chunker = StreamingChunker(vad)
         self._total_samples_fed = 0
 
-    def in_guard(self, now: float) -> bool:
-        return (now - self.started_at) < GUARD_S
-
     def silence_exceeds_safety_net(self) -> bool:
         return self._chunker.silence_duration_s >= SILENCE_SAFETY_NET_S
 
+    @property
+    def last_cut_reason(self) -> str | None:
+        """Why the most recent chunk (if any) was emitted -- "silence" or
+        "maxlen"/"flush". Only meaningful immediately after feed() returns
+        non-None text; see StreamingChunker.last_cut_reason."""
+        return self._chunker.last_cut_reason
+
     def _transcribe_and_append(self, audio: np.ndarray, wav_tmp_path: Path, source: str) -> str | None:
         """The one place a chunk's audio becomes text in the assembled
-        transcript. Every caller (feed/flush_final/finalize_on_stop_word)
+        transcript. Every caller (feed/flush_final)
         routes through here so the hallucination filter is a structural
         guarantee on the transcript-assembly path, not a convention each
         call site has to remember to apply -- same reasoning as
@@ -228,6 +253,7 @@ class DictationSession:
             "prompt_used": prompt_used,
             "raw_transcript": raw_text,
             "kept_transcript": text,  # None if the hallucination filter dropped it
+            "stop_phrase_matched": False,  # overwritten by strip_stop_phrase() if this chunk ended the dictation
             "wall_clock": time.time(),
         })
         if text is None:
@@ -254,28 +280,33 @@ class DictationSession:
         if audio is not None and len(audio) > 0:
             self._transcribe_and_append(audio, wav_tmp_path, source="final-flush")
 
-    def finalize_on_stop_word(self, wav_tmp_path: Path):
-        """Called when the dictation ends via the stop wake word. The still-
-        buffered audio at that moment is the "hey jarvis" stop phrase, plus
-        possibly real content before it if Ayman said it with no pause --
-        the VAD only cuts on a pause, so with no pause there's nothing
-        marking where real content ends and the stop phrase begins except
-        roughly how long "hey jarvis" itself takes to say.
+    def strip_stop_phrase(self, matched_chunk_text: str, remainder: str):
+        """Called when the just-transcribed chunk (already appended by
+        feed()/_transcribe_and_append) is confirmed to end the dictation --
+        replaces that chunk's contribution to the transcript with
+        `remainder` (the same text, stop phrase removed) so "that's it"
+        itself never reaches L3. If the chunk was nothing but the stop
+        phrase, remainder is empty and the chunk contributes nothing.
 
-        Originally this just discarded the whole pending buffer -- correct
-        for the pause-before-stop case (tested, and it's what stopped a
-        literal "Hey Jarvis" showing up verbatim at the end of a
-        transcript), **wrong** for the no-pause case: tested directly and
-        it silently dropped an entire multi-instruction dictation
-        ("...also tell Ship Check to redeploy, Hey Jarvis" with no pause
-        anywhere) because the whole thing was still one undischarged
-        chunk. Now trims a fixed tail instead of discarding everything --
-        see StreamingChunker.pop_trimming_tail for the heuristic and its
-        limits.
-        """
-        audio = self._chunker.pop_trimming_tail(WAKE_WORD_TAIL_TRIM_S)
-        if audio is not None:
-            self._transcribe_and_append(audio, wav_tmp_path, source="trimmed-tail")
+        No audio trimming needed here, unlike the old acoustic stop word:
+        the match only ever fires on a chunk that already closed on a real
+        pause (see StreamingChunker.last_cut_reason), so there's no
+        "no-pause, real content stuck to the stop word" ambiguity to
+        resolve at the audio layer -- the whole chunk's transcript,
+        stop phrase included, was always going to be one unit, and
+        word-count stripping the phrase back out of that same text handles
+        the no-pause-before-"that's it" case for free (e.g. "...also
+        redeploy that's it" -> "...also redeploy") without a separate
+        heuristic."""
+        assert self.chunks_transcribed and self.chunks_transcribed[-1] == matched_chunk_text, (
+            "strip_stop_phrase must be called immediately after the matching feed() call, "
+            "before anything else touches chunks_transcribed"
+        )
+        self.chunks_transcribed.pop()
+        if remainder:
+            self.chunks_transcribed.append(remainder)
+        self.chunk_log[-1]["kept_transcript"] = remainder or None
+        self.chunk_log[-1]["stop_phrase_matched"] = True
 
     def full_transcript(self) -> str:
         return " ".join(t for t in self.chunks_transcribed if t)
@@ -344,7 +375,6 @@ def simulate(dictation_wav: str, whisper: WhisperDaemon, live_deliver: bool = Fa
 
     state = "IDLE"
     session: DictationSession | None = None
-    cooldown_until: float | None = None  # see POST_STOP_COOLDOWN_S
     preroll: collections.deque = collections.deque(maxlen=VERIFY_BUFFER_FRAMES)
     # Drive the loop at the VAD's (smaller) native frame size, not the wake-word
     # model's. openWakeWord's predict() explicitly supports non-80ms input --
@@ -359,47 +389,49 @@ def simulate(dictation_wav: str, whisper: WhisperDaemon, live_deliver: bool = Fa
     for i in range(n_frames):
         frame = pcm[i * VAD_FRAME_SAMPLES : (i + 1) * VAD_FRAME_SAMPLES]
         t = i * VAD_FRAME_SAMPLES / SAMPLE_RATE
-        score = wake_model.predict(frame)["hey_jarvis_v0.1"]
-        start_fired = score >= IDLE_THRESHOLD
-        stop_fired = score >= RECOVERABLE_THRESHOLD  # deliberately lower, see RECOVERABLE_THRESHOLD
+        # Fed every frame regardless of IDLE/CAPTURING -- see LiveController
+        # .on_frame's identical comment for why (verify_wake_trigger needs a
+        # real rolling window even for a quick second dictation).
         preroll.append(frame)
 
         if state == "IDLE":
-            in_cooldown = cooldown_until is not None and t < cooldown_until
-            if start_fired and not in_cooldown:
+            score = wake_model.predict(frame)["hey_jarvis_v0.1"]
+            if score >= IDLE_THRESHOLD:
                 accepted, verify_text = verify_wake_trigger(whisper, preroll, tmp_wav)
                 if accepted:
                     print(f"[{t:.2f}s] wake word (score={score:.3f}) verified ({verify_text!r}) -> CAPTURING")
                     state = "CAPTURING"
-                    session = DictationSession(vad, whisper, started_at=t)
+                    session = DictationSession(vad, whisper)
                     preroll.clear()
                 else:
                     print(f"[{t:.2f}s] wake word (score={score:.3f}) REJECTED by verification (heard: {verify_text!r}) -- staying IDLE")
-            elif start_fired and in_cooldown:
-                print(f"[{t:.2f}s] wake word ignored -- inside post-stop cooldown (score={score:.3f})")
         elif state == "CAPTURING":
-            if not session.in_guard(now=t) and stop_fired:
-                stop_wall_time = time.time()  # real wall-clock: whisper/deliver calls take real time even in --simulate
-                print(f"[{t:.2f}s] wake word (post-guard, score={score:.3f}) -> finalize (stop detected at wall-clock {stop_wall_time:.3f})")
-                session.finalize_on_stop_word(tmp_wav)  # trims the stop phrase's own audio, keeps real content
-                text = session.full_transcript()
-                _report_and_deliver(text, session.chunk_log, live_deliver, orchestrator_target, stop_wall_time)
-                state = "IDLE"
-                session = None
-                cooldown_until = t + POST_STOP_COOLDOWN_S
+            # No acoustic model runs during CAPTURING any more -- the stop
+            # trigger is transcript text, checked below on whatever feed()
+            # just produced, not a second wake-word score.
+            partial = session.feed(frame, tmp_wav)
+            if partial is not None:
+                matched, remainder = (
+                    match_stop_phrase(partial) if session.last_cut_reason == "silence" else (False, partial)
+                )
+                if matched:
+                    stop_wall_time = time.time()  # real wall-clock: whisper/deliver calls take real time even in --simulate
+                    print(f"[{t:.2f}s] stop phrase matched in chunk transcript {partial!r} -> finalize (remainder={remainder!r})")
+                    session.strip_stop_phrase(partial, remainder)
+                    text = session.full_transcript()
+                    _report_and_deliver(text, session.chunk_log, live_deliver, orchestrator_target, stop_wall_time)
+                    state = "IDLE"
+                    session = None
+                else:
+                    print(f"[{t:.2f}s] chunk transcribed: {partial!r}")
             elif session.silence_exceeds_safety_net():
                 stop_wall_time = time.time()
-                print(f"[{t:.2f}s] {SILENCE_SAFETY_NET_S}s silence safety net -> finalize (no stop word heard)")
-                session.flush_final(tmp_wav)  # no stop word to strip -- transcribe everything buffered
+                print(f"[{t:.2f}s] {SILENCE_SAFETY_NET_S}s silence safety net -> finalize (no stop phrase heard)")
+                session.flush_final(tmp_wav)  # no stop phrase to strip -- transcribe everything buffered
                 text = session.full_transcript()
                 _report_and_deliver(text, session.chunk_log, live_deliver, orchestrator_target, stop_wall_time)
                 state = "IDLE"
                 session = None
-                cooldown_until = None  # no wake word involved in this ending, nothing to cool down from
-            else:
-                partial = session.feed(frame, tmp_wav)
-                if partial:
-                    print(f"[{t:.2f}s] chunk transcribed: {partial!r}")
 
     if state == "CAPTURING" and session:
         session.flush_final(tmp_wav)
@@ -486,9 +518,9 @@ class LiveController:
     source instead of iterating a pre-loaded array -- the two entrypoints
     intentionally share DictationSession/StreamingChunker/WhisperDaemon
     rather than duplicating that logic, so everything --simulate already
-    validated (chunking, hallucination filtering, stop-word trimming,
-    cooldown) applies unchanged here. What's new here is only the frame
-    source and the CANCEL_ARMED branch --simulate never exercised.
+    validated (chunking, hallucination filtering, stop-phrase matching)
+    applies unchanged here. What's new here is only the frame source and
+    the CANCEL_ARMED branch --simulate never exercised.
     """
 
     def __init__(self, whisper: WhisperDaemon, live_deliver: bool, orchestrator_target: str | None):
@@ -500,7 +532,6 @@ class LiveController:
         self.tmp_wav = Path("/tmp/jarvis_daemon_chunk.wav")
         self.state = "IDLE"
         self.session: DictationSession | None = None
-        self.cooldown_until: float | None = None
         self.preroll: collections.deque = collections.deque(maxlen=VERIFY_BUFFER_FRAMES)
         # CANCEL_ARMED fields, set by arm_cancel(), read/cleared by on_frame()
         self._cancel_ensemble = None
@@ -527,14 +558,18 @@ class LiveController:
         if self.state == "CANCEL_ARMED":
             self._on_cancel_frame(frame_i16, now)
             return
-        score = self.wake_model.predict(frame_i16)["hey_jarvis_v0.1"]
-        start_fired = score >= IDLE_THRESHOLD
-        stop_fired = score >= RECOVERABLE_THRESHOLD
+        # Fed every frame regardless of IDLE/CAPTURING (not just when we're
+        # about to check the wake-word score) so verify_wake_trigger always
+        # has a full rolling window of real context to hand Whisper, even
+        # if a new dictation starts within VERIFY_BUFFER_S of the last one
+        # ending -- an empty/thin preroll fails verification closed (see
+        # verify_wake_trigger), which would otherwise make a quick second
+        # "Hey Jarvis" right after "that's it" spuriously get rejected.
         self.preroll.append(frame_i16)
 
         if self.state == "IDLE":
-            in_cooldown = self.cooldown_until is not None and now < self.cooldown_until
-            if start_fired and not in_cooldown:
+            score = self.wake_model.predict(frame_i16)["hey_jarvis_v0.1"]
+            if score >= IDLE_THRESHOLD:
                 # Blocking whisper call here stalls frame_queue consumption for
                 # ~0.5s -- acceptable and deliberate: nothing else needs the
                 # event loop during that window (verification only runs at the
@@ -546,22 +581,29 @@ class LiveController:
                 if accepted:
                     print(f"[{time.strftime('%H:%M:%S')}] wake word (score={score:.3f}) verified ({verify_text!r}) -> CAPTURING")
                     self.state = "CAPTURING"
-                    self.session = DictationSession(self.vad, self.whisper, started_at=now)
+                    self.session = DictationSession(self.vad, self.whisper)
                     self.preroll.clear()
                 else:
                     print(f"[{time.strftime('%H:%M:%S')}] wake word (score={score:.3f}) REJECTED by verification (heard: {verify_text!r}) -- staying IDLE")
-            elif start_fired and in_cooldown:
-                print(f"[{time.strftime('%H:%M:%S')}] wake word ignored -- inside post-stop cooldown (score={score:.3f})")
         elif self.state == "CAPTURING":
-            if not self.session.in_guard(now) and stop_fired:
-                stop_wall_time = time.time()
-                print(f"[{time.strftime('%H:%M:%S')}] wake word (post-guard, score={score:.3f}) -> finalize")
-                self.session.finalize_on_stop_word(self.tmp_wav)
-                text = self.session.full_transcript()
-                _report_and_deliver(text, self.session.chunk_log, self.live_deliver, self.orchestrator_target, stop_wall_time)
-                self.state = "IDLE"
-                self.session = None
-                self.cooldown_until = now + POST_STOP_COOLDOWN_S
+            # No acoustic model runs during CAPTURING any more -- the stop
+            # trigger is transcript text, checked below on whatever feed()
+            # just produced, not a second wake-word score.
+            partial = self.session.feed(frame_i16, self.tmp_wav)
+            if partial is not None:
+                matched, remainder = (
+                    match_stop_phrase(partial) if self.session.last_cut_reason == "silence" else (False, partial)
+                )
+                if matched:
+                    stop_wall_time = time.time()
+                    print(f"[{time.strftime('%H:%M:%S')}] stop phrase matched in chunk transcript {partial!r} -> finalize (remainder={remainder!r})")
+                    self.session.strip_stop_phrase(partial, remainder)
+                    text = self.session.full_transcript()
+                    _report_and_deliver(text, self.session.chunk_log, self.live_deliver, self.orchestrator_target, stop_wall_time)
+                    self.state = "IDLE"
+                    self.session = None
+                else:
+                    print(f"[{time.strftime('%H:%M:%S')}] chunk transcribed: {partial!r}")
             elif self.session.silence_exceeds_safety_net():
                 stop_wall_time = time.time()
                 print(f"[{time.strftime('%H:%M:%S')}] {SILENCE_SAFETY_NET_S}s silence safety net -> finalize")
@@ -570,11 +612,6 @@ class LiveController:
                 _report_and_deliver(text, self.session.chunk_log, self.live_deliver, self.orchestrator_target, stop_wall_time)
                 self.state = "IDLE"
                 self.session = None
-                self.cooldown_until = None
-            else:
-                partial = self.session.feed(frame_i16, self.tmp_wav)
-                if partial:
-                    print(f"[{time.strftime('%H:%M:%S')}] chunk transcribed: {partial!r}")
 
     def _on_cancel_frame(self, frame_i16: np.ndarray, now: float):
         if now >= self._cancel_deadline:

@@ -69,9 +69,12 @@ The model requires the *cadence* of "hey [name]", not just the word "Jarvis":
 - **Real false-positive found:** "Hey Travis, can you check on that?" fires
   the hey_jarvis model at 0.82–0.99 confidence. The model is keying on the
   "hey + name" phonetic pattern more loosely than just "Jarvis" specifically.
-  This is a genuine risk, not a theoretical one — needs to be part of the
-  real-voice validation pass, and if it holds up, is a reason to reconsider
-  same-keyword toggle vs. a second distinct stop phrase.
+  This held up under further testing (see "THE GOVERNING ASYMMETRY" below)
+  and is exactly why the same-keyword toggle was reconsidered: "hey jarvis"
+  remains the start trigger (now with two-stage verification added), but
+  stopping a dictation switched to a distinct, transcript-matched phrase
+  ("that's it," see "Stop phrase" below) instead of a second acoustic
+  "hey jarvis," sidestepping this risk entirely for the stop side.
 
 Every wake word/melspectrogram/embedding model is `*.onnx` and gitignored —
 `fetch_models.py` is how to reproduce `./models` from a fresh checkout.
@@ -99,28 +102,17 @@ whatever the detector said before the timeout fired, not "whichever
 happened to run last."
 
 **Two detection thresholds, not one, and why:** `IDLE_THRESHOLD` (0.5) for
-starting a dictation, `RECOVERABLE_THRESHOLD` (0.3) for *ending* one
-(post-guard stop-toggle) and for the cancel window. This isn't
-speculative — a real synthetic test clip's closing "Hey Jarvis." peaked
-at 0.348, comfortably below 0.5 but above 0.3, meaning the un-lowered
-threshold would have missed the stop trigger entirely and run the
-dictation to the (also real, separately tested) 50s silence safety net
-instead of ending when Ayman actually stopped talking.
-
-The asymmetry argument ("false positive is cheap, false negative is the
-failure being guarded against") is NOT equally true for both lowered
-cases, and this was checked rather than assumed: a spurious *cancel* is
-fully recoverable (re-dictate), but a spurious *stop* truncates a real
-dictation mid-thought before it's caught by `confirm_plan`. Measured the
-actual risk before deciding whether to split the thresholds: 20 diverse
-synthetic "ordinary conversation" sentences (no wake-word-like phrasing)
-scored a **max of 0.002** against this model — nowhere near either
-threshold. The one real false-positive risk found this session ("Hey
-Travis," 0.82–0.99) is already well above 0.5, so a lower threshold
-doesn't change that risk either. Conclusion: no evidence to split the
-thresholds despite the worse failure mode on the stop side — the
-measured FP rate at 0.3 is ~zero on realistic content, so lowering it
-costs nothing.
+starting a dictation, `RECOVERABLE_THRESHOLD` (0.3) for the cancel window.
+**Update: `RECOVERABLE_THRESHOLD` is cancel-only now.** It used to also
+gate *ending* a dictation (a post-guard acoustic "hey jarvis" stop-toggle)
+until the stop phrase was reworked to match transcript text instead (see
+"Stop phrase" below) — measured the same way as everything else on this
+project: 20 diverse synthetic "ordinary conversation" sentences scored a
+**max of 0.002** against this model, nowhere near 0.3, so the cancel
+window's false-positive rate on realistic content is ~zero. The one real
+false-positive risk found this session ("Hey Travis," 0.82–0.99) is
+already well above `IDLE_THRESHOLD`, so lowering the cancel threshold
+doesn't worsen that risk either.
 
 ## THE GOVERNING ASYMMETRY: start fails closed, stop/cancel fail open
 
@@ -208,7 +200,81 @@ voice specifically), which would mean media playback and other people's
 voices don't trigger detection *at all*, not just get caught downstream —
 a real advantage if verification alone ever proves insufficient.
 
+## Stop phrase: matched on transcript text, not acoustics
+
+Ayman ends a dictation by pausing and saying **"that's it"** instead of a
+second "Hey Jarvis." Deliberately not a second acoustic wake-word model:
+`daemon.py`'s `match_stop_phrase()` checks whether a **completed chunk's
+Whisper transcript** ends with an accepted variant
+(`STOP_PHRASE_VARIANTS = {"that's it", "thats it", "that is it"}`, since
+Whisper renders the same spoken phrase with varying
+punctuation/capitalization/contraction-expansion) — not a second score
+from the acoustic model. This sidesteps essentially every acoustic problem
+documented in this file: marginal-score suppression, frame-alignment
+luck, and the "Hey Charles"/"Hey Travis" cross-trigger risk are all
+properties of scoring *prosodic shape* against a small trained model, and
+none of them are a property of checking whether text ends with a phrase.
+
+Two conditions, both required, both structural rather than heuristic:
+
+1. **Only matched at the very end of the chunk's transcript.** "That's it
+   for the gateway, now let's also redeploy the mobile API" does not
+   match, and is inherently safe regardless of wording — more speech in
+   the same chunk means the VAD never cut there, so there was no pause to
+   treat as an ending. Verified directly with a synthetic clip built for
+   exactly this case: the mid-sentence "that's it" was transcribed and
+   kept as ordinary content, the dictation only ended on the later,
+   deliberate, silence-closed "That's it."
+2. **Only matched on a chunk that closed because of a detected pause**
+   (`StreamingChunker.last_cut_reason == "silence"`), never one forced by
+   the 30-second hard cap (`"maxlen"`) — a maxlen cut can land anywhere,
+   including mid-word, so a coincidental match there wouldn't mean Ayman
+   actually stopped.
+
+**This also deletes the no-pause-before-stop problem instead of solving it
+differently.** The old acoustic mechanism (see the incident section below)
+needed a fixed-duration audio trim (`pop_trimming_tail`) specifically to
+handle Ayman saying the stop word with no pause before it, because audio
+alone can't tell where real content ends and the wake word begins.
+Text-based stripping handles the same case for free: `match_stop_phrase`
+strips the matched phrase's word count off the end of whatever text the
+chunk transcribed, so "...also redeploy that's it" (no pause, one chunk)
+correctly reduces to "...also redeploy" — no separate heuristic, no
+duration to size and re-validate against real speech. Verified directly:
+a no-pause synthetic clip ("Also tell ShipCheck to redeploy that's it.")
+produced the transcript `"Also tell ShipCheck to redeploy,"` with the stop
+phrase cleanly removed.
+
+**Also removed as a direct consequence, not separately:** the 3-second
+start guard (`GUARD_S`/`in_guard`) and the post-stop cooldown
+(`POST_STOP_COOLDOWN_S`) both existed to patch problems specific to
+*reusing the acoustic wake-word detector* for the stop trigger (a repeat
+"Hey Jarvis" immediately re-triggering, or the guard against ending a
+dictation too soon after it opened). Neither problem exists once stop is
+text-matched instead, so both were deleted rather than left in place
+unused — see the incident section below for what they were protecting
+against and why that's now moot.
+
+"Hey Jarvis" remains the START trigger, unchanged — still acoustic, still
+gated by the two-stage verification above. **Cancel stays acoustic too, a
+deliberate asymmetry, not an oversight:** the cancel window doesn't chunk
+speech into transcripts the way a dictation does (it's a short fixed
+confirm window, not ongoing capture), so there's no transcript to match
+against — the acoustic ensemble detector (below) is what's actually been
+measured working there (0.999 on the TTS-interrupt test), and stays.
+**Stop and cancel now use genuinely different mechanisms** — worth stating
+explicitly so nobody assumes symmetry between the two just because they
+used to share one acoustic model.
+
 ## The incident that motivated this: real ambient audio during live-mic testing
+
+**Historical — describes the acoustic stop-word mechanism in place at the
+time (fixed-duration audio trim, start guard, post-stop cooldown), since
+replaced entirely by the transcript-based stop phrase above.** Kept
+because it's the reasoning trail that explains *why* the mechanism
+changed, and the ambient-audio incident and hallucination-defense findings
+below remain fully current — none of that was specific to the old stop
+mechanism.
 
 First live-mic run (agent-supervised, offline/no-audio-produced by the
 agent at the time) triggered twice within 20 seconds on real audio in the
@@ -335,6 +401,40 @@ the guard never actually lifted during a simulated run. Fixed by making
 the clock itself, so simulated-time and wall-clock-time callers get
 identical behavior.
 
+## Known limitation: verification checks acoustic content, not addressee
+
+A second real capture, from Ayman's first authorized live-mic session
+(agent-supervised by gu2s6tnt directly, not this agent): the wake word
+fired on ambient conversation between Ayman and someone else, and the
+transcript began *"That's true. What's up? We're creating Iron Man IRL
+Iron Man Jarvis, Dino, Dino Transcripted."* Two-stage verification did
+**not** reject this — correctly, by its own definition: they genuinely
+said "Jarvis," which is exactly what `verify_wake_trigger()` checks for.
+
+**The gap this exposes:** verification distinguishes *saying the word
+"Jarvis"* from *saying something that merely sounds like it* (the "Hey
+Charles" problem above). It cannot distinguish *saying the name* from
+*addressing the system* — those are different questions, and only the
+first one has a per-utterance acoustic/phonetic signal to check. No
+change to `verify_wake_trigger()` fixes this; it would need to be solved
+one layer up, with actual dialogue-act/addressee understanding, which is
+out of scope for L1.
+
+**Where the real fix lives, and why it changes the consequence rather
+than the mechanism:** gu2s6tnt's observation (credited) — a stray
+"Jarvis" in ambient conversation is much less likely to *also* contain a
+dispatch-shaped sentence (a live session name, an imperative). The L2.5
+concierge (`SPEC-L2.5-concierge.md`) is adding a `NOT_ADDRESSED` intent
+class on exactly that discriminator: no session reference and no
+imperative shape → treat as ambient, **delete the transcript rather than
+writing it to `~/.jarvis/dictations/`**, log only the event (timestamp,
+score, character count) for false-trigger-rate measurement. This doesn't
+close the acoustic gap above — L1 still can't tell "said the name" from
+"addressed the system" — but it changes what a false trigger costs: from
+*persists a transcript of Ayman's private conversation to disk* to
+*briefly opens the mic, finds nothing addressed to it, and discards it*.
+Being built now; this entry should be revisited once it ships.
+
 ## Wake-word detection sensitivity: one mechanism explaining three findings
 
 Discovered while running the full-length (~5 min) pipeline test and chasing
@@ -449,21 +549,36 @@ already settled.
   testing — variance was too high in "controlled" conditions to trust a
   synthetic quiet-speech test as conclusive).
 - The cancel-window-width recommendation above, pending Ayman's decision.
+- **The transcript-based stop phrase ("that's it") has only been tested
+  against synthetic `say` audio so far** (three cases: pause-before-stop,
+  no-pause-before-stop, and the mid-sentence false-positive case — see
+  "Stop phrase" above), not yet against how Ayman actually says it or
+  pauses before it. Whisper's rendering of other phrasings he might
+  naturally use ("that's all," "that'll do it," etc.) isn't in
+  `STOP_PHRASE_VARIANTS` yet — every match and near-miss is logged with
+  the raw transcript in the chunk log specifically so real usage can
+  extend that set from data.
 
 ```
 .venv/bin/python daemon.py --simulate clip.wav     # drives the full state machine over a pre-recorded file
 ```
 
-**Not yet live-mic tested, and won't be without Ayman's explicit
-go-ahead and presence** — per the standing rule established after an
-unrelated incident during this build (a different component's test
-produced audible TTS output unexpectedly): no unattended microphone
-capture, ever, live-mic testing only while actively watched and stopped
-when watching stops. `daemon.py`'s live-mic branch currently just prints
-that it isn't wired up and exits — this is deliberate, not an oversight.
-The cancel-socket server (`~/.jarvis/l1.sock`) is scaffolded
-(`cancel_socket_server()`) but its actual detection logic is a documented
-placeholder for the same reason.
+**Live-mic capture is implemented and has been used once, successfully**
+(agent-supervised by gu2s6tnt, not this agent — two dictations processed
+correctly end to end, under the prior acoustic stop-word mechanism since
+superseded by the change above). `live()` is a real `sounddevice`
+capture loop, and the cancel-socket server's detection logic
+(`score_frame_ensemble` against a live-armed ensemble) is real, not a
+placeholder. **Still not re-run since the stop-phrase change, and won't
+be without Ayman's explicit go-ahead and presence each time** — per the
+standing rule established after an unrelated incident during this build:
+no unattended microphone capture, ever, live-mic testing only while
+actively watched and stopped when watching stops. Four items from that
+first session were explicitly **not** captured and remain owed to a
+dedicated run: menu-bar mic-indicator visibility, `input_overflow` count,
+a tally of acoustic-stage fires vs. verification-accepted starts, and
+confirmation of which binary path the TCC microphone grant actually bound
+to.
 
 ## Process lifecycle: launchd, TCC, and how to turn this off
 

@@ -98,6 +98,15 @@ class StreamingChunker:
         self._frame_is_speech: list[bool] = []  # parallel to _buf, one bool per frame
         self._silence_run = 0
         self._saw_speech = False
+        # Set by _cut() whenever it emits a chunk (None otherwise/between
+        # emissions) -- lets a caller distinguish "closed because Ayman
+        # paused" from "closed because it hit the 30s hard cap mid-sentence".
+        # Added for the transcript-based stop phrase (see daemon.py): a
+        # maxlen cut can land anywhere, including mid-word, so a chunk that
+        # happens to end with the stop phrase's words for that reason alone
+        # is not a real stop -- only a silence-triggered cut means Ayman
+        # actually paused there.
+        self.last_cut_reason: str | None = None
 
     @property
     def silence_duration_s(self) -> float:
@@ -124,50 +133,18 @@ class StreamingChunker:
             self._saw_speech and self._silence_run >= self._silence_frames_to_cut and chunk_len >= self._min_chunk_samples
         )
         should_cut_on_maxlen = chunk_len >= self._max_chunk_samples
-        if should_cut_on_silence or should_cut_on_maxlen:
-            return self._cut()
+        if should_cut_on_silence:
+            return self._cut(reason="silence")
+        if should_cut_on_maxlen:
+            return self._cut(reason="maxlen")
         return None
 
     def flush(self) -> np.ndarray | None:
         """Call at dictation end: returns any buffered speech as a final chunk."""
         if self._buf and self._saw_speech:
-            return self._cut()
+            return self._cut(reason="flush")
         self._reset_buffer()
         return None
-
-    def pop_trimming_tail(self, trim_s: float) -> np.ndarray | None:
-        """Call when a stop wake word fires mid-buffer: removes the last
-        `trim_s` seconds (the wake word's own acoustic span) and returns
-        whatever real content remains before it, or None if nothing does.
-
-        Exists because discarding the whole pending buffer on stop is only
-        correct when there was a pause before the stop word -- the VAD
-        will already have cut real content into its own chunk by then. If
-        Ayman says the stop word with no pause, the pending buffer *is*
-        the real content plus the stop word stuck together with nothing to
-        tell them apart except roughly how long "hey jarvis" itself takes
-        to say. Confirmed by testing: without this, a whole no-pause
-        dictation ("...also tell Ship Check to redeploy, Hey Jarvis") was
-        silently lost in full, not just the stop phrase.
-
-        This is a fixed-duration heuristic, not a precise cut -- it can't
-        know exactly where the wake word starts, only estimate from
-        typical duration. Real-voice validation should confirm the trim
-        window against how Ayman actually says it, not just synthetic
-        `say` timing.
-        """
-        if not self._buf:
-            self._reset_buffer()
-            return None
-        audio = np.concatenate(self._buf)
-        speech_flags = self._frame_is_speech
-        self._reset_buffer()
-
-        trim_samples = int(trim_s * SAMPLE_RATE)
-        keep_samples = max(0, len(audio) - trim_samples)
-        remainder = audio[:keep_samples]
-        keep_frames = keep_samples // FRAME_SAMPLES
-        return self._gate(remainder, speech_flags[:keep_frames], source="trimmed-tail")
 
     def _reset_buffer(self):
         self._buf = []
@@ -175,11 +152,13 @@ class StreamingChunker:
         self._silence_run = 0
         self._saw_speech = False
 
-    def _cut(self) -> np.ndarray | None:
+    def _cut(self, reason: str) -> np.ndarray | None:
         audio = np.concatenate(self._buf)
         speech_flags = self._frame_is_speech
         self._reset_buffer()
-        return self._gate(audio, speech_flags, source="chunk")
+        result = self._gate(audio, speech_flags, source="chunk")
+        self.last_cut_reason = reason if result is not None else None
+        return result
 
     @staticmethod
     def _gate(audio: np.ndarray, speech_flags: list, source: str) -> np.ndarray | None:
