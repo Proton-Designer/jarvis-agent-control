@@ -184,13 +184,29 @@ def handle_transcript(
         log_event("concierge_fast_path_done", label=result.label, elapsed_ms=round(elapsed_ms, 1), forwarded=live_deliver)
         return {"label": result.label, "forwarded": live_deliver, "delivery": delivery}
 
+    if result.label == CHAT:
+        # GUARD, temporary until NOT_ADDRESSED exists (see
+        # l1_wakeword/README.md's known-limitation entry): never speak on
+        # CHAT. A false wake-word trigger on ambient conversation reaching
+        # this far would otherwise make Jarvis audibly interject an
+        # opinion into a conversation that was never addressed to it --
+        # not recoverable the way staying silent is (Ayman can always ask
+        # again if he actually wanted an answer). Classified and logged,
+        # not silently dropped -- just not spoken. CONTROL and QUERY still
+        # speak: both are unambiguously addressed to the system (a real
+        # command word, a real question about system state), unlike CHAT,
+        # where "was this even meant for me?" is exactly what's unresolved.
+        # Skips the phrase-generation model call entirely too, not just
+        # the speak() -- nothing needs an answer nobody will hear.
+        elapsed_ms = (time.monotonic() - t_start) * 1000
+        log_event("concierge_chat_suppressed", chars=len(text), elapsed_ms=round(elapsed_ms, 1))
+        return {"label": result.label, "forwarded": False, "response": None, "spoken": False}
+
     try:
         if result.label == CONTROL:
             response = _handle_control(text)
-        elif result.label == QUERY:
+        else:  # QUERY
             response = _handle_query(text)
-        else:  # CHAT
-            response = _phrase(CHAT, text)
     except Exception as e:
         log_event("concierge_local_handling_error", label=result.label, error=str(e))
         delivery = _forward(text, orchestrator_target, live_deliver)
