@@ -30,7 +30,7 @@ _patterns = PaneStatePatterns()
 _transport = TmuxTransport()
 
 
-def _wait_for_ready(tmux_name: str, timeout_s: float = READY_POLL_TIMEOUT_S) -> bool:
+def wait_for_ready(tmux_name: str, timeout_s: float = READY_POLL_TIMEOUT_S) -> bool:
     deadline = time.monotonic() + timeout_s
     while time.monotonic() < deadline:
         if not _transport.session_exists(tmux_name):
@@ -83,7 +83,7 @@ def reconnect_team(team_id: str) -> dict:
             })
             continue
 
-        came_up = _wait_for_ready(tmux_name)
+        came_up = wait_for_ready(tmux_name)
         results.append({
             "tmux": tmux_name, "claude_session": uuid, "ok": came_up,
             "detail": "reconnected" if came_up else f"did not reach READY within {READY_POLL_TIMEOUT_S:.0f}s",

@@ -15,6 +15,14 @@ than mixing two different import styles in one project:
     start()  # once, at app startup -- launches the background poller threads
     ...
     current = get_state()  # anywhere, anytime, on every render -- instant
+
+Sharp edge worth knowing: because every module here uses flat imports,
+`l5_console/state` itself must be on sys.path directly (as shown above) --
+it can't be imported as `from l5_console.state import ...` with only the
+repo root on sys.path. Fine for this project's two known consumers
+(l5_console/app/, and ad-hoc scripts like the one above); would need
+addressing if anything outside this repo ever needed to import it as a
+proper package.
 """
 
 from __future__ import annotations
@@ -53,7 +61,11 @@ def get_state() -> JarvisState:
     since that's a real programming error in the caller, not a runtime
     condition to paper over."""
     if _poller is None:
-        raise RuntimeError("state.start() must be called before state.get_state()")
+        raise RuntimeError(
+            "get_state() called before start() -- call state.start() once at "
+            "app/script startup first; it launches the background poller "
+            "threads this function reads from."
+        )
     return _poller.get_state()
 
 
