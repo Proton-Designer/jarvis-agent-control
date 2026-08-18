@@ -61,6 +61,52 @@ def list_sessions() -> list[dict]:
     ]
 
 
+def _parse_blocked_question(plain_text: str) -> dict | None:
+    """Extracts the question and numbered option labels from a real
+    AskUserQuestion picker's rendered text (docs/SPEC-blockers.md stage
+    1). Returns None rather than guessing if the expected shape isn't
+    found -- same "never fabricate" discipline as view_parsers.py.
+
+    Shape, confirmed live (2026-08-18) against two independently-
+    triggered real instances: "☐ <short label>", blank, the question
+    line, blank, numbered options (some followed by an indented
+    description line with no number prefix), a separator, a trailing
+    boilerplate option, blank, the footer. Only the question and the
+    top-level numbered option labels are extracted -- descriptions and
+    the footer are noise for this purpose, and the captured text is
+    treated as untrusted content throughout (never interpreted as
+    instructions by any caller)."""
+    lines = [ln.rstrip() for ln in plain_text.splitlines()]
+    non_blank = [(i, ln) for i, ln in enumerate(lines) if ln.strip()]
+
+    label_idx = next((i for i, ln in non_blank if re.match(r"^\s*☐\s+\S", ln)), None)
+    if label_idx is None:
+        return None
+
+    # Question: the next non-blank line after the label that isn't itself
+    # a numbered option.
+    question = None
+    for i, ln in non_blank:
+        if i <= label_idx:
+            continue
+        if re.match(r"^\s*(❯\s*)?\d+\.\s", ln):
+            break
+        question = ln.strip()
+        break
+    if not question:
+        return None
+
+    options = []
+    for i, ln in non_blank:
+        if i <= label_idx:
+            continue
+        m = re.match(r"^\s*(?:❯\s*)?\d+\.\s+(.+)$", ln)
+        if m:
+            options.append(m.group(1).strip())
+
+    return {"question": question, "options": options}
+
+
 def session_activity(session_id: str) -> dict:
     """What a session is doing right now, read directly from its pane --
     no inference, no model. `state` reuses the exact same classifier the
@@ -68,14 +114,20 @@ def session_activity(session_id: str) -> dict:
     means the identical thing it means when transport.deliver refuses a
     send. `activity` is a short label extracted from the pane's current
     tool-call/spinner line when state is "busy"; None if nothing
-    recognizable matched, or if the session isn't running at all."""
+    recognizable matched, or if the session isn't running at all.
+    `blocked` is set (question + option labels, untrusted content) only
+    when state is "blocked_question"; None otherwise. Reuses the SAME
+    pane capture for both -- no reason to pay for two round-trips when
+    one classify_pane_ansi() call already tells us which extraction (if
+    any) is relevant."""
     if not transport.session_exists(session_id):
-        return {"session_id": session_id, "state": "no_session", "activity": None}
+        return {"session_id": session_id, "state": "no_session", "activity": None, "blocked": None}
 
     ansi_text = transport.capture_pane(session_id)
     state = classify_pane_ansi(ansi_text, transport.patterns)
 
     activity = None
+    blocked = None
     if state == PaneState.BUSY:
         plain_text = transport.capture_pane_plain(session_id)
         for line in reversed(plain_text.splitlines()):
@@ -90,8 +142,11 @@ def session_activity(session_id: str) -> dict:
                     break
             if matched:
                 break
+    elif state == PaneState.BLOCKED_QUESTION:
+        plain_text = transport.capture_pane_plain(session_id)
+        blocked = _parse_blocked_question(plain_text)
 
-    return {"session_id": session_id, "state": state.value, "activity": activity}
+    return {"session_id": session_id, "state": state.value, "activity": activity, "blocked": blocked}
 
 
 def claude_session_id(session_id: str) -> str | None:
