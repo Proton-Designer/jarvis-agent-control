@@ -18,9 +18,20 @@ the prompt layer (see slash_guard.py's /config and /model hard-blocks) --
 the same reasoning applies one level up, to which tools even exist for a
 given caller to try.
 
-Tools registered here, all six:
+Tools registered here:
   list_sessions() / session_activity() / spend()   -- tools_read.py
   report_dispatch_stage() / confirm_plan() / deliver_batch() -- tools_write.py
+  list_teams() / register_team_by_adoption() / register_team_fresh() --
+    team_registry_tools.py (SPEC-orchestration.md SS1.3). All three are
+    Sonnet-only, including the read-shaped list_teams(): it calls
+    teams.discover_teams_and_unassigned() directly, a live tmux round
+    trip, not the console's cached poll layer -- putting it on the
+    read-only surface would give Haiku a second, uncached polling path
+    for team state, exactly the two-pollers-disagree case SS1.2 says to
+    avoid by construction (agreed with ue6rruxg, who owns
+    team_registry_tools.py's correctness). A cheaper, Haiku-facing team
+    query (reading l5_console/state/api.py's cached JarvisState.teams
+    instead) is a separate, not-yet-built tool if that's ever wanted.
 
 Do not add a delivery path here that bypasses tools_write.deliver_batch()
 "because it's simpler" -- transport.deliver()'s pane-state gate and
@@ -32,6 +43,7 @@ from __future__ import annotations
 
 from mcp.server.mcpserver import MCPServer
 
+import team_registry_tools
 import tools_read
 import tools_write
 
@@ -44,6 +56,10 @@ spend = app.tool()(tools_read.spend)
 report_dispatch_stage = app.tool()(tools_write.report_dispatch_stage)
 confirm_plan = app.tool()(tools_write.confirm_plan)
 deliver_batch = app.tool()(tools_write.deliver_batch)
+
+list_teams = app.tool()(team_registry_tools.list_teams)
+register_team_by_adoption = app.tool()(team_registry_tools.register_team_by_adoption)
+register_team_fresh = app.tool()(team_registry_tools.register_team_fresh)
 
 
 if __name__ == "__main__":

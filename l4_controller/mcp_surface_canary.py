@@ -63,10 +63,14 @@ def run() -> int:
     full_names = asyncio.run(_tool_names(server.app))
     ro_names = asyncio.run(_tool_names(server_readonly.app))
 
-    expected_full = {"list_sessions", "session_activity", "spend", "report_dispatch_stage", "confirm_plan", "deliver_batch"}
+    expected_full = {
+        "list_sessions", "session_activity", "spend",
+        "report_dispatch_stage", "confirm_plan", "deliver_batch",
+        "list_teams", "register_team_by_adoption", "register_team_fresh",
+    }
     expected_ro = {"list_sessions", "session_activity", "spend"}
 
-    check("full surface has all six tools", full_names == expected_full, detail=f"got {sorted(full_names)}")
+    check("full surface has all nine tools", full_names == expected_full, detail=f"got {sorted(full_names)}")
     check(
         "read-only surface has exactly the three read tools",
         ro_names == expected_ro,
@@ -75,6 +79,13 @@ def run() -> int:
     check("deliver_batch is NOT on the read-only surface", "deliver_batch" not in ro_names)
     check("confirm_plan is NOT on the read-only surface", "confirm_plan" not in ro_names)
     check("report_dispatch_stage is NOT on the read-only surface", "report_dispatch_stage" not in ro_names)
+    # Team registry tools (SS1.3) are ALL Sonnet-only, including the
+    # read-shaped list_teams() -- see server.py's docstring for why (a
+    # live tmux round trip, not the console's cached poll layer Haiku's
+    # tier is supposed to use instead).
+    check("list_teams is NOT on the read-only surface", "list_teams" not in ro_names)
+    check("register_team_by_adoption is NOT on the read-only surface", "register_team_by_adoption" not in ro_names)
+    check("register_team_fresh is NOT on the read-only surface", "register_team_fresh" not in ro_names)
     check(
         "the read-only server's tool manager has no entry for 'deliver_batch' under any lookup",
         asyncio.run(_get_tool_or_none(server_readonly.app, "deliver_batch")) is None,
