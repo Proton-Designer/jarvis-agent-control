@@ -83,6 +83,8 @@ CHAT - conversational, no action or data requested: greetings, small talk, opini
 DISPATCH - an instruction to be carried out by an agent, anywhere in the utterance: tell X to do Y, have X run/fix/deploy/check something. If a question and an instruction both appear in the same utterance -- in either order, even a short one tacked onto the end ("...and also have it restart") -- the whole thing is DISPATCH, never QUERY. An utterance is only QUERY if it asks about state and requests NOTHING else.
 UNSURE - anything ambiguous, unclear, or not confidently one of the above. When in doubt, choose UNSURE, never CHAT.
 
+IMPORTANT - "tell me", "show me", "give me", "let me know" mean the USER is asking YOU for information. They are NOT instructions for an agent, no matter where they appear in the utterance. Only a phrase naming a target OTHER than you ("tell the gateway...", "have billing...", "get shipcheck to...") is DISPATCH. An utterance that asks about state and directs nothing at any agent is QUERY even if it contains the word "tell", "show", or "give".
+
 Examples:
 "cancel that" -> CONTROL
 "never mind" -> CONTROL
@@ -97,6 +99,11 @@ Examples:
 "have mobile run the test suite" -> DISPATCH
 "what's running right now, and tell the billing session to redeploy" -> DISPATCH
 "what's the gateway doing, oh and also have it restart" -> DISPATCH
+"tell me what's running" -> QUERY
+"what sessions are running right now? tell me" -> QUERY
+"can you tell me which sessions are active" -> QUERY
+"show me what the gateway is doing" -> QUERY
+"tell the gateway to restart" -> DISPATCH
 """
 
 RECLASSIFY_DISPATCH_OR_QUERY_SYSTEM = """A transcript mentions a real, currently-running session by name, so it cannot be idle chat -- it is either an INSTRUCTION for that session to do something, or a QUESTION asking about that session's current state. Answer with ONLY one word: DISPATCH or QUERY.
