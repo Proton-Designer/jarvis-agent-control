@@ -18,6 +18,7 @@ not about pre-built Rich renderables.
 """
 from __future__ import annotations
 
+import asyncio
 import time
 
 from rich.table import Table
@@ -31,25 +32,20 @@ from widgets import PlainStatic, Footer
 from staleness import is_stale
 from stream import StreamReader
 from format_helpers import (
-    liveness_icon, liveness_color, team_liveness,
+    liveness_icon, liveness_color, team_liveness, compact_model_name,
     COLOR_OK, COLOR_WARN, COLOR_ERR, COLOR_ACCENT, COLOR_DIM, COLOR_INK,
 )
 from meter import Meter
 import wake_control
+from engine_flow import CreateRoleScreen, AttachRoleScreen
 
 import sys
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent / "state"))
 from models import JarvisState, LIVENESS_RUNNING, LIVENESS_STOPPED, LIVENESS_LOST  # noqa: E402
+import engine_roles  # noqa: E402
 
 CONSOLE_ACTIVITY_MAX_LINES = 200
-
-# The orchestrator's working directory is architecturally fixed, not
-# polled data -- l5_console/state/orchestrator.py's own
-# ORCHESTRATOR_HOME = str(Path.home() / "Jarvis") docstring: "lives at
-# ~/Jarvis... always." Safe to display as a constant rather than adding
-# a field to OrchestratorState for something that can't vary.
-ORCHESTRATOR_HOME_DISPLAY = "~/Jarvis"
 
 
 def _staleness_note(polled_at: float, expected_interval: float) -> str:
@@ -156,9 +152,23 @@ class WakePanel(Widget):
         # how long that transitional state is visible; update_state()
         # re-enables the button and corrects the label the moment a
         # real poll lands either way.
-        if hasattr(self.app, "start_wake_poll_burst"):
-            self.app.start_wake_poll_burst()
         if button.label == "start":
+            # SPEC-engine-roles.md SS6: starting the daemon opens the
+            # microphone, and voice input with no live concierge/router
+            # has nowhere to go -- refuse BEFORE arming the mic, and show
+            # engine_roles.start_precondition()'s own detail verbatim
+            # (never paraphrased into something generic; the whole point
+            # is Ayman is told which role is missing and what to press).
+            # Pure query, no side effects, so checking it costs nothing
+            # even on the common case where it passes. This does not
+            # touch the SPACE-key ruling -- that key is stop-only and
+            # unaffected; this gate is on the BUTTON only.
+            precondition = engine_roles.start_precondition()
+            if not precondition["ok"]:
+                result_line.update(Text(f"⚠ {precondition['detail']}", style=COLOR_ERR))
+                return
+            if hasattr(self.app, "start_wake_poll_burst"):
+                self.app.start_wake_poll_burst()
             button.disabled = True
             button.label = "starting..."
             result_line.update(Text("starting...", style=COLOR_DIM))
@@ -184,29 +194,140 @@ class WakePanel(Widget):
         result_line.update(Text(("✓ " if ok else "⚠ ") + msg, style=COLOR_OK if ok else COLOR_ERR))
 
 
-class OrchestratorPanel(PlainStatic):
-    BORDER_TITLE = "ORCHESTRATOR"
-    DEFAULT_CSS = "OrchestratorPanel { height: auto; border: solid $panel; padding: 1; margin-bottom: 1; border-title-color: $text-muted; }"
+class EnginePanel(Widget):
+    """ENGINE (SPEC-engine-roles.md): CONCIERGE and ORCHESTRATOR, one
+    role slot each. Both live inside this single bordered panel rather
+    than two separate top-level panels -- the spec's own tree
 
-    def update_state(self, orch) -> None:
-        if orch.error:
-            self.update(Text(f"⚠ error -- {orch.error}", style=COLOR_ERR))
-            return
-        text = Text()
-        text.append(f"{liveness_icon(orch.liveness)} ", style=liveness_color(orch.liveness))
-        text.append(f"{orch.liveness}\n", style=f"bold {liveness_color(orch.liveness)}")
-        text.append(f"  {ORCHESTRATOR_HOME_DISPLAY}\n", style=COLOR_DIM)
-        # "tools reachable" is jargon (Ayman's live feedback: didn't know
-        # what it meant) -- say what it means to him instead: whether the
-        # orchestrator can actually route a spoken command anywhere.
-        if orch.tools_reachable:
-            text.append("  ready to route commands", style=COLOR_DIM)
-        else:
-            text.append("  ⚠ can't route commands -- check MCP prompt", style=COLOR_WARN)
-        note = _staleness_note(orch.polled_at, orch.expected_interval)
-        if note:
-            text.append(note, style=COLOR_WARN)
-        self.update(text)
+        ENGINE
+        +-- CONCIERGE
+        +-- ORCHESTRATOR
+
+    is nesting, and a second nested border per role would be visual noise
+    at this width (#console_left is 34 columns); a caption line inside
+    one outer panel reads as the same hierarchy without it.
+
+    Buttons: a FIXED set of 5 per role, always mounted, visibility
+    toggled via `.display` in update_state() -- not remove()/mount()
+    cycles. This is a "which of a small known set is visible" state
+    machine (SPEC-engine-roles.md SS7's exact matrix), the same shape
+    WakePanel already handles by toggling one button's label/variant;
+    here there are more buttons instead of one relabeled button, but the
+    principle -- render only ever reflects the last real poll, never an
+    optimistic guess -- is identical.
+    """
+
+    BORDER_TITLE = "ENGINE"
+
+    DEFAULT_CSS = """
+    EnginePanel { height: auto; border: solid $panel; padding: 1; margin-bottom: 1; border-title-color: $text-muted; }
+    EnginePanel .role_caption { margin-top: 1; }
+    EnginePanel .role_caption.first { margin-top: 0; }
+    EnginePanel Button { width: 100%; margin-top: 1; }
+    """
+
+    def compose(self) -> ComposeResult:
+        for i, role in enumerate(engine_roles.ROLES):
+            classes = "role_caption first" if i == 0 else "role_caption"
+            yield PlainStatic(role.upper(), id=f"{role}_caption", classes=classes)
+            yield PlainStatic("", id=f"{role}_info")
+            yield PlainStatic("", id=f"{role}_result")
+            # success/default -- unattached, offering to acquire a session
+            yield Button("Create", id=f"{role}_create", variant="success")
+            yield Button("Attach", id=f"{role}_attach", variant="success")
+            # attached-but-dead: bring it back before anything else
+            yield Button("Activate", id=f"{role}_activate", variant="warning")
+            # attached (either liveness): change or let go of it
+            yield Button("Swap", id=f"{role}_swap")
+            yield Button("Remove", id=f"{role}_remove", variant="error")
+
+    def _role_widgets(self, role: str) -> dict[str, Widget]:
+        return {
+            "info": self.query_one(f"#{role}_info", PlainStatic),
+            "result": self.query_one(f"#{role}_result", PlainStatic),
+            "create": self.query_one(f"#{role}_create", Button),
+            "attach": self.query_one(f"#{role}_attach", Button),
+            "activate": self.query_one(f"#{role}_activate", Button),
+            "swap": self.query_one(f"#{role}_swap", Button),
+            "remove": self.query_one(f"#{role}_remove", Button),
+        }
+
+    def update_state(self, engine) -> None:
+        note = _staleness_note(engine.polled_at, engine.expected_interval)
+        for role in engine_roles.ROLES:
+            w = self._role_widgets(role)
+            if engine.error:
+                w["info"].update(Text(f"⚠ error -- {engine.error}", style=COLOR_ERR))
+                for key in ("create", "attach", "activate", "swap", "remove"):
+                    w[key].display = False
+                continue
+
+            slot = getattr(engine, role)
+            if not slot.attached:
+                w["info"].update(Text("— no session attached —" + note, style=COLOR_DIM if not note else COLOR_WARN))
+                w["create"].display = True
+                w["attach"].display = True
+                w["activate"].display = False
+                w["swap"].display = False
+                w["remove"].display = False
+                continue
+
+            live = slot.liveness == LIVENESS_RUNNING
+            text = Text()
+            text.append(f"{slot.name}\n", style=f"bold {COLOR_INK}")
+            text.append(f"{compact_model_name(slot.model)} · {slot.effort}\n", style=COLOR_DIM)
+            status_word = "active" if live else "inactive"
+            status_color = COLOR_OK if live else COLOR_DIM
+            text.append(f"{liveness_icon(slot.liveness)} {status_word}", style=status_color)
+            if live and not slot.tools_reachable:
+                text.append("  ⚠ no tools", style=COLOR_WARN)
+            if note:
+                text.append(note, style=COLOR_WARN)
+            w["info"].update(text)
+
+            w["create"].display = False
+            w["attach"].display = False
+            w["activate"].display = not live
+            w["swap"].display = True
+            w["remove"].display = True
+
+    async def on_button_pressed(self, event: Button.Pressed) -> None:
+        button_id = event.button.id or ""
+        for role in engine_roles.ROLES:
+            if button_id == f"{role}_create":
+                self.app.push_screen(CreateRoleScreen(role))
+                return
+            if button_id in (f"{role}_attach", f"{role}_swap"):
+                self.app.push_screen(AttachRoleScreen(role))
+                return
+            if button_id == f"{role}_remove":
+                await self._do_remove(role)
+                return
+            if button_id == f"{role}_activate":
+                await self._do_activate(role)
+                return
+
+    async def _do_remove(self, role: str) -> None:
+        w = self._role_widgets(role)
+        w["remove"].disabled = True
+        w["result"].update(Text("removing...", style=COLOR_DIM))
+        result = await asyncio.to_thread(engine_roles.remove_role, role)
+        w["result"].update(Text(("✓ " if result["ok"] else "⚠ ") + result["detail"], style=COLOR_OK if result["ok"] else COLOR_ERR))
+        w["remove"].disabled = False
+
+    async def _do_activate(self, role: str) -> None:
+        # Relaunch + wait_for_ready can take 10-15s (a real tmux launch
+        # and a real Claude Code cold start, not an instant call) -- both
+        # engine_roles.activate_role() and remove_role() are plain
+        # blocking functions (subprocess.run/time.sleep polling
+        # internally, not asyncio-native), so both run in a thread rather
+        # than freezing the whole UI event loop for their duration.
+        w = self._role_widgets(role)
+        w["activate"].disabled = True
+        w["result"].update(Text("activating...", style=COLOR_DIM))
+        result = await asyncio.to_thread(engine_roles.activate_role, role)
+        w["result"].update(Text(("✓ " if result["ok"] else "⚠ ") + result["detail"], style=COLOR_OK if result["ok"] else COLOR_ERR))
+        w["activate"].disabled = False
 
 
 class RuntimePanel(PlainStatic):
@@ -353,7 +474,7 @@ class Console(Widget):
         with Horizontal():
             with Vertical(id="console_left"):
                 yield WakePanel(id="console_wake")
-                yield OrchestratorPanel(id="console_orch")
+                yield EnginePanel(id="console_engine")
                 yield RuntimePanel(id="console_runtime")
             with Vertical(id="console_right"):
                 yield StreamPanel(id="console_stream")
@@ -362,7 +483,7 @@ class Console(Widget):
 
     def update_state(self, state: JarvisState) -> None:
         self.query_one("#console_wake", WakePanel).update_state(state.wake)
-        self.query_one("#console_orch", OrchestratorPanel).update_state(state.orchestrator)
+        self.query_one("#console_engine", EnginePanel).update_state(state.engine)
         self.query_one("#console_runtime", RuntimePanel).update_state(state.runtime)
         self.query_one("#console_teams", TeamsPanel).update_state(
             state.teams, state.teams_error, state.unassigned, state.teams_polled_at, state.teams_expected_interval

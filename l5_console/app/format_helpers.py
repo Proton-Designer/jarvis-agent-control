@@ -30,6 +30,20 @@ def liveness_icon(liveness: str) -> str:
     return {LIVENESS_RUNNING: "●", LIVENESS_STOPPED: "○", LIVENESS_LOST: "✕"}.get(liveness, "?")
 
 
+def compact_model_name(model: str | None) -> str:
+    """A RoleSlot attached via Create carries a clean "haiku"/"sonnet"/
+    "opus" (engine_roles.MODELS). One attached via Attach instead carries
+    whatever /status reported verbatim (e.g. "haiku
+    (claude-haiku-4-5-20251001)", found live attaching a real concierge
+    session) -- both are real, correct values, but the long form doesn't
+    fit "at a glance" (SPEC-engine-roles.md SS7) in either density.
+    Display-only: the stored value is never truncated, only what's
+    rendered here."""
+    if not model:
+        return "?"
+    return model.split()[0].split("(")[0].strip() or model
+
+
 def liveness_color(liveness: str) -> str:
     return {LIVENESS_RUNNING: COLOR_OK, LIVENESS_STOPPED: COLOR_DIM, LIVENESS_LOST: COLOR_ERR}.get(liveness, COLOR_DIM)
 

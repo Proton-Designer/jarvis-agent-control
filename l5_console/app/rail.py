@@ -28,7 +28,7 @@ from widgets import PlainStatic, Footer
 from staleness import is_stale
 from stream import StreamReader
 from format_helpers import (
-    liveness_icon, liveness_color, team_liveness,
+    liveness_icon, liveness_color, team_liveness, compact_model_name,
     COLOR_OK, COLOR_WARN, COLOR_ERR, COLOR_ACCENT, COLOR_DIM, COLOR_INK,
 )
 from meter import Meter
@@ -37,6 +37,7 @@ import sys
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent / "state"))
 from models import JarvisState, LIVENESS_RUNNING  # noqa: E402
+import engine_roles  # noqa: E402
 
 RAIL_ACTIVITY_MAX_LINES = 30
 
@@ -66,17 +67,36 @@ class RailWake(PlainStatic):
         self.update(_wake_line(wake))
 
 
-class RailOrchestrator(PlainStatic):
-    def update_state(self, orch) -> None:
-        if orch.error:
-            self.update(Text(f"⚠ orchestrator: error -- {orch.error}", style=COLOR_ERR))
+class RailEngine(PlainStatic):
+    """ENGINE, Rail density: two compact status lines, no buttons -- Rail
+    is read-only/ambient everywhere else (even WAKE, the one thing with a
+    real control in Console, is a plain status line here), so
+    Create/Attach/Swap/Remove/Activate are Console-only. Name and
+    model/effort shown, never a session UUID (SPEC-engine-roles.md SS7),
+    same rule as Console's EnginePanel."""
+
+    def update_state(self, engine) -> None:
+        if engine.error:
+            self.update(Text(f"⚠ engine: error -- {engine.error}", style=COLOR_ERR))
             return
+        stale = is_stale(engine.polled_at, engine.expected_interval)
         text = Text()
-        text.append("orchestrator  ", style=COLOR_DIM)
-        text.append(f"{liveness_icon(orch.liveness)} {orch.liveness}", style=liveness_color(orch.liveness))
-        if not orch.tools_reachable:
-            text.append("  ⚠ no tools", style=COLOR_WARN)
-        if is_stale(orch.polled_at, orch.expected_interval):
+        for i, role in enumerate(engine_roles.ROLES):
+            if i:
+                text.append("\n")
+            slot = getattr(engine, role)
+            text.append(f"{role:<12}", style=COLOR_DIM)
+            if not slot.attached:
+                text.append("unattached", style=COLOR_DIM)
+            else:
+                live = slot.liveness == LIVENESS_RUNNING
+                text.append(f"{slot.name} ", style=COLOR_INK)
+                text.append(f"({compact_model_name(slot.model)}·{slot.effort}) ", style=COLOR_DIM)
+                text.append(
+                    f"{liveness_icon(slot.liveness)} {'active' if live else 'inactive'}",
+                    style=COLOR_OK if live else COLOR_DIM,
+                )
+        if stale:
             text.append(_staleness_suffix(), style=COLOR_WARN)
         self.update(text)
 
@@ -167,7 +187,7 @@ class Rail(Widget):
         with Vertical():
             yield RailWake(id="rail_wake")
             yield Meter(id="rail_meter", width=16)
-            yield RailOrchestrator(id="rail_orch")
+            yield RailEngine(id="rail_engine")
             yield RailTeams(id="rail_teams")
             yield RailRuntime(id="rail_runtime")
             yield RailUnassigned(id="rail_unassigned")
@@ -188,7 +208,7 @@ class Rail(Widget):
             and not state.wake.error
             and not is_stale(state.wake.polled_at, state.wake.expected_interval)
         )
-        self.query_one("#rail_orch", RailOrchestrator).update_state(state.orchestrator)
+        self.query_one("#rail_engine", RailEngine).update_state(state.engine)
         self.query_one("#rail_teams", RailTeams).update_state(
             state.teams, state.teams_error, state.teams_polled_at, state.teams_expected_interval
         )

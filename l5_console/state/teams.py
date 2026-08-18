@@ -143,6 +143,20 @@ def discover_teams_and_unassigned() -> tuple[list[Team], list[UnassignedSession]
     (SS6, "how you discover something to adopt"). Cheap -- tmux
     list-sessions plus per-member file-existence checks, no pane
     captures, no /status calls."""
+    # Local import, deliberately not at module top level: there's a real
+    # 3-way circular import here (engine_roles.py -> reconnect.py -> back
+    # to teams.py for member_liveness/load_registry; separately
+    # engine_roles.py -> teams.py directly for CLAUDE_PROJECTS_DIR/
+    # encode_project_path). No placement of a top-level `import
+    # engine_roles` in this file survives every possible "which module
+    # gets imported first" ordering -- verified live across four
+    # different entry points (teams first, engine_roles first, reconnect
+    # first), each breaking a different top-level placement. A call-time
+    # import sidesteps the whole ordering question: by the time this
+    # function is actually CALLED (never during another module's own
+    # load), the full module graph has already finished importing.
+    import engine_roles
+
     live_sessions = list_sessions()
     live_by_name = {s["session_id"]: s for s in live_sessions}
 
@@ -178,6 +192,22 @@ def discover_teams_and_unassigned() -> tuple[list[Team], list[UnassignedSession]
             )
         )
 
+    # ENGINE roles (SPEC-engine-roles.md) are a second kind of "already
+    # spoken for" a live tmux session, separate from team membership --
+    # found live 2026-08-18 attaching real concierge/orchestrator
+    # sessions: without this exclusion they showed up in TeamsPanel/
+    # RailUnassigned as "unassigned -- press 'a' to adopt", which is
+    # actively wrong (adopting one into a team would collide with its
+    # Engine attachment) and would have confused Ayman into thinking
+    # action was needed on a session that's already correctly assigned.
+    # Same exclusion shape as DEFAULT_ORCHESTRATOR_TARGET below -- a
+    # session can be legitimately claimed by something other than a team.
+    engine_attached_tmux_names = {
+        record["tmux"]
+        for role in engine_roles.ROLES
+        if (record := engine_roles.get_role_record(role)) is not None
+    }
+
     unassigned = [
         UnassignedSession(
             tmux=s["session_id"], claude_session=None,
@@ -189,6 +219,7 @@ def discover_teams_and_unassigned() -> tuple[list[Team], list[UnassignedSession]
         # (SS5.4), not a team-adoption candidate -- excluded here so it
         # never shows up conflated with real unassigned project sessions.
         and s["session_id"] != DEFAULT_ORCHESTRATOR_TARGET
+        and s["session_id"] not in engine_attached_tmux_names
     ]
 
     return teams, unassigned

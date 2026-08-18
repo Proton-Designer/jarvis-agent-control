@@ -10,7 +10,7 @@ by _apply_layout() below.
 
 Two clocks, not one -- SPEC-TUI.md §6.1's dual-clock principle, actually
 needed now rather than deferred: REFRESH_INTERVAL_S (1s) drives
-JarvisState (teams/orchestrator/runtime -- data that changes slowly),
+JarvisState (teams/engine/runtime -- data that changes slowly),
 METER_REFRESH_INTERVAL_S (0.1s) drives the live audio meter + Signal's
 pre-emption decision from daemon.py's wake_state.json. A meter updating
 once a second doesn't read as "live"; JarvisState polled 10x/sec would
