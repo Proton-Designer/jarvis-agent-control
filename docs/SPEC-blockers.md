@@ -17,12 +17,33 @@ resolved, and escalating the rest through the voice channel.
 | **Tool-permission prompt** | **Rare** — auto mode approves tool calls without prompting (verified: `rm` executed with zero confirmation) | **Ayman, always** |
 | **Plan-mode approval** | Occasional | Ayman |
 | **MCP trust prompt** | First launch of a fresh directory | Setup, not runtime — see `SPEC-TUI.md` §5.2 |
-| **Persistent view left open** | Rare | Already handled by L4's dismiss path |
+| **Persistent view left open** | Rare | Self-healing (two cases, see below) |
 
 The important consequence: **in auto mode the blocker that actually
 happens is a question, not a permission request.** The permission case
 mostly does not arise, which is convenient, because it is also the case
 the orchestrator must never touch.
+
+**"Already handled by L4's dismiss path" was only ever true for one of
+two cases** — corrected 2026-08-18 after finding live that it did not
+cover the other. A view opened AS PART OF a delivery call (e.g. `/cost`
+sent by `providers.spend()`) is captured, dismissed, and its content
+returned automatically within that same call (`transport.py`'s
+`_handle_readonly_view`) — this is the original, narrower claim, and it
+was always accurate. A view left open BEFORE a delivery call even
+starts (a manual check left on screen, an earlier attempt that never
+cleanly closed) is a different case: `deliver()` used to just refuse at
+the pane-state gate, forever, with no recovery — every future delivery
+to that session would fail the same way. `transport.py`'s
+`_recover_stuck_view()` now covers this second case too: a bounded wait
+(in case it's transient or Ayman is reading it), positive content
+identification against the known read-only shapes (never on
+`PaneState.PERSISTENT_VIEW` alone — confirmed live that `/config`
+shares its tab-bar marker with `/cost`/`/usage`/`/status`, so the pane
+state alone cannot distinguish safe from dangerous), exactly one Escape
+ever, and an unconditional spoken+logged announcement either way. First
+production firing (2026-08-18) was correct and Ayman confirmed hearing
+it.
 
 ---
 
