@@ -37,10 +37,8 @@ sys.path.insert(0, str(Path(__file__).parent))
 from rail import Rail  # noqa: E402
 from console import Console  # noqa: E402
 
-# TEMPORARY: swap for `from state.poller import get_state` (or wherever
-# gu2s6tnt lands it) once the real poller exists. See fixtures.py's own
-# docstring -- this is the only place that import needs to change.
-from fixtures import fixture_state as get_state  # noqa: E402
+sys.path.insert(0, str(Path(__file__).parent.parent / "state"))
+import api as state  # noqa: E402
 
 REFRESH_INTERVAL_S = 1.0
 
@@ -61,9 +59,13 @@ class JarvisConsole(App):
         yield Console(id="console")
 
     def on_mount(self) -> None:
+        state.start()  # idempotent; launches the state layer's background poller threads once
         self._apply_layout()
         self._refresh_state()
         self.set_interval(REFRESH_INTERVAL_S, self._refresh_state)
+
+    def on_unmount(self) -> None:
+        state.stop()
 
     def on_resize(self, event) -> None:
         self._apply_layout()
@@ -84,9 +86,9 @@ class JarvisConsole(App):
         # visible -- simpler than tracking display state here, and it
         # means a resize never reveals a layout showing stale content
         # from before it became visible.
-        state = get_state()
-        self.query_one("#rail", Rail).update_state(state)
-        self.query_one("#console", Console).update_state(state)
+        current = state.get_state()
+        self.query_one("#rail", Rail).update_state(current)
+        self.query_one("#console", Console).update_state(current)
 
 
 if __name__ == "__main__":
