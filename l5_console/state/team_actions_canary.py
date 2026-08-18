@@ -1,8 +1,23 @@
 #!/usr/bin/env python3
-"""Canary for team_actions.py + team_context.py (SPEC-teams.md). Same
-discipline as team_registry_tools_canary.py: live-drives real tmux
-sessions in a scratch directory, never near Ayman's real work, restores
-~/Jarvis/teams.json to its pre-run state unconditionally.
+"""Canary for team_actions.py + team_context.py (SPEC-teams.md). Live-
+drives real tmux sessions in a scratch directory, never near Ayman's
+real work.
+
+ISOLATED VIA JARVIS_TEST_RUN, NOT BACKUP/RESTORE. A real incident
+(2026-08-18): this file used to back up ~/Jarvis/teams.json, replace it
+with test data, and restore it in a `finally` block. The Lead registered
+a real team mid a live end-to-end voice test while this canary happened
+to be running; the registry read as EMPTY during the window between this
+canary's backup and its restore, and the restore only happened to land
+correctly because nothing else raced it in that window. Backup-and-
+restore is a promise that holds only if nothing else touches the file
+meanwhile and this process never crashes before its own cleanup runs --
+a redirected path (jarvis_paths.jarvis_project_home(), which teams.py/
+engine_roles.py/team_context.py now resolve TEAMS_REGISTRY_PATH/
+ENGINE_REGISTRY_PATH/CONTEXT_DIR through) is a guarantee that holds even
+if this process is killed outright. JARVIS_TEST_RUN is set below BEFORE
+any of those modules are imported, since their paths are module-level
+constants resolved at import time.
 
 Proves the spec's Verification section specifically:
   - a directory/id/alias already used by another team is refused AT PICK
@@ -28,14 +43,20 @@ turn for context capture):
 from __future__ import annotations
 
 import json
+import os
 import shutil
 import subprocess
 import sys
 import time
+import uuid
 from pathlib import Path
+
+os.environ["JARVIS_TEST_RUN"] = f"team-actions-canary-{uuid.uuid4().hex[:8]}"
 
 sys.path.insert(0, str(Path(__file__).parent))
 sys.path.insert(0, str(Path(__file__).parent.parent.parent / "l4_controller"))
+
+from pane_state import PaneState  # noqa: E402
 
 import team_actions as ta  # noqa: E402
 import team_context as tc  # noqa: E402
@@ -92,14 +113,87 @@ def _check_parse_response_regression() -> None:
     )
 
 
+def _check_wait_for_reply_settled_race() -> None:
+    """Hermetic (no tmux, no real timing luck) reproduction of the SECOND
+    bug ue6rruxg found live (2026-08-18): right after send-keys, the pane
+    can still read READY for one tick BEFORE the model actually starts
+    processing. reconnect.wait_for_ready()'s single poll caught that
+    pre-processing blip and returned true ~6s before the real reply had
+    even been written -- the saved context was still literally the
+    prompt's placeholder text.
+
+    Scripts a state sequence (READY blip -> BUSY -> BUSY -> READY,
+    settled) via monkeypatched transport calls, so this is deterministic
+    regardless of how fast a real model turn happens to run -- the live
+    canary case elsewhere in this file exercises the real timing, but
+    real timing is exactly what made the original bug intermittent
+    (ue6rruxg's repro hit it, an earlier run of this same canary
+    apparently didn't). This pins the FIX (must observe an actual BUSY
+    before trusting READY) against regressing regardless of luck."""
+    scripted_states = [PaneState.READY, PaneState.BUSY, PaneState.BUSY, PaneState.READY]
+    call_log: list = []
+
+    class FakeTransport:
+        def session_exists(self, tmux_name):
+            return True
+
+        def capture_pane(self, tmux_name):
+            return "fake-ansi"
+
+    def fake_classify(ansi_text, patterns):
+        state = scripted_states[min(len(call_log), len(scripted_states) - 1)]
+        call_log.append(state)
+        return state
+
+    original_transport, original_classify = tc._transport, tc.classify_pane_ansi
+    original_start_interval, original_settle_interval = tc.CONTEXT_TURN_START_POLL_INTERVAL_S, tc.CONTEXT_SETTLE_POLL_INTERVAL_S
+    tc._transport = FakeTransport()
+    tc.classify_pane_ansi = fake_classify
+    tc.CONTEXT_TURN_START_POLL_INTERVAL_S = 0.01
+    tc.CONTEXT_SETTLE_POLL_INTERVAL_S = 0.01
+    try:
+        result = tc._wait_for_reply_settled("fake-tmux")
+        check("waits through the READY-blip -> BUSY -> READY sequence, does not stop on the first blip", result is True)
+        check("actually observed a real BUSY state before declaring settled", PaneState.BUSY in call_log, detail=str(call_log))
+        check("did not short-circuit after just one read", len(call_log) >= 4, detail=str(call_log))
+    finally:
+        tc._transport, tc.classify_pane_ansi = original_transport, original_classify
+        tc.CONTEXT_TURN_START_POLL_INTERVAL_S, tc.CONTEXT_SETTLE_POLL_INTERVAL_S = original_start_interval, original_settle_interval
+
+    print("  -- and the inverse: BUSY genuinely never observed fails closed, never assumes done")
+    call_log.clear()
+    scripted_states[:] = [PaneState.READY, PaneState.READY, PaneState.READY]
+    tc._transport = FakeTransport()
+    tc.classify_pane_ansi = fake_classify
+    original_turn_timeout = tc.CONTEXT_TURN_START_TIMEOUT_S
+    tc.CONTEXT_TURN_START_POLL_INTERVAL_S = 0.01
+    tc.CONTEXT_TURN_START_TIMEOUT_S = 0.05
+    try:
+        result = tc._wait_for_reply_settled("fake-tmux")
+        check("never observing BUSY at all returns False (fails closed)", result is False)
+    finally:
+        tc._transport, tc.classify_pane_ansi = original_transport, original_classify
+        tc.CONTEXT_TURN_START_POLL_INTERVAL_S = original_start_interval
+        tc.CONTEXT_TURN_START_TIMEOUT_S = original_turn_timeout
+
+
 def run() -> int:
     print("team_actions / team_context canary\n")
 
-    print("-1. regression: parsing the real reply, not the echoed prompt (ue6rruxg's find)")
+    print("-1. regression: parsing the real reply, not the echoed prompt (ue6rruxg's find #1)")
     _check_parse_response_regression()
 
-    original_raw = TEAMS_REGISTRY_PATH.read_text() if TEAMS_REGISTRY_PATH.exists() else None
-    original_existed = TEAMS_REGISTRY_PATH.exists()
+    print("\n-1b. regression: waiting for a real BUSY->READY transition, not a pre-processing READY blip (ue6rruxg's find #2)")
+    _check_wait_for_reply_settled_race()
+
+    # No backup/restore needed -- JARVIS_TEST_RUN (set above, before any
+    # of these modules were imported) already means TEAMS_REGISTRY_PATH
+    # points at an isolated path under ~/Jarvis/test_runs/, never the
+    # real ~/Jarvis/teams.json. Confirmed below, not just assumed.
+    assert "test_runs" in str(TEAMS_REGISTRY_PATH), (
+        f"TEAMS_REGISTRY_PATH is NOT test-isolated ({TEAMS_REGISTRY_PATH}) -- "
+        "refusing to run against what may be the real registry"
+    )
     tmux_created: list[str] = []
 
     if WORKDIR.exists():
@@ -110,7 +204,6 @@ def run() -> int:
     (WORKDIR / "team-a" / "CLAUDE.md").write_text("# Canary Test Project A\n\nA throwaway scratch project used only by team_actions_canary.py.\n")
 
     try:
-        save_registry([])  # isolate this run
 
         print("0. setup: launch two real fresh teams")
         result_a = create_fresh_member(TMUX_A, str(WORKDIR / "team-a"), "haiku")
@@ -254,14 +347,13 @@ def run() -> int:
         for t in tmux_created:
             subprocess.run(["tmux", "kill-session", "-t", t], capture_output=True)
         shutil.rmtree(WORKDIR, ignore_errors=True)
-        for team_id in (TEAM_A_ID, TEAM_B_ID, "shouldnotexist"):
-            p = tc._context_path(team_id)
-            if p.exists():
-                p.unlink()
-        if original_existed:
-            TEAMS_REGISTRY_PATH.write_text(original_raw)
-        elif TEAMS_REGISTRY_PATH.exists():
-            TEAMS_REGISTRY_PATH.unlink()
+        # The whole isolated test-run tree, not just teams.json -- this
+        # also removes the isolated engine.json/context/ this run may
+        # have touched, and needs no "did the real file exist before"
+        # bookkeeping at all, because the real file was never touched.
+        test_run_root = TEAMS_REGISTRY_PATH.parent
+        if "test_runs" in str(test_run_root):
+            shutil.rmtree(test_run_root, ignore_errors=True)
 
     print()
     failures = [r for r in RESULTS if not r[1]]

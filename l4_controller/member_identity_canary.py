@@ -5,13 +5,18 @@ verify_and_refresh_identity() function against a controlled fake registry
 and a monkeypatched claude_session_id() (never touches a real tmux
 session or pane -- no /status is actually sent anywhere in this run).
 
-Follows team_registry_tools_canary.py's established pattern for touching
-the REAL ~/Jarvis/teams.json safely: back up its current content, run
-against test data, restore the original content in a finally block no
-matter what happens. There is no JARVIS_TEST_RUN-style isolation for this
-file (it lives outside ~/.jarvis), so this is the only safe way to test
-against the real load_registry()/save_registry() functions rather than
-reimplementing them.
+ISOLATED VIA JARVIS_TEST_RUN, NOT BACKUP/RESTORE. This file used to back
+up ~/Jarvis/teams.json and restore it in a finally block -- the same
+pattern that caused a real incident (2026-08-18, see
+team_actions_canary.py's docstring for the full account): a canary's
+backup/restore window is a promise, not a guarantee, and this file's own
+TEST_REGISTRY used "gateway" as its team_id -- the EXACT id the Lead
+registered for a real end-to-end test the same day. jarvis_paths.
+jarvis_project_home() now makes TEAMS_REGISTRY_PATH resolve to an
+isolated path under JARVIS_TEST_RUN (set below, before teams.py is
+imported, since the path is a module-level constant resolved at import
+time) -- this canary structurally cannot touch the real file at all,
+regardless of how it exits.
 
 Also proves the end-to-end wiring into tools_write.deliver_batch(): a
 mismatched member gets an audible flag AND still receives its delivery --
@@ -24,14 +29,23 @@ Run after touching member_identity.py or tools_write.py's use of it:
 """
 from __future__ import annotations
 
+import os
 import sys
+import uuid
 from pathlib import Path
+
+os.environ["JARVIS_TEST_RUN"] = f"member-identity-canary-{uuid.uuid4().hex[:8]}"
 
 sys.path.insert(0, str(Path(__file__).parent))
 sys.path.insert(0, str(Path(__file__).parent.parent / "l5_console" / "state"))
 
 import teams  # noqa: E402
 import member_identity as mi  # noqa: E402
+
+assert "test_runs" in str(teams.TEAMS_REGISTRY_PATH), (
+    f"TEAMS_REGISTRY_PATH is NOT test-isolated ({teams.TEAMS_REGISTRY_PATH}) -- "
+    "refusing to run against what may be the real registry"
+)
 
 RESULTS: list[tuple[str, bool, str]] = []
 
@@ -43,19 +57,22 @@ def check(name: str, passed: bool, detail: str = "") -> None:
 
 TEST_REGISTRY = [
     {
-        "id": "gateway",
-        "aliases": ["gateway", "api"],
-        "root": "/tmp/fake-gateway",
-        "inbox": "claude-gateway",
-        "members": [{"tmux": "claude-gateway", "claude_session": "uuid-original-1111"}],
+        # Deliberately NOT "gateway" -- that was this file's own test id
+        # before the JARVIS_TEST_RUN fix, and it happens to be the exact
+        # id the Lead used for a real registration the same day this was
+        # found. Isolation makes that collision impossible now regardless
+        # of the name, but there's no reason to keep tempting it.
+        "id": "canarymemberidentity",
+        "aliases": ["canarymemberidentity", "canary-member-identity"],
+        "root": "/tmp/fake-canary-member-identity",
+        "inbox": "claude-canary-member-identity",
+        "members": [{"tmux": "claude-canary-member-identity", "claude_session": "uuid-original-1111"}],
     }
 ]
 
 
 def run() -> int:
     print("member_identity canary\n")
-    original_raw = teams.TEAMS_REGISTRY_PATH.read_text() if teams.TEAMS_REGISTRY_PATH.exists() else None
-    original_existed = teams.TEAMS_REGISTRY_PATH.exists()
 
     try:
         teams.save_registry([dict(t, members=[dict(m) for m in t["members"]]) for t in TEST_REGISTRY])
@@ -74,7 +91,7 @@ def run() -> int:
         # --- 2. Registered member, identity matches -----------------------
         print("\n2. registered member, live identity matches stored -- no restart claimed")
         mi.claude_session_id = lambda session_id: "uuid-original-1111"
-        result = mi.verify_and_refresh_identity("claude-gateway")
+        result = mi.verify_and_refresh_identity("claude-canary-member-identity")
         check("checked=True", result["checked"] is True)
         check("restarted=False when identity matches", result["restarted"] is False)
         registry_after = teams.load_registry()
@@ -86,7 +103,7 @@ def run() -> int:
         # --- 3. Registered member, identity MISMATCHES (the real bug) -----
         print("\n3. registered member, live identity differs -- restart detected and self-healed forward")
         mi.claude_session_id = lambda session_id: "uuid-NEW-after-crash-9999"
-        result = mi.verify_and_refresh_identity("claude-gateway")
+        result = mi.verify_and_refresh_identity("claude-canary-member-identity")
         check("checked=True", result["checked"] is True)
         check("restarted=True -- this is the gap this file exists to catch", result["restarted"] is True)
         check(
@@ -101,7 +118,7 @@ def run() -> int:
         )
 
         print("\n3b. a SECOND check against the same (now-settled) session does not re-flag it")
-        result2 = mi.verify_and_refresh_identity("claude-gateway")
+        result2 = mi.verify_and_refresh_identity("claude-canary-member-identity")
         check(
             "restarted=False now -- the same restart is never re-flagged once healed",
             result2["restarted"] is False,
@@ -110,7 +127,7 @@ def run() -> int:
         # --- 4. Live check can't verify (pane unreadable) -----------------
         print("\n4. live check fails (pane unreadable) -- no false claim either way")
         mi.claude_session_id = lambda session_id: None
-        result = mi.verify_and_refresh_identity("claude-gateway")
+        result = mi.verify_and_refresh_identity("claude-canary-member-identity")
         check("checked=True", result["checked"] is True)
         check("restarted=False -- never asserts a restart it couldn't confirm", result["restarted"] is False)
         registry_after = teams.load_registry()
@@ -140,14 +157,14 @@ def run() -> int:
 
         class FakeRegistry(SessionRegistry):
             def resolve(self, name):
-                return "claude-gateway"
+                return "claude-canary-member-identity"
 
             def is_test_target(self, session_id):
                 return True
 
         tw.transport = FakeTransport()
         tw.registry = FakeRegistry()
-        out = tw.deliver_batch([{"target": "gateway", "payload": "run the tests"}], dictation_ref="/tmp/fake-dictation.txt")
+        out = tw.deliver_batch([{"target": "canarymemberidentity", "payload": "run the tests"}], dictation_ref="/tmp/fake-dictation.txt")
 
         check(
             "the restart was announced (spoken)",
@@ -165,10 +182,12 @@ def run() -> int:
         )
 
     finally:
-        if original_existed:
-            teams.TEAMS_REGISTRY_PATH.write_text(original_raw)
-        elif teams.TEAMS_REGISTRY_PATH.exists():
-            teams.TEAMS_REGISTRY_PATH.unlink()
+        # The isolated test-run tree, not the real file -- nothing here
+        # ever touched ~/Jarvis/teams.json.
+        import shutil
+        test_run_root = teams.TEAMS_REGISTRY_PATH.parent
+        if "test_runs" in str(test_run_root):
+            shutil.rmtree(test_run_root, ignore_errors=True)
 
     print()
     failures = [r for r in RESULTS if not r[1]]

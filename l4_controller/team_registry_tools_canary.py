@@ -20,26 +20,48 @@ fix are in setup.create_fresh_member()'s docstring. This canary exists so
 that regression stays caught by a command, not by a second engineer
 re-discovering it by luck.
 
-Cleans up every tmux session and scratch directory it creates, and restores
-~/Jarvis/teams.json to whatever it was before the run (never leaves test
-teams behind for a live console/router to see).
+Cleans up every tmux session and scratch directory it creates.
+
+ISOLATED VIA JARVIS_TEST_RUN, NOT BACKUP/RESTORE. This file used to back
+up ~/Jarvis/teams.json and restore it in a finally block. A real incident
+(2026-08-18): a different canary using this exact pattern replaced the
+live registry with test data while the Lead was mid a real end-to-end
+voice test, and the registry read as empty during the window between
+that canary's backup and its restore -- it only happened to restore
+correctly because nothing else raced it in that window. Backup-and-
+restore is a promise that holds only if nothing else touches the file
+meanwhile and the process never crashes before its own cleanup runs; a
+redirected path (jarvis_paths.jarvis_project_home(), which teams.py's
+TEAMS_REGISTRY_PATH now resolves through) is a guarantee that holds
+regardless. JARVIS_TEST_RUN is set below BEFORE team_registry_tools is
+imported, since that import chain transitively imports teams.py, whose
+path is a module-level constant resolved at import time.
 """
 
 from __future__ import annotations
 
 import json
+import os
 import shutil
 import subprocess
 import sys
 import time
+import uuid
 from dataclasses import dataclass
 from pathlib import Path
 
-import team_registry_tools as tools
+os.environ["JARVIS_TEST_RUN"] = f"team-registry-tools-canary-{uuid.uuid4().hex[:8]}"
+
+import team_registry_tools as tools  # noqa: E402
 
 sys.path.insert(0, str(Path(__file__).parent.parent / "l5_console" / "state"))
 from teams import TEAMS_REGISTRY_PATH, load_registry, save_registry  # noqa: E402
 from reconnect import wait_for_ready  # noqa: E402
+
+assert "test_runs" in str(TEAMS_REGISTRY_PATH), (
+    f"TEAMS_REGISTRY_PATH is NOT test-isolated ({TEAMS_REGISTRY_PATH}) -- "
+    "refusing to run against what may be the real registry"
+)
 
 TMUX_BIN = "tmux"
 WORKDIR = Path("/tmp/jarvis-team-registry-canary")
@@ -66,7 +88,6 @@ def team_by_id(teams: list[dict], team_id: str) -> dict | None:
 
 def main() -> int:
     results: list[CheckResult] = []
-    original_registry_raw = TEAMS_REGISTRY_PATH.read_text() if TEAMS_REGISTRY_PATH.exists() else None
 
     sh("kill-session", "-t", ADOPT_SESSION, check=False)
     sh("kill-session", "-t", f"claude-{FRESH_TEAM_ID}", check=False)
@@ -198,10 +219,11 @@ def main() -> int:
         sh("kill-session", "-t", f"claude-{FRESH_TEAM_ID}", check=False)
         shutil.rmtree(WORKDIR, ignore_errors=True)
         shutil.rmtree(Path(str(WORKDIR).replace("/tmp/", "/private/tmp/")), ignore_errors=True)
-        if original_registry_raw is not None:
-            TEAMS_REGISTRY_PATH.write_text(original_registry_raw)
-        else:
-            save_registry([])
+        # The isolated test-run tree, not the real file -- nothing here
+        # ever touched ~/Jarvis/teams.json.
+        test_run_root = TEAMS_REGISTRY_PATH.parent
+        if "test_runs" in str(test_run_root):
+            shutil.rmtree(test_run_root, ignore_errors=True)
 
     all_ok = True
     for r in results:
@@ -223,7 +245,7 @@ def main() -> int:
         print("\nCANARY FAILED. Do not trust router-driven team registration until this is fixed.")
         return 1
 
-    print("\nAll checks passed. ~/Jarvis/teams.json restored to its pre-run state.")
+    print("\nAll checks passed. Ran fully isolated -- ~/Jarvis/teams.json was never touched.")
     return 0
 
 

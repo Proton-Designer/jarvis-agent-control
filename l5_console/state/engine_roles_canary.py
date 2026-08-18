@@ -3,10 +3,20 @@
 points the spec's Verification section calls out specifically, plus the
 per-role Start-precondition messages.
 
-Follows team_registry_tools_canary.py's established pattern for safely
-touching the REAL ~/Jarvis/engine.json (no JARVIS_TEST_RUN-style
-isolation exists for it): back up whatever's there, run against it,
-restore in a finally block no matter what happens.
+ISOLATED VIA JARVIS_TEST_RUN, NOT BACKUP/RESTORE for ENGINE_REGISTRY_PATH
+(engine.json) -- see team_actions_canary.py's docstring for the real
+incident (2026-08-18) that made backup/restore unacceptable for anything
+touching ~/Jarvis: a promise that holds only if nothing else writes the
+file in the same window and this process never crashes before its own
+cleanup, versus a redirected path that holds regardless. ROLE_HOME
+(~/Jarvis/concierge, ~/Jarvis/orchestrator) is DELIBERATELY NOT
+isolated -- those are the real, already-configured launch directories
+(their .mcp.json/.claude/settings.local.json are static, shared,
+reused on purpose, never reconstructed), and engine_roles.py itself
+keeps them pointed at the real paths regardless of JARVIS_TEST_RUN. Only
+the small JSON registry that tracks WHICH session is attached needed
+isolating -- that's what actually gets read/written repeatedly and is
+what a crashed or racing canary could clobber.
 
 Checks 1-2 are fast/hermetic (fake tmux names, no real process). Checks
 3-4 are LIVE -- a real `claude --model haiku` launch into the REAL,
@@ -27,16 +37,25 @@ extension (SLOW -- two real Claude Code launches):
 """
 from __future__ import annotations
 
+import os
 import re
 import subprocess
 import sys
 import time
+import uuid
 from pathlib import Path
+
+os.environ["JARVIS_TEST_RUN"] = f"engine-roles-canary-{uuid.uuid4().hex[:8]}"
 
 sys.path.insert(0, str(Path(__file__).parent))
 
 import engine_roles as er  # noqa: E402
 from reconnect import wait_for_ready  # noqa: E402
+
+assert "test_runs" in str(er.ENGINE_REGISTRY_PATH), (
+    f"ENGINE_REGISTRY_PATH is NOT test-isolated ({er.ENGINE_REGISTRY_PATH}) -- "
+    "refusing to run against what may be the real registry"
+)
 
 RESULTS: list[tuple[str, bool, str]] = []
 
@@ -72,8 +91,6 @@ def _live_command_line(tmux_name: str) -> str:
 
 def run() -> int:
     print("engine_roles canary\n")
-    original_raw = er.ENGINE_REGISTRY_PATH.read_text() if er.ENGINE_REGISTRY_PATH.exists() else None
-    original_existed = er.ENGINE_REGISTRY_PATH.exists()
     live_tmux_created: list[str] = []
 
     try:
@@ -275,10 +292,12 @@ def run() -> int:
     finally:
         for tmux_name in live_tmux_created:
             subprocess.run(["tmux", "kill-session", "-t", tmux_name], capture_output=True)
-        if original_existed:
-            er.ENGINE_REGISTRY_PATH.write_text(original_raw)
-        elif er.ENGINE_REGISTRY_PATH.exists():
-            er.ENGINE_REGISTRY_PATH.unlink()
+        # The isolated test-run tree, not the real file -- nothing here
+        # ever touched ~/Jarvis/engine.json.
+        import shutil
+        test_run_root = er.ENGINE_REGISTRY_PATH.parent
+        if "test_runs" in str(test_run_root):
+            shutil.rmtree(test_run_root, ignore_errors=True)
 
     print()
     failures = [r for r in RESULTS if not r[1]]

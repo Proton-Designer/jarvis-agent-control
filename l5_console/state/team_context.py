@@ -46,9 +46,9 @@ import time
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent.parent / "l4_controller"))
+from pane_state import PaneState, PaneStatePatterns, classify_pane_ansi  # noqa: E402
 from providers import list_sessions as _list_live_sessions, transport as _transport  # noqa: E402
 
-from reconnect import wait_for_ready  # noqa: E402
 from teams import _lead_claude_session, load_registry, save_registry, TEAMS_REGISTRY_PATH  # noqa: E402
 
 CONTEXT_DIR = TEAMS_REGISTRY_PATH.parent / "context"
@@ -68,7 +68,10 @@ CONTEXT_PROMPT = (
 # A structured-description turn is more than a one-line acknowledgement
 # but still bounded (reads a handful of files, writes three lines) --
 # generous relative to a normal dispatch, nowhere near "no budget at all".
-CONTEXT_RESPONSE_POLL_TIMEOUT_S = 90.0
+CONTEXT_TURN_START_TIMEOUT_S = 10.0  # how long to wait for the turn to actually START (see _wait_for_reply_settled)
+CONTEXT_TURN_START_POLL_INTERVAL_S = 0.3  # short: a genuinely fast BUSY window must not be missed between polls
+CONTEXT_SETTLE_TIMEOUT_S = 90.0  # how long to wait for it to FINISH, once started
+CONTEXT_SETTLE_POLL_INTERVAL_S = 1.0
 
 _EMPTY_CONTEXT_FIELDS = {
     "context_summary": None, "context_subsystems": [], "context_tech_stack": [],
@@ -117,6 +120,59 @@ def _parse_context_response(pane_text: str) -> dict | None:
         "subsystems": [s.strip() for s in subsystems_m.group(1).split(";") if s.strip()],
         "tech_stack": [s.strip() for s in tech_m.group(1).split(";") if s.strip()],
     }
+
+
+def _wait_for_reply_settled(tmux_name: str) -> bool:
+    """Waits for an OBSERVED BUSY -> READY transition, not just "reads
+    READY right now". Found live (ue6rruxg, 2026-08-18): right after
+    send-keys delivers the context prompt, the pane can still read READY
+    for one tick BEFORE the model actually starts processing -- a single
+    poll (reconnect.wait_for_ready(), correct for its own use case of
+    "is an already-idle session back up after a relaunch") caught that
+    pre-processing blip and returned true ~6s before the real reply had
+    even been written; the saved context file was still literally the
+    prompt's own placeholder text.
+
+    This is the mirror image of the race pane_state_canary.py's
+    wait_for_stable_ready() already guards against (a momentary READY
+    blip MID-turn, between two busy segments) -- here the blip is
+    BEFORE the turn starts, not during it. Two-consecutive-READY-reads
+    (that fix's approach) would not have caught this specific case: the
+    very first read already sees READY, so a second read moments later
+    could just see the SAME stale READY again if the model hasn't
+    started yet, which is exactly what happened live. Requiring an
+    ACTUAL BUSY OBSERVATION first is a strictly stronger guarantee --
+    it needs real evidence the turn started, not just two timestamps
+    agreeing.
+
+    The BUSY-detection phase polls fast (CONTEXT_TURN_START_POLL_INTERVAL_S,
+    0.3s) specifically so a genuinely brief BUSY window is not itself
+    missed between polls -- the same class of miss this function exists
+    to prevent, just one level earlier. Never observing BUSY at all
+    within CONTEXT_TURN_START_TIMEOUT_S fails closed (returns False)
+    rather than assuming a stray READY means done."""
+    patterns = PaneStatePatterns()
+
+    deadline = time.monotonic() + CONTEXT_TURN_START_TIMEOUT_S
+    saw_busy = False
+    while time.monotonic() < deadline:
+        if not _transport.session_exists(tmux_name):
+            return False
+        if classify_pane_ansi(_transport.capture_pane(tmux_name), patterns) == PaneState.BUSY:
+            saw_busy = True
+            break
+        time.sleep(CONTEXT_TURN_START_POLL_INTERVAL_S)
+    if not saw_busy:
+        return False
+
+    deadline = time.monotonic() + CONTEXT_SETTLE_TIMEOUT_S
+    while time.monotonic() < deadline:
+        if not _transport.session_exists(tmux_name):
+            return False
+        if classify_pane_ansi(_transport.capture_pane(tmux_name), patterns) == PaneState.READY:
+            return True
+        time.sleep(CONTEXT_SETTLE_POLL_INTERVAL_S)
+    return False
 
 
 def context_fields_for(entry: dict) -> dict:
@@ -218,7 +274,7 @@ def capture_context(team_id: str, force_agent: bool = False) -> dict:
     if not result.ok:
         return {"ok": False, "detail": f"couldn't deliver the context prompt: {result.detail}"}
 
-    if not wait_for_ready(target_tmux, timeout_s=CONTEXT_RESPONSE_POLL_TIMEOUT_S):
+    if not _wait_for_reply_settled(target_tmux):
         return {"ok": False, "detail": "the agent didn't finish responding in time"}
 
     pane_text = _transport.capture_pane_plain(target_tmux)

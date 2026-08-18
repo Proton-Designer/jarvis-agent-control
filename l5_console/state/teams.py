@@ -40,6 +40,9 @@ import json
 import sys
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).parent.parent.parent))
+from jarvis_paths import jarvis_project_home  # noqa: E402
+
 sys.path.insert(0, str(Path(__file__).parent.parent.parent / "l4_controller"))
 import blocked_state  # noqa: E402
 from l2_l3_handoff import DEFAULT_ORCHESTRATOR_TARGET  # noqa: E402
@@ -47,7 +50,16 @@ from providers import list_sessions, session_activity  # noqa: E402
 
 from models import LIVENESS_LOST, LIVENESS_RUNNING, LIVENESS_STOPPED, Team, TeamMember, UnassignedSession  # noqa: E402
 
-TEAMS_REGISTRY_PATH = Path.home() / "Jarvis" / "teams.json"
+# jarvis_project_home(), not a hardcoded Path.home()/"Jarvis" -- a real
+# collision (2026-08-18): a canary backed up this file, replaced it with
+# test data mid-run, and restored it in a `finally` -- a real
+# registration made during that window was read as gone, and the restore
+# only happened to land correctly because nothing else raced it. Under
+# JARVIS_TEST_RUN this resolves to an isolated path a canary structurally
+# cannot make the real file disappear from, even if it crashes before its
+# own cleanup runs. See jarvis_paths.py's module docstring for the full
+# incident.
+TEAMS_REGISTRY_PATH = jarvis_project_home() / "teams.json"
 CLAUDE_PROJECTS_DIR = Path.home() / ".claude" / "projects"
 
 

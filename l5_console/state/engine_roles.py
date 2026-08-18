@@ -38,6 +38,9 @@ import sys
 import time
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).parent.parent.parent))
+from jarvis_paths import jarvis_project_home  # noqa: E402
+
 sys.path.insert(0, str(Path(__file__).parent.parent.parent / "l4_controller"))
 from providers import list_sessions as _list_live_sessions  # noqa: E402
 
@@ -51,10 +54,21 @@ MODELS = ("haiku", "sonnet", "opus")
 EFFORTS = ("low", "medium", "high", "xhigh", "max")
 DEFAULT_EFFORT = {"concierge": "medium", "orchestrator": "high"}
 
+# ALWAYS the real ~/Jarvis, deliberately NOT jarvis_project_home() --
+# these are the two role subdirectories' already-in-place, static
+# .mcp.json/CLAUDE.md/settings.local.json (ops/jarvis-home/ mirrors
+# them). A canary reuses these ON PURPOSE (real config, not
+# reconstructed), so redirecting ROLE_HOME under JARVIS_TEST_RUN would
+# just point every test launch at an empty directory with no MCP config
+# at all. Only the REGISTRY (below) needs isolating -- that's the file
+# that actually got clobbered, not the shared launch directories.
 JARVIS_HOME = Path.home() / "Jarvis"
-ENGINE_REGISTRY_PATH = JARVIS_HOME / "engine.json"
 ROLE_HOME = {"concierge": JARVIS_HOME / "concierge", "orchestrator": JARVIS_HOME / "orchestrator"}
 ROLE_MCP_CONFIG = {role: str(home / ".mcp.json") for role, home in ROLE_HOME.items()}
+
+# jarvis_project_home(), not JARVIS_HOME -- see teams.py's identical
+# comment on TEAMS_REGISTRY_PATH for the incident this isolates against.
+ENGINE_REGISTRY_PATH = jarvis_project_home() / "engine.json"
 
 # Both known role server aliases, always -- not just the one this
 # specific role's .mcp.json declares. Found live building this feature's
