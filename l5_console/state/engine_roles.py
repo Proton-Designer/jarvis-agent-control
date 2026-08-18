@@ -184,6 +184,20 @@ def _default_name(role: str, data: dict) -> str:
     return f"{role.capitalize()} {n}"
 
 
+def preview_default_name(role: str) -> str:
+    """Public, side-effect-free wrapper around _default_name() -- for a
+    render layer that needs to PRE-FILL a name picker with the generated
+    default before the user decides whether to keep or change it,
+    without reaching into engine.json's internal shape (name_history)
+    directly. Read-only: does not reserve or commit the name -- calling
+    this twice in a row with nothing else happening returns the same
+    value both times, since nothing is written until attach_role()/
+    create_role_session() actually assigns one."""
+    if role not in ROLES:
+        raise ValueError(f"unknown role {role!r}")
+    return _default_name(role, _load())
+
+
 def attach_role(role: str, tmux: str, working_dir: str, claude_session: str | None, name: str | None = None, model: str | None = None, effort: str | None = None) -> dict:
     """Attaches an EXISTING (already-running) session to `role`. Refuses
     if `tmux` is already the OTHER role's attached session -- never

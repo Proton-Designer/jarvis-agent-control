@@ -49,6 +49,7 @@ from engine_roles import (  # noqa: F401 -- re-exported for consumers
     attach_role,
     create_role_session,
     list_attachable_sessions,
+    preview_default_name,
     remove_role,
     start_precondition,
 )
