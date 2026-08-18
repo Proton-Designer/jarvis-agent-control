@@ -613,6 +613,13 @@ def simulate(dictation_wav: str, whisper: WhisperDaemon, live_deliver: bool = Fa
                     text = session.full_transcript()
                     _report_and_deliver(text, session.chunk_log, live_deliver, orchestrator_target, stop_wall_time, wake_score=session.wake_score)
                     state = "IDLE"
+                    # Mirrors LiveController._to_idle() -- see its docstring
+                    # for the stale-buffer replay this prevents. Kept in sync
+                    # deliberately: --simulate exists to reproduce production
+                    # behaviour over a recorded wav, and a simulate path that
+                    # can't reproduce the bug production has is a test that
+                    # protects nothing.
+                    wake_model.reset()
                     session = None
                 else:
                     print(f"[{t:.2f}s] chunk transcribed: {partial!r}")
@@ -626,6 +633,7 @@ def simulate(dictation_wav: str, whisper: WhisperDaemon, live_deliver: bool = Fa
                 text = session.full_transcript()
                 _report_and_deliver(text, session.chunk_log, live_deliver, orchestrator_target, stop_wall_time, wake_score=session.wake_score)
                 state = "IDLE"
+                wake_model.reset()  # see LiveController._to_idle()
                 session = None
 
     if state == "CAPTURING" and session:
@@ -749,6 +757,49 @@ class LiveController:
         print(f"[{time.strftime('%H:%M:%S')}] CANCEL_ARMED for {timeout_s}s")
         return True
 
+    def _to_idle(self) -> None:
+        """Return to IDLE and CLEAR THE WAKE MODEL'S BUFFERS.
+
+        The reset is the whole point, and it is not optional. predict()
+        is only ever called in the IDLE branch below -- during CAPTURING
+        the acoustic model deliberately doesn't run (the stop trigger is
+        transcript text). openWakeWord keeps internal audio-feature and
+        prediction buffers across calls and assumes a CONTINUOUS stream;
+        skipping it for the length of a dictation leaves those buffers
+        still holding the audio from just before CAPTURING began -- which
+        is the "Hey Jarvis" that started it.
+
+        So the first predict() after returning to IDLE re-scored the
+        ORIGINAL wake word and fired again, immediately, over and over as
+        the stale audio aged out. Found live (2026-08-18, Ayman's own
+        test), and the logs name the cause outright -- the rejected
+        scores are IDENTICAL to the accepted one that started the
+        dictation:
+
+            12:17:55 wake word (score=0.824) verified ('Hey Jarvis')
+            12:18:11 wake word (score=0.824) REJECTED (heard: 'jaa')
+            12:18:12 wake word (score=0.824) REJECTED (heard: "That's it.")
+
+        Same 0.824 three times; likewise 0.735 and 0.927 in the other two
+        runs. A fresh acoustic event cannot reproduce a previous score to
+        three decimal places -- that is a replay, not a detection.
+
+        Nothing unsafe ever happened, because verify_wake_trigger()
+        re-transcribes and rejected 100% of them -- start-fails-closed
+        doing exactly its job. But every spurious fire spent a ~470ms
+        blocking Whisper call, and on_frame() stalls frame consumption
+        for its duration, so a burst of these is the daemon spending most
+        of its time re-rejecting its own echo -- and a genuine "Hey
+        Jarvis" landing in that window is delayed or missed outright.
+        That is the real cost: not a false accept, a DEAF period right
+        after every dictation.
+
+        reset() is documented as "may not be efficient when called too
+        frequently" -- irrelevant here, it runs once per dictation, not
+        per frame."""
+        self.state = "IDLE"
+        self.wake_model.reset()
+
     def on_frame(self, frame_i16: np.ndarray, now: float):
         if self.state == "CANCEL_ARMED":
             self._on_cancel_frame(frame_i16, now)
@@ -799,7 +850,7 @@ class LiveController:
                     self.session.strip_stop_phrase(partial, remainder)
                     text = self.session.full_transcript()
                     _report_and_deliver(text, self.session.chunk_log, self.live_deliver, self.orchestrator_target, stop_wall_time, wake_score=self.session.wake_score)
-                    self.state = "IDLE"
+                    self._to_idle()
                     self.session = None
                 else:
                     print(f"[{time.strftime('%H:%M:%S')}] chunk transcribed: {partial!r}")
@@ -812,21 +863,21 @@ class LiveController:
                 self.session.flush_final(self.tmp_wav)
                 text = self.session.full_transcript()
                 _report_and_deliver(text, self.session.chunk_log, self.live_deliver, self.orchestrator_target, stop_wall_time, wake_score=self.session.wake_score)
-                self.state = "IDLE"
+                self._to_idle()
                 self.session = None
 
     def _on_cancel_frame(self, frame_i16: np.ndarray, now: float):
         if now >= self._cancel_deadline:
             print(f"[{time.strftime('%H:%M:%S')}] cancel window closed, not detected -> IDLE")
             log_event("cancel_window_closed", detected=False)
-            self.state = "IDLE"
+            self._to_idle()
             return
         score = score_frame_ensemble(self._cancel_ensemble, frame_i16)
         if score >= RECOVERABLE_THRESHOLD:
             print(f"[{time.strftime('%H:%M:%S')}] CANCEL detected (ensemble score={score:.3f}) -> IDLE")
             log_event("cancel_detected", score=round(float(score), 3))
             self._cancel_detected = True
-            self.state = "IDLE"
+            self._to_idle()
 
 
 async def cancel_socket_server(controller: LiveController):
