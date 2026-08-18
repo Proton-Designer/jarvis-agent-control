@@ -220,22 +220,36 @@ class EnginePanel(Widget):
     BORDER_TITLE = "ENGINE"
 
     DEFAULT_CSS = """
-    EnginePanel { height: auto; border: solid $panel; padding: 1; margin-bottom: 1; border-title-color: $text-muted; }
+    /* padding: 0 1 -- not the original 1 (all sides) -- to give back the
+       2 rows margin-top:1 below costs per button-gap: reintroducing
+       ANY vertical gap between buttons pushed RUNTIME (the panel below
+       this one) off the bottom of a real 170x44 window again, the same
+       clipping class as the original oversized-button bug, just from a
+       different cause. Horizontal padding (still 1) is what actually
+       matters for readability; the vertical rows were spare, not load-
+       bearing. */
+    EnginePanel { height: auto; border: solid $panel; padding: 0 1; margin-bottom: 0; border-title-color: $text-muted; }
     EnginePanel .role_caption { margin-top: 1; }
     EnginePanel .role_caption.first { margin-top: 0; }
     /* Compact by design (the Lead's live finding, 2026-08-18): Textual's
-       default Button border ("tall") plus this app's original
-       margin-top:1 cost 4 rows per button -- 5 possible buttons per
-       role clipped ORCHESTRATOR's Remove off the bottom at a normal
-       170x44 window. Information (name/model/effort/status) should
-       dominate the panel; controls should be compact -- border:none
-       plus a 1-row height makes each button exactly 1 row, margin-top:0
-       keeps them touching rather than spaced like the info block above. */
-    /* ~30% off the width (the Lead's live finding, 2026-08-18: full-
+       default Button border ("tall") cost 3 rows per button on its own
+       -- 5 possible buttons per role clipped ORCHESTRATOR's Remove off
+       the bottom at a normal 170x44 window. border:none makes each
+       button exactly 1 row.
+
+       Width 70% (~30% off, a LATER live finding, same round): full-
        width Swap/Remove read as bars competing with the info above
-       them, not compact controls beside it), left-aligned to match the
-       name/model/effort text's own left edge rather than centered. */
-    EnginePanel Button { width: 70%; border: none !important; margin-top: 0; }
+       them, not compact controls beside it -- left-aligned to match the
+       name/model/effort text's own left edge rather than centered.
+
+       margin-top:1 (a THIRD live finding): zero gap between adjacent
+       visible buttons made two of them read as one two-tone block split
+       in half rather than two controls. The first visible button in a
+       role already has a blank line above it from the always-mounted
+       (possibly empty) #{role}_result line, so this only adds spacing
+       BETWEEN buttons, not before the first one -- paid for by the
+       padding trim above, not by re-clipping RUNTIME. */
+    EnginePanel Button { width: 70%; border: none !important; margin-top: 1; }
     """
 
     def compose(self) -> ComposeResult:
