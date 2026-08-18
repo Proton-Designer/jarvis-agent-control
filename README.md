@@ -192,7 +192,22 @@ Consequences this codebase enforces, not just documents:
   not explicitly classified defaults to refused** — the same rule that
   already applied to partial/unrecognized slash fragments now applies to
   whole unverified commands, project-specific or not (see
-  `registry.py`'s per-target `.claude/commands/*.md` discovery).
+  `registry.py`'s per-target `.claude/commands/*.md` discovery). **This
+  happened a second time (2026-08-18), reproduced independently while
+  characterising `/config`'s view shape for the blocked-view self-heal
+  feature described below:** an Escape that only cleared `/config`'s
+  search filter (its footer said "Esc to clear," not "Esc to close" —
+  the mistake was not reading it) left the view open and focused, and a
+  follow-up test keystroke landed as filter text, with the next Enter
+  toggling `autoCompactEnabled` off in the real, global
+  `~/.claude/settings.json` — caught, restored, disclosed immediately.
+  Two occurrences of the identical hazard, months apart in code age and
+  hours apart in wall-clock, is why the rule is not "be careful," it's
+  **characterising a blocklisted or unidentified view is capture-only —
+  open it, capture the pane, classify it, stop.** No dismissal attempt,
+  no follow-up command, nothing beyond what opened it. If it needs
+  closing, that's a deliberate human action informed by actually reading
+  what the footer says, never folded into an automated probing sequence.
 - **Partial/unrecognized slash commands are refused, not typed.**
   Confirmed live that a truncated payload like `/comp` doesn't fail
   safely — Claude Code's own completion overlay auto-submits whatever it
