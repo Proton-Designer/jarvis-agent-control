@@ -45,6 +45,73 @@ The concierge classifies every transcript into exactly one:
 | `DISPATCH` | "tell X to do Y", any instruction for an agent | Forward to L3 | unchanged |
 | `UNSURE` | anything else | **Forward to L3** | unchanged |
 
+### The CHAT speech gate
+
+A CHAT-classified transcript is not answered unconditionally. It is
+answered when `assess_addressed()` does **not** verdict `AMBIENT` — i.e.
+on `ADDRESSED` or `UNSURE`, and never on the imperative short-circuit
+(`verdict=None`). CHAT never forwards to L3 either way.
+
+The first build of this suppressed CHAT entirely, keying on the label.
+That was wrong, and it failed live on 2026-08-18: Ayman said *"What's
+up? How's it going?"* straight at the microphone, the system ran
+`assess_addressed()`, got `ADDRESSED` in 624ms, and stayed silent —
+because the verdict was only ever consumed by the retention decision.
+The right answer was computed and discarded.
+
+The label answers *"is this small talk?"*. The gate needed *"was this
+said to me?"* — which is what `assess_addressed()` already answered.
+
+**Two consumers, two thresholds, one model call.** `assess_addressed()`
+returns three-way evidence and each consumer sets its own bar from its
+own cost asymmetry:
+
+| Decision | Bar | Why |
+|---|---|---|
+| Retention (discard) | only on `AMBIENT` | A wrong discard is irreversible — no artifact left to diagnose from |
+| Speech (stay silent) | only on `AMBIENT` | A wrong sentence is one recoverable utterance; a wrong silence is indistinguishable from a crash |
+
+They coincide on `AMBIENT` and diverge in what the default is on either
+side of it. `UNSURE` must speak: *"Hello. How are you doing?"* — Ayman's
+own example — verdicts `UNSURE` every time, and a gate requiring
+`ADDRESSED` would have stayed mute on the exact sentence this exists to
+answer.
+
+**What still protects the original concern.** Reaching the gate at all
+required `daemon.py`'s `verify_wake_trigger()` to re-transcribe the
+trigger audio and positively confirm *"hey jarvis"* was spoken — a
+rejected trigger never enters CAPTURING, so no transcript exists. False
+acoustic fires are filtered upstream. `AMBIENT` then catches the
+residual case verification cannot: the name really was said, but *about*
+Jarvis rather than *to* it.
+
+Guarded by `l2_5_concierge/chat_gate_canary.py`, which asserts on
+direction (spoke / stayed silent), never on wording.
+
+### CHAT gets facts
+
+`PHRASE_SYSTEM_CHAT` used to be told it had no state access at all,
+which made a Jarvis that could not answer *"how's it going"* with
+anything real. It now receives the same code-computed fact string QUERY
+does (`concierge._chat_facts()` — session list, dispatch status). The
+anti-fabrication rule (requirement 2) is unchanged: it was never *"the
+model must know nothing"*, it is *"the model must not be the SOURCE of a
+fact."*
+
+CHAT is also the **one** path where a transcript reaches a model prompt,
+via `phrase_chat_reply()` — deliberately its own function, so
+`phrase_answer()` (QUERY) stays structurally incapable of seeing one and
+asserts `kind == "QUERY"`. A reply to a greeting has to have heard the
+greeting; the alternative, tried first, was a status readout wearing a
+conversation's clothes. See that function's docstring for the three
+upstream gates that make it safe and the residual risk it does not
+close.
+
+A provider failure must produce *"unknown"*, never *"nothing"* — an
+empty session list and an unreachable tmux look identical from the
+model's side, and reporting the second as the first is this project's
+recurring silence-read-as-success failure.
+
 This table is v1's five, as implemented today (`l2_5_concierge/classifier.py`).
 A sixth class, `ANSWER`, is planned for a later stage of blocked-session
 handling — see `docs/SPEC-blockers.md` SS5.1: a transcript answering a
