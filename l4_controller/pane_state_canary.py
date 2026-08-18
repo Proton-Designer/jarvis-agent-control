@@ -138,6 +138,7 @@ def main() -> int:
     results: list[CheckResult] = []
     permission_prompt_capture = None
     persistent_view_capture = None
+    blocked_question_capture = None
     version = "(unknown -- failed before READY was ever reached)"
 
     sh("kill-session", "-t", SESSION, check=False)
@@ -244,7 +245,25 @@ def main() -> int:
         send_key("Escape")
         poll_until(patterns, PaneState.READY, timeout_s=10)
 
-        # --- Distinguishability: not just "both non-READY" ---
+        # --- BLOCKED_QUESTION (real AskUserQuestion prompt) ---
+        # Structurally the closest state to PERMISSION_PROMPT (both a
+        # numbered, arrow-navigable picker) -- exactly the pair most
+        # likely to collapse into each other the way PERSISTENT_VIEW and
+        # PERMISSION_PROMPT once did, so this check and the
+        # distinguishability check below matter more than most.
+        send_literal(
+            "do not use any skills. just directly ask me a single multiple choice question "
+            "using your AskUserQuestion tool about what font size to use, then stop"
+        )
+        send_key("Enter")
+        reached, state = poll_until(patterns, PaneState.BLOCKED_QUESTION, timeout_s=25)
+        results.append(state_check("BLOCKED_QUESTION (real AskUserQuestion prompt)", PaneState.BLOCKED_QUESTION, reached, state))
+        if reached:
+            blocked_question_capture = capture()
+        send_key("Escape")  # dismiss -- confirmed live this menu's own footer documents Escape as cancel too
+        poll_until(patterns, PaneState.READY, timeout_s=10)
+
+        # --- Distinguishability: not just "both/all non-READY" ---
         if permission_prompt_capture is not None and persistent_view_capture is not None:
             perm_state = classify_pane_ansi(permission_prompt_capture, patterns)
             view_state = classify_pane_ansi(persistent_view_capture, patterns)
@@ -267,6 +286,36 @@ def main() -> int:
             results.append(
                 CheckResult(
                     name="PERMISSION_PROMPT and PERSISTENT_VIEW are distinguishable from each other",
+                    passed=False,
+                    detail="skipped",
+                    note="one or both source states were never reached above -- cannot evaluate",
+                )
+            )
+
+        if permission_prompt_capture is not None and blocked_question_capture is not None:
+            perm_state = classify_pane_ansi(permission_prompt_capture, patterns)
+            blocked_state = classify_pane_ansi(blocked_question_capture, patterns)
+            distinguishable = (
+                perm_state != blocked_state
+                and perm_state == PaneState.PERMISSION_PROMPT
+                and blocked_state == PaneState.BLOCKED_QUESTION
+            )
+            results.append(
+                CheckResult(
+                    name="PERMISSION_PROMPT and BLOCKED_QUESTION are distinguishable from each other",
+                    passed=distinguishable,
+                    detail=f"permission-prompt capture -> {perm_state.value}, blocked-question capture -> {blocked_state.value}",
+                    note="both captures resolved to the same state -- these two are structurally the closest pair "
+                    "this classifier distinguishes (both numbered, arrow-navigable pickers); a collapse here means "
+                    "the orchestrator could end up treating a question the same as an authorisation prompt"
+                    if not distinguishable
+                    else "",
+                )
+            )
+        else:
+            results.append(
+                CheckResult(
+                    name="PERMISSION_PROMPT and BLOCKED_QUESTION are distinguishable from each other",
                     passed=False,
                     detail="skipped",
                     note="one or both source states were never reached above -- cannot evaluate",
