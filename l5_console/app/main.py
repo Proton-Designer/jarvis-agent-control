@@ -52,6 +52,20 @@ import api as state  # noqa: E402
 REFRESH_INTERVAL_S = 1.0
 METER_REFRESH_INTERVAL_S = 0.1
 
+# After a start/stop click, poll JarvisState this fast instead of at
+# REFRESH_INTERVAL_S for a few seconds -- the dual-clock design already
+# permits a short deviation from the steady 1s cadence (SPEC-TUI.md
+# §6.1), and this is exactly the case it's for: a wake_button click is
+# a real action with a real answer coming, and making the person wait
+# up to a full second to see it confirmed read as broken, not slow (the
+# Lead's finding from Ayman's live test). This does not change what
+# gets rendered or when -- update_state() still only ever renders from
+# a real poll, never optimistically -- it only shrinks how long the
+# transitional "starting.../stopping..." state in console.py's
+# WakePanel stays up before that real poll lands.
+WAKE_POLL_BURST_INTERVAL_S = 0.2
+WAKE_POLL_BURST_DURATION_S = 3.0
+
 # Below this terminal width, Rail; at or above, Console. A narrow tmux
 # side pane is typically 25-40 columns; a dedicated terminal window is
 # usually 80+. 60 sits clearly between the two real cases rather than at
@@ -82,6 +96,9 @@ class JarvisConsole(App):
         # data from inside a layout decision instead of from its own tick.
         self._wake_running = False
         self._dictating = False
+        self._normal_refresh_timer = None
+        self._burst_refresh_timer = None
+        self._burst_end_timer = None
 
     def compose(self) -> ComposeResult:
         yield Rail(id="rail")
@@ -93,8 +110,33 @@ class JarvisConsole(App):
         self._apply_layout()
         self._refresh_state()
         self._refresh_meter()
-        self.set_interval(REFRESH_INTERVAL_S, self._refresh_state)
+        self._normal_refresh_timer = self.set_interval(REFRESH_INTERVAL_S, self._refresh_state)
         self.set_interval(METER_REFRESH_INTERVAL_S, self._refresh_meter)
+
+    def start_wake_poll_burst(self) -> None:
+        # Called by console.py's WakePanel right after a start/stop
+        # click. Stops the steady 1s timer and replaces it with a fast
+        # one for a bounded window, then replaces it back -- deliberately
+        # stop-and-recreate, not pause()/resume(): verified live that a
+        # Timer paused for longer than its own interval does not resume
+        # ticking at all (its next-fire target is already in the past by
+        # the time resume() runs, and it never catches up or reschedules
+        # from there) -- a real Textual Timer edge case, not just theory.
+        # A freshly created set_interval() always fires on schedule from
+        # its own creation time, which sidesteps that case entirely.
+        if self._burst_refresh_timer is not None:
+            self._burst_end_timer.stop()
+            self._burst_refresh_timer.stop()
+        else:
+            self._normal_refresh_timer.stop()
+        self._burst_refresh_timer = self.set_interval(WAKE_POLL_BURST_INTERVAL_S, self._refresh_state)
+        self._burst_end_timer = self.set_timer(WAKE_POLL_BURST_DURATION_S, self._end_wake_poll_burst)
+
+    def _end_wake_poll_burst(self) -> None:
+        if self._burst_refresh_timer is not None:
+            self._burst_refresh_timer.stop()
+            self._burst_refresh_timer = None
+        self._normal_refresh_timer = self.set_interval(REFRESH_INTERVAL_S, self._refresh_state)
 
     def on_unmount(self) -> None:
         state.stop()

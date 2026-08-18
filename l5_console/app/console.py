@@ -115,9 +115,31 @@ class WakePanel(Widget):
         # separately-tracked "is it running" flag on this widget, since
         # that would be exactly the kind of intent-not-reality state §7
         # rules out. The label itself was set from the last real poll.
+        #
+        # Both branches disable the button and show a transitional
+        # "...ing" message immediately, symmetrically -- the click was
+        # real and something IS happening, so saying nothing for up to
+        # a full REFRESH_INTERVAL_S (the Lead's finding: it read as
+        # broken, not slow) is the bug, not the poll-only-render
+        # principle itself. #wake_status is still untouched here and
+        # still only ever changes from a real poll in update_state() --
+        # a transitional state is not an optimistic render of the
+        # outcome, it's an honest description of "a click just
+        # happened." The app-level poll burst kicked off below shrinks
+        # how long that transitional state is visible; update_state()
+        # re-enables the button and corrects the label the moment a
+        # real poll lands either way.
+        if hasattr(self.app, "start_wake_poll_burst"):
+            self.app.start_wake_poll_burst()
         if button.label == "start":
+            button.disabled = True
+            button.label = "starting..."
+            result_line.update("starting...")
             ok, msg = wake_control.start()
             result_line.update(("✓ " if ok else "⚠ ") + msg)
+            if not ok:
+                button.disabled = False
+                button.label = "start"
             return
 
         # Stop is the case that matters most (§7: the mic must actually
@@ -129,6 +151,7 @@ class WakePanel(Widget):
         # will correctly re-enable it once the next real poll confirms
         # wake.running is false, same path as any other state change.
         button.disabled = True
+        button.label = "stopping..."
         result_line.update("stopping...")
         ok, msg = await wake_control.stop()
         result_line.update(("✓ " if ok else "⚠ ") + msg)
