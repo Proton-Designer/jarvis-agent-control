@@ -122,35 +122,73 @@ def _parse_context_response(pane_text: str) -> dict | None:
     }
 
 
+def _wait_for_ready_stable(tmux_name: str, patterns: PaneStatePatterns, timeout_s: float) -> bool:
+    """Two consecutive READY reads, CONTEXT_SETTLE_POLL_INTERVAL_S apart,
+    before trusting the turn has actually settled -- same STRUCTURE as
+    pane_state_canary.py's wait_for_stable_ready() (find READY, wait,
+    confirm still READY; if it wasn't stable, go back and wait for READY
+    again rather than failing outright), adapted to this module's
+    transport handle. Found live (ue6rruxg, 2026-08-18, second distinct
+    manifestation of the same race class): a multi-step context-capture
+    turn (read a file, think, answer) has REAL busy/ready oscillation
+    mid-turn -- a single READY read straight after an observed BUSY can
+    land in one of those gaps between steps, not the genuine end. Live
+    repro: captured "Waddling... (8s, thinking)" -- still actively
+    working -- moments after this function (before this fix) had already
+    returned True on an earlier READY blip between two busy segments."""
+    deadline = time.monotonic() + timeout_s
+    while time.monotonic() < deadline:
+        if not _transport.session_exists(tmux_name):
+            return False
+        if classify_pane_ansi(_transport.capture_pane(tmux_name), patterns) != PaneState.READY:
+            time.sleep(CONTEXT_SETTLE_POLL_INTERVAL_S)
+            continue
+        time.sleep(CONTEXT_SETTLE_POLL_INTERVAL_S)
+        if not _transport.session_exists(tmux_name):
+            return False
+        if classify_pane_ansi(_transport.capture_pane(tmux_name), patterns) == PaneState.READY:
+            return True
+        # Blipped back to BUSY during the confirmation wait -- a real
+        # mid-turn gap, not settlement. Loop and wait for READY again
+        # rather than failing; the turn may still genuinely be working.
+    return False
+
+
 def _wait_for_reply_settled(tmux_name: str) -> bool:
-    """Waits for an OBSERVED BUSY -> READY transition, not just "reads
-    READY right now". Found live (ue6rruxg, 2026-08-18): right after
-    send-keys delivers the context prompt, the pane can still read READY
-    for one tick BEFORE the model actually starts processing -- a single
-    poll (reconnect.wait_for_ready(), correct for its own use case of
-    "is an already-idle session back up after a relaunch") caught that
-    pre-processing blip and returned true ~6s before the real reply had
-    even been written; the saved context file was still literally the
-    prompt's own placeholder text.
+    """Two-phase wait, each phase guarding a DIFFERENT instance of the
+    same race class (found live, ue6rruxg, 2026-08-18, in two separate,
+    sequential repros):
 
-    This is the mirror image of the race pane_state_canary.py's
-    wait_for_stable_ready() already guards against (a momentary READY
-    blip MID-turn, between two busy segments) -- here the blip is
-    BEFORE the turn starts, not during it. Two-consecutive-READY-reads
-    (that fix's approach) would not have caught this specific case: the
-    very first read already sees READY, so a second read moments later
-    could just see the SAME stale READY again if the model hasn't
-    started yet, which is exactly what happened live. Requiring an
-    ACTUAL BUSY OBSERVATION first is a strictly stronger guarantee --
-    it needs real evidence the turn started, not just two timestamps
-    agreeing.
+    PHASE 1 -- an OBSERVED BUSY, not just "reads READY right now". Right
+    after send-keys delivers the context prompt, the pane can still read
+    READY for one tick BEFORE the model actually starts processing -- a
+    single poll (reconnect.wait_for_ready(), correct for its own use
+    case of "is an already-idle session back up after a relaunch")
+    caught that pre-processing blip and returned true ~6s before the
+    real reply had even been written. Two-consecutive-READY-reads alone
+    would NOT catch this specific case: the very first read already sees
+    READY, so a second read moments later could just see the SAME stale
+    READY again if the model hasn't started yet -- exactly what happened
+    live. Requiring an ACTUAL BUSY OBSERVATION first is what phase 1
+    guards, and it needs real evidence the turn started, not just two
+    timestamps agreeing.
 
-    The BUSY-detection phase polls fast (CONTEXT_TURN_START_POLL_INTERVAL_S,
-    0.3s) specifically so a genuinely brief BUSY window is not itself
-    missed between polls -- the same class of miss this function exists
-    to prevent, just one level earlier. Never observing BUSY at all
-    within CONTEXT_TURN_START_TIMEOUT_S fails closed (returns False)
-    rather than assuming a stray READY means done."""
+    PHASE 2 -- STABLE READY (_wait_for_ready_stable), not just the FIRST
+    READY seen after phase 1's observed BUSY. A multi-step turn (read a
+    file, then think, then answer) has real busy/ready gaps BETWEEN
+    steps -- phase 1 alone would trust the first such gap as "done".
+    This is the mirror image of what phase 1 guards against (a blip
+    BEFORE the turn starts vs. a blip BETWEEN two busy segments of the
+    same turn), so it needs the OPPOSITE tool: phase 1 needs an
+    observation (BUSY happened), phase 2 needs a STABILITY check (READY
+    holds), and neither substitutes for the other.
+
+    Phase 1 polls fast (CONTEXT_TURN_START_POLL_INTERVAL_S, 0.3s)
+    specifically so a genuinely brief BUSY window is not itself missed
+    between polls -- the same class of miss this function exists to
+    prevent, just one level earlier. Never observing BUSY at all within
+    CONTEXT_TURN_START_TIMEOUT_S fails closed (returns False) rather
+    than assuming a stray READY means done."""
     patterns = PaneStatePatterns()
 
     deadline = time.monotonic() + CONTEXT_TURN_START_TIMEOUT_S
@@ -165,14 +203,7 @@ def _wait_for_reply_settled(tmux_name: str) -> bool:
     if not saw_busy:
         return False
 
-    deadline = time.monotonic() + CONTEXT_SETTLE_TIMEOUT_S
-    while time.monotonic() < deadline:
-        if not _transport.session_exists(tmux_name):
-            return False
-        if classify_pane_ansi(_transport.capture_pane(tmux_name), patterns) == PaneState.READY:
-            return True
-        time.sleep(CONTEXT_SETTLE_POLL_INTERVAL_S)
-    return False
+    return _wait_for_ready_stable(tmux_name, patterns, CONTEXT_SETTLE_TIMEOUT_S)
 
 
 def context_fields_for(entry: dict) -> dict:

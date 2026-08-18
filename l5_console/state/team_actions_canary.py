@@ -176,6 +176,27 @@ def _check_wait_for_reply_settled_race() -> None:
         tc.CONTEXT_TURN_START_POLL_INTERVAL_S = original_start_interval
         tc.CONTEXT_TURN_START_TIMEOUT_S = original_turn_timeout
 
+    print("  -- and the THIRD manifestation: a multi-segment turn's mid-turn READY gap is not mistaken for settled (ue6rruxg's find #2b, live repro: 'Waddling... (8s, thinking)' caught moments after a premature True)")
+    call_log.clear()
+    # BUSY (real work segment 1) -> READY (a gap BETWEEN steps, e.g. after
+    # a tool call finishes and before the model starts "thinking") ->
+    # BUSY (segment 2) -> READY, READY (genuinely settled, confirmed
+    # stable). Phase 1 (observed BUSY) is satisfied by the very first
+    # read; the bug this reproduces is phase 2 trusting the FIRST READY
+    # after that instead of requiring it to HOLD.
+    scripted_states[:] = [PaneState.BUSY, PaneState.READY, PaneState.BUSY, PaneState.READY, PaneState.READY]
+    tc._transport = FakeTransport()
+    tc.classify_pane_ansi = fake_classify
+    tc.CONTEXT_TURN_START_POLL_INTERVAL_S = 0.01
+    tc.CONTEXT_SETTLE_POLL_INTERVAL_S = 0.01
+    try:
+        result = tc._wait_for_reply_settled("fake-tmux")
+        check("waits through a mid-turn READY gap, does not settle on the first post-BUSY READY", result is True, detail=str(call_log))
+        check("read the pane at least 5 times (observed BUSY, the blip, the second BUSY, and two confirming READYs)", len(call_log) >= 5, detail=str(call_log))
+    finally:
+        tc._transport, tc.classify_pane_ansi = original_transport, original_classify
+        tc.CONTEXT_TURN_START_POLL_INTERVAL_S, tc.CONTEXT_SETTLE_POLL_INTERVAL_S = original_start_interval, original_settle_interval
+
 
 def run() -> int:
     print("team_actions / team_context canary\n")
