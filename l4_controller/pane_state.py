@@ -24,6 +24,7 @@ class PaneState(Enum):
     BUSY = "busy"
     PERMISSION_PROMPT = "permission_prompt"
     PERSISTENT_VIEW = "persistent_view"
+    BLOCKED_QUESTION = "blocked_question"
     UNKNOWN = "unknown"
 
 
@@ -124,6 +125,33 @@ class PaneStatePatterns:
         default_factory=lambda: [r"settings\s+status\s+config\s+usage\s+stats"]
     )
 
+    # A session used its native AskUserQuestion tool and is waiting on a
+    # human answer -- a question, not an authorisation (docs/SPEC-blockers.md).
+    # Confirmed live (2026-08-18) against TWO independently-triggered real
+    # instances (one via a skill, one a bare direct question, to rule out
+    # skill-specific phrasing): both rendered a numbered-choice picker with
+    # the footer "Enter to select · ↑/↓ to navigate · Esc to cancel" --
+    # structurally similar to PERMISSION_PROMPT (numbered options,
+    # arrow-key navigable) but with a distinct, positively-identifying
+    # footer phrase. "enter to select" does not appear anywhere in the
+    # real captured PERMISSION_PROMPT shape (that footer is "Esc to
+    # cancel · Tab to amend", no "Enter to X" phrase at all) or the
+    # onboarding-dialog shape ("Enter to CONFIRM"), so this is a
+    # positive, non-overlapping signature, not a leftover-of-exclusion
+    # guess -- the same mistake found and fixed twice already in this
+    # file (PERMISSION_PROMPT and PERSISTENT_VIEW both drifted this way
+    # from a shared "esc to cancel" marker before). Paired with "esc to
+    # cancel" for the same reason permission_prompt_pairs pairs its own
+    # markers: a lone phrase is a weaker signature than two co-occurring.
+    #
+    # PERMISSION_PROMPT is checked first in classify_pane -- if a future
+    # UI change ever made the two shapes converge, the more dangerous
+    # state wins the classification, same priority reasoning as
+    # persistent_view above.
+    blocked_question_pairs: list[tuple[str, str]] = field(
+        default_factory=lambda: [(r"enter to select", r"esc to cancel")]
+    )
+
     # Live/active indicator only. Real shape observed: a spinner glyph +
     # present-participle verb + ellipsis, e.g. "✢ Pouncing… (7s · ↓ 220
     # tokens)". Deliberately requires the ellipsis so it does NOT match the
@@ -168,6 +196,16 @@ def classify_pane(pane_text: str, patterns: PaneStatePatterns) -> PaneState:
     for pat_a, pat_b in patterns.permission_prompt_pairs:
         if re.search(pat_a, tail, re.IGNORECASE) and re.search(pat_b, tail, re.IGNORECASE):
             return PaneState.PERMISSION_PROMPT
+
+    # Checked after PERMISSION_PROMPT (priority: the more dangerous state
+    # wins if the two shapes ever converge), before BUSY/PERSISTENT_VIEW.
+    # Footer-based like permission_prompt_pairs, not top-of-pane like
+    # persistent_view's tab bar -- confirmed live the footer is always
+    # the pane's last line regardless of how many options/descriptions
+    # precede it, so it's reliably within the tail window.
+    for pat_a, pat_b in patterns.blocked_question_pairs:
+        if re.search(pat_a, tail, re.IGNORECASE) and re.search(pat_b, tail, re.IGNORECASE):
+            return PaneState.BLOCKED_QUESTION
 
     for pat in patterns.busy:
         if re.search(pat, tail, re.IGNORECASE):
@@ -229,8 +267,8 @@ def classify_pane_ansi(ansi_pane_text: str, patterns: PaneStatePatterns) -> Pane
     plain = _strip_ansi(ansi_pane_text)
     state = classify_pane(plain, patterns)
     if state != PaneState.READY and state != PaneState.UNKNOWN:
-        # BUSY / PERMISSION_PROMPT / PERSISTENT_VIEW already decided from
-        # the plain-text scan.
+        # BUSY / PERMISSION_PROMPT / PERSISTENT_VIEW / BLOCKED_QUESTION
+        # already decided from the plain-text scan.
         return state
     if not patterns.prompt_glyph:
         return state
