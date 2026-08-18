@@ -130,7 +130,12 @@ def register_team_by_adoption(
         aliases=aliases or [],
         root=root,
         inbox_tmux=tmux_name if is_inbox else "",
-        members=[{"tmux": tmux_name, "claude_session": info["claude_session"]}],
+        # model included -- SPEC-teams.md SS6, dropping it here meant the
+        # console's TeamsPanel rendered no model at all despite
+        # adopt_candidate_info() already having captured it (found live
+        # 2026-08-18, same gap fixed at the same time in setup_flow.py's
+        # own members-list construction).
+        members=[{"tmux": tmux_name, "claude_session": info["claude_session"], "model": info.get("model")}],
     )
     return {"ok": True, "detail": f"registered {tmux_name} as team {team_id!r}"}
 
@@ -163,6 +168,6 @@ def register_team_fresh(
         aliases=aliases or [],
         root=resolved_root,
         inbox_tmux=tmux_name,
-        members=[{"tmux": tmux_name, "claude_session": result["claude_session"]}],
+        members=[{"tmux": tmux_name, "claude_session": result["claude_session"], "model": model}],
     )
     return {"ok": True, "detail": f"created {tmux_name} at {resolved_root} and registered it as team {team_id!r}"}

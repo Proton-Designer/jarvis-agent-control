@@ -1,25 +1,36 @@
 """
-Setup flows (SPEC-TUI.md §5.1/§5.2): adopting existing sessions into a
-team, or starting a fresh one. One flow, one fork, two questions, per
-the spec -- which kind, then who receives (identical screen either
-way), then what to call it. Reconnect (§5.3) is in reconnect_flow.py.
+Setup flows (SPEC-TUI.md §5.1/§5.2, rebuilt for SPEC-teams.md §1/§5):
+adopting existing sessions into a team, or starting a fresh one. One
+flow, one fork, per the spec -- which kind, then directory (fresh path
+only -- adopt derives it from the sessions chosen), then who receives,
+then what to call it.
+
+No typed input anywhere except team id/aliases (the Lead's ruling,
+2026-08-18, extended here per SPEC-teams.md §1.1: the naming exception
+does NOT extend to paths -- a directory almost always has a bounded,
+enumerable set via the three tiers below, so it never needs a text
+field the way an arbitrary name does). Root/count/model, previously
+free-text Input fields, are now ListView/Button selections.
 
 Wiring, not reimplementing (the Lead's instruction): every action that
 touches tmux, ~/.claude.json, or teams.json goes through
-l5_console/state/setup.py's functions (gu2s6tnt's, verified live on
-their side) -- this module is UI plus the sequencing between those
-calls, never a second implementation of adoption/creation logic.
+l5_console/state/setup.py's functions -- this module is UI plus the
+sequencing between those calls, never a second implementation of
+adoption/creation logic.
 
 One Screen with internal steps, not a Screen per step -- keeps this
-flow's accumulated data (chosen root, candidate list, chosen inbox,
-team id/aliases) in one place instead of threading it through screen
-constructors and dismiss callbacks, which would be more Textual-idiomatic
-for a longer wizard but adds real complexity this flow's actual size
-doesn't need.
+flow's accumulated data (chosen root, candidate list, chosen lead, team
+id/aliases) in one place instead of threading it through screen
+constructors and dismiss callbacks.
 
 "No terminal work at any point" (§5.2) -- every step here is a widget,
 never a shell-out the user has to watch or intervene in outside this
 screen.
+
+FOCUS DISCIPLINE, same landmine as engine_flow.py: every _show_*_step()
+explicitly focuses its primary widget on mount, since Textual only
+auto-focuses a Screen's primary widget on its INITIAL mount, not on
+later remove_children()+mount() cycles.
 """
 from __future__ import annotations
 
@@ -28,7 +39,7 @@ import sys
 from pathlib import Path
 
 from textual.app import ComposeResult
-from textual.containers import Vertical, VerticalScroll
+from textual.containers import Vertical
 from textual.screen import Screen
 from textual.widgets import Button, Input, ListItem, ListView, Label
 
@@ -40,6 +51,12 @@ import teams as teams_state  # noqa: E402
 import api as state  # noqa: E402
 
 FRESH_TEAM_MODELS = ["sonnet", "opus"]
+FRESH_TEAM_COUNTS = [1, 2, 3, 4, 5]
+
+# Hidden directories (dotfiles) never appear in the walker -- noise, not
+# a real project root in the overwhelming majority of cases, and this is
+# a picker for "where does my project live," not a general file browser.
+_WALKER_START = Path.home()
 
 
 def _slugify(text: str) -> str:
@@ -51,6 +68,15 @@ def _slugify(text: str) -> str:
     return slug or "team"
 
 
+def _list_recent_roots() -> list[str]:
+    """Tier 2 of the directory picker (SPEC-teams.md §1.1): every
+    distinct root that has ever appeared in teams.json. Computed here,
+    client-side, from load_registry() (already public) rather than a
+    dedicated state-layer function -- this is a pure read of data
+    already exposed, not a new capability."""
+    return sorted({t["root"] for t in teams_state.load_registry() if t.get("root")})
+
+
 class SetupScreen(Screen):
     """The whole add-a-team wizard. Pushed onto the app's screen stack
     (main.py binds a key to it) -- overlays whichever of Rail/Console/
@@ -60,7 +86,7 @@ class SetupScreen(Screen):
 
     DEFAULT_CSS = """
     SetupScreen { align: center middle; background: $surface; }
-    #setup_body { width: 70; height: auto; max-height: 90%; border: solid $primary; padding: 2; border-title-color: $text-muted; }
+    #setup_body { width: 74; height: auto; max-height: 90%; border: solid $primary; padding: 2; border-title-color: $text-muted; }
     #setup_body Button { margin-top: 1; }
     #setup_body Input { margin-top: 1; }
     #setup_body ListView { height: auto; max-height: 12; margin-top: 1; }
@@ -73,6 +99,8 @@ class SetupScreen(Screen):
         self.candidates: list[dict] = []  # {"tmux", "claude_session", "model", "summary"}
         self.inbox_tmux: str | None = None
         self.fresh_model: str = FRESH_TEAM_MODELS[0]
+        self.fresh_count: int = 1
+        self._walker_dir: Path = _WALKER_START
 
     def compose(self) -> ComposeResult:
         yield Vertical(id="setup_body")
@@ -106,9 +134,13 @@ class SetupScreen(Screen):
         if kind == "adopt":
             await self._show_adopt_group_step()
         else:
-            await self._show_fresh_params_step()
+            await self._show_fresh_directory_step()
 
     # --- Adopt path: group live unassigned sessions by directory ----------
+    # Already a bounded ListView over REAL live sessions (tier 1 of the
+    # directory picker, in effect) -- the directory here is DERIVED from
+    # which sessions exist, not independently chosen, so the fresh
+    # path's fuller 3-tier picker below doesn't apply to this step.
 
     async def _show_adopt_group_step(self) -> None:
         await self._clear()
@@ -149,46 +181,111 @@ class SetupScreen(Screen):
         self.candidates = [setup_state.adopt_candidate_info(s.tmux) for s in sessions]
         await self._show_inbox_step()
 
-    # --- Fresh path: directory, count, model, then launch -----------------
+    # --- Fresh path: directory (3-tier picker) -> count -> model ----------
 
-    async def _show_fresh_params_step(self) -> None:
+    async def _show_fresh_directory_step(self) -> None:
+        """SPEC-teams.md §1.1: three tiers, no typed input, in order --
+        (1) directories of live sessions not yet in a team, (2) recent
+        roots ever used, (3) a button-driven walker for the genuinely
+        novel case. The naming Input exception does NOT extend here."""
         await self._clear()
         body = self._body()
-        body.border_title = "STEP 1 — FRESH · TARGET DIRECTORY"
-        await body.mount(PlainStatic("Target directory:"))
-        root_input = Input(placeholder="/path/to/project", id="fresh_root")
-        await body.mount(root_input)
-        await body.mount(PlainStatic("How many agents?"))
-        await body.mount(Input(placeholder="1", id="fresh_count"))
-        await body.mount(PlainStatic(f"Model for all agents (default: {self.fresh_model}):"))
-        await body.mount(Input(placeholder="sonnet or opus", id="fresh_model_input"))
-        await body.mount(Button("Create", id="fresh_submit", variant="success"))
-        await body.mount(Button("Back", id="back_to_kind"))
-        root_input.focus()
+        body.border_title = "STEP 1 — FRESH · DIRECTORY"
 
-    async def _on_fresh_submit(self) -> None:
+        current = state.get_state()
+        unassigned_dirs = sorted({u.working_dir for u in current.unassigned})
+        recent_roots = [r for r in _list_recent_roots() if r not in unassigned_dirs]
+
+        if unassigned_dirs or recent_roots:
+            await body.mount(PlainStatic("Which directory?"))
+            listview = ListView(id="fresh_dir_list")
+            await body.mount(listview)
+            for d in unassigned_dirs:
+                await listview.append(ListItem(Label(f"● {d}  (has a running session)"), name=d))
+            for r in recent_roots:
+                await listview.append(ListItem(Label(f"  {r}  (used before)"), name=r))
+            await body.mount(Button("Browse for a different directory...", id="fresh_dir_browse"))
+            await body.mount(Button("Back", id="back_to_kind"))
+            listview.focus()
+        else:
+            await body.mount(PlainStatic("No known directories yet -- browse to pick one."))
+            browse_button = Button("Browse for a directory...", id="fresh_dir_browse")
+            await body.mount(browse_button)
+            await body.mount(Button("Back", id="back_to_kind"))
+            browse_button.focus()
+
+    async def _on_fresh_directory_chosen(self, root: str) -> None:
+        # Resolved at the moment of capture (SPEC-teams.md §1.1) --
+        # tiers 1/2 are already resolved (the kernel/registry report
+        # real paths), but resolving again here is cheap and makes this
+        # call site correct independent of that guarantee holding
+        # upstream.
+        self.root = str(Path(root).resolve())
+        await self._show_fresh_count_step()
+
+    async def _show_directory_walker_step(self, current_dir: Path) -> None:
+        """Tier 3: subdirectories + ".." + an explicit confirm button --
+        never a typed path, per SPEC-teams.md §1.1's explicit refusal to
+        extend the naming-Input exception to paths."""
+        self._walker_dir = current_dir
+        await self._clear()
         body = self._body()
-        root = self.query_one("#fresh_root", Input).value.strip()
-        count_text = self.query_one("#fresh_count", Input).value.strip() or "1"
-        model_text = self.query_one("#fresh_model_input", Input).value.strip() or self.fresh_model
-
-        if not root:
-            await body.mount(PlainStatic("⚠ target directory is required"))
-            return
+        body.border_title = "STEP 1 — FRESH · BROWSE"
+        await body.mount(PlainStatic(f"Current: {current_dir}"))
+        listview = ListView(id="walker_list")
+        await body.mount(listview)
+        if current_dir.parent != current_dir:
+            await listview.append(ListItem(Label(".. (up one level)"), name="__up__"))
         try:
-            count = int(count_text)
-            if count < 1:
-                raise ValueError
-        except ValueError:
-            await body.mount(PlainStatic("⚠ number of agents must be a positive whole number"))
-            return
-        if model_text not in FRESH_TEAM_MODELS:
-            await body.mount(PlainStatic(f"⚠ model must be one of: {', '.join(FRESH_TEAM_MODELS)}"))
-            return
+            subdirs = sorted(
+                (p for p in current_dir.iterdir() if p.is_dir() and not p.name.startswith(".")),
+                key=lambda p: p.name.lower(),
+            )
+        except (PermissionError, OSError):
+            subdirs = []
+        for d in subdirs:
+            await listview.append(ListItem(Label(d.name), name=str(d)))
+        await body.mount(Button(f"Use this directory", id="walker_confirm", variant="success"))
+        await body.mount(Button("Back", id="back_to_kind"))
+        listview.focus()
 
-        self.root = root
-        self.fresh_model = model_text
-        await self._launch_fresh_members(root, count, model_text)
+    async def _on_walker_item_chosen(self, name: str) -> None:
+        if name == "__up__":
+            await self._show_directory_walker_step(self._walker_dir.parent)
+        else:
+            await self._show_directory_walker_step(Path(name))
+
+    async def _show_fresh_count_step(self) -> None:
+        await self._clear()
+        body = self._body()
+        body.border_title = "STEP 2 — FRESH · HOW MANY"
+        await body.mount(PlainStatic("How many agents?"))
+        listview = ListView(id="fresh_count_list")
+        await body.mount(listview)
+        for n in FRESH_TEAM_COUNTS:
+            await listview.append(ListItem(Label(str(n)), name=str(n)))
+        await body.mount(Button("Back", id="back_to_fresh_directory"))
+        listview.focus()
+
+    async def _on_fresh_count_chosen(self, count: str) -> None:
+        self.fresh_count = int(count)
+        await self._show_fresh_model_step()
+
+    async def _show_fresh_model_step(self) -> None:
+        await self._clear()
+        body = self._body()
+        body.border_title = "STEP 3 — FRESH · MODEL"
+        await body.mount(PlainStatic("Model for all agents?"))
+        listview = ListView(id="fresh_model_list")
+        await body.mount(listview)
+        for m in FRESH_TEAM_MODELS:
+            label = m.capitalize() + ("  (default)" if m == self.fresh_model else "")
+            await listview.append(ListItem(Label(label), name=m))
+        await body.mount(Button("Back", id="back_to_fresh_count"))
+        listview.focus()
+
+    async def _on_fresh_model_chosen(self, model: str) -> None:
+        await self._launch_fresh_members(self.root, self.fresh_count, model)
 
     async def _launch_fresh_members(self, root: str, count: int, model: str) -> None:
         await self._show_loading(f"Launching {count} agent(s) in {root}...")
@@ -205,8 +302,6 @@ class SetupScreen(Screen):
         # before create_team() uses it below, or the registered team's
         # root would not byte-for-byte match the live session's actual
         # pane_current_path, which teams.py's member_liveness() requires.
-        # Found live 2026-08-18 (a /tmp-rooted scratch test); invisible
-        # for any root under $HOME, which is never symlinked in practice.
         resolved_roots = {r["root"] for _name, r in results if r.get("root")}
         if len(resolved_roots) == 1:
             self.root = resolved_roots.pop()
@@ -239,12 +334,12 @@ class SetupScreen(Screen):
         ]
         await self._show_inbox_step()
 
-    # --- Step 2: who receives (§5.1 step 2, identical either path) --------
+    # --- Step: who receives (§5.1, identical either path) -----------------
 
     async def _show_inbox_step(self) -> None:
         await self._clear()
         body = self._body()
-        body.border_title = "STEP 2 — WHO RECEIVES INSTRUCTIONS"
+        body.border_title = "STEP — WHO RECEIVES INSTRUCTIONS"
         listview = ListView(id="inbox_list")
         await body.mount(listview)
         for c in self.candidates:
@@ -259,18 +354,25 @@ class SetupScreen(Screen):
         self.inbox_tmux = tmux_name
         await self._show_alias_step()
 
-    # --- Step 3: what do you call it (§5.1 step 3) -------------------------
+    # --- Step: what do you call it (§5.1) -----------------------------------
+    # The ONE legitimate exception to no-typed-input (the Lead's ruling,
+    # 2026-08-18): a name/alias is authored content, not a bounded
+    # choice. Both fields are pre-filled with a real, usable default --
+    # confirming without editing accepts it.
 
     async def _show_alias_step(self) -> None:
         await self._clear()
         body = self._body()
-        body.border_title = "STEP 3 — WHAT DO YOU CALL IT"
+        body.border_title = "STEP — WHAT DO YOU CALL IT"
         default_id = _slugify(Path(self.root).name) if self.root else "team"
-        await body.mount(PlainStatic("Team id (short, no spaces):"))
+        await body.mount(PlainStatic("Team id (short, no spaces) -- confirm the default, or edit it:"))
         id_input = Input(value=default_id, id="team_id_input")
         await body.mount(id_input)
         await body.mount(PlainStatic("Spoken aliases (comma-separated -- how you'll refer to it by voice):"))
-        await body.mount(Input(placeholder=f"the {default_id} project, {default_id}", id="aliases_input"))
+        # Pre-filled with a real usable value, not just a placeholder --
+        # same convention as the id field above and as engine_flow.py's
+        # naming steps: confirming without editing must actually work.
+        await body.mount(Input(value=default_id, id="aliases_input"))
         await body.mount(Button("Create team", id="finish_submit", variant="success"))
         await body.mount(Button("Back", id="cancel", variant="error"))
         id_input.focus()
@@ -281,7 +383,15 @@ class SetupScreen(Screen):
         aliases_raw = self.query_one("#aliases_input", Input).value.strip()
         aliases = [a.strip() for a in aliases_raw.split(",") if a.strip()] or [team_id]
 
-        members = [{"tmux": c["tmux"], "claude_session": c["claude_session"]} for c in self.candidates]
+        # model IS already known here (adopted via /status, or fresh via
+        # the model step's own selection) -- found live 2026-08-18 that
+        # dropping it here meant TeamsPanel's "activity · model" column
+        # rendered with no model at all despite it being right there in
+        # self.candidates the whole time. Never send "effort": nothing
+        # in either flow asks for it today, and SPEC-teams.md SS6 is
+        # explicit that a real None is correct here, not a value to
+        # invent.
+        members = [{"tmux": c["tmux"], "claude_session": c["claude_session"], "model": c.get("model")} for c in self.candidates]
         try:
             setup_state.create_team(team_id, aliases, self.root, self.inbox_tmux, members)
         except ValueError as e:
@@ -289,7 +399,7 @@ class SetupScreen(Screen):
             return
 
         await self._clear()
-        await body.mount(PlainStatic(f"✓ team {team_id!r} created, inbox: {self.inbox_tmux}"))
+        await body.mount(PlainStatic(f"✓ team {team_id!r} created, lead: {self.inbox_tmux}"))
         done_button = Button("Done", id="cancel", variant="success")
         await body.mount(done_button)
         done_button.focus()
@@ -308,8 +418,14 @@ class SetupScreen(Screen):
             await self._on_kind_chosen("fresh")
         elif bid == "back_to_kind":
             await self._show_kind_step()
-        elif bid == "fresh_submit":
-            await self._on_fresh_submit()
+        elif bid == "fresh_dir_browse":
+            await self._show_directory_walker_step(self._walker_dir)
+        elif bid == "walker_confirm":
+            await self._on_fresh_directory_chosen(str(self._walker_dir))
+        elif bid == "back_to_fresh_directory":
+            await self._show_fresh_directory_step()
+        elif bid == "back_to_fresh_count":
+            await self._show_fresh_count_step()
         elif bid == "continue_partial":
             await self._show_inbox_step()
         elif bid == "finish_submit":
@@ -324,3 +440,11 @@ class SetupScreen(Screen):
             await self._on_adopt_group_chosen(chosen_name)
         elif list_id == "inbox_list":
             await self._on_inbox_chosen(chosen_name)
+        elif list_id == "fresh_dir_list":
+            await self._on_fresh_directory_chosen(chosen_name)
+        elif list_id == "walker_list":
+            await self._on_walker_item_chosen(chosen_name)
+        elif list_id == "fresh_count_list":
+            await self._on_fresh_count_chosen(chosen_name)
+        elif list_id == "fresh_model_list":
+            await self._on_fresh_model_chosen(chosen_name)

@@ -52,6 +52,19 @@ def _staleness_note(polled_at: float, expected_interval: float) -> str:
     return " [STALE -- data has stopped updating]" if is_stale(polled_at, expected_interval) else ""
 
 
+def _truncate(text: str, max_len: int) -> str:
+    text = text.strip()
+    if len(text) <= max_len:
+        return text
+    return text[: max_len - 1].rstrip() + "…"
+
+
+def _context_age(captured_at: float | None) -> str:
+    if captured_at is None:
+        return ""
+    return ", " + time.strftime("%b %-d", time.localtime(captured_at))
+
+
 class WakePanel(Widget):
     """The one interactive control with a real safety property (§7).
 
@@ -438,18 +451,68 @@ class TeamsPanel(PlainStatic):
                 Text(f"{len(t.members)} agent(s)", style=COLOR_DIM),
                 Text(t.display_path or t.root, style=COLOR_DIM),
             )
-            for m in t.members:
+
+            # SPEC-teams.md SS2: "no lead assigned" (live members, no
+            # pointer set) must render as its OWN distinct state, never
+            # indistinguishable from a fully dead team -- and separately
+            # from "lead unreachable" (pointer set, but that member isn't
+            # currently reachable), which is a different problem needing
+            # a different fix (Swap, not Attach-a-lead).
+            if not t.has_lead:
+                table.add_row(Text("  ⚠ no lead assigned", style=COLOR_WARN), "", "")
+            elif not t.lead_reachable:
+                table.add_row(Text("  ⚠ lead unreachable", style=COLOR_WARN), "", "")
+
+            # Per-team context line (SPEC-teams.md SS3) -- dim, truncated,
+            # the "(self-described, unverified)" qualifier ONLY for
+            # agent-sourced context; CLAUDE.md-sourced needs none, it
+            # isn't a fabrication risk. Routing hint only, never rendered
+            # as if Ayman asked a factual question and got a factual
+            # answer -- the qualifier is what keeps that distinction
+            # visible instead of implicit.
+            if t.context_summary:
+                ctx = Text(f"  {_truncate(t.context_summary, 70)}", style=COLOR_DIM)
+                if t.context_source == "agent":
+                    ctx.append(f"  (self-described, unverified{_context_age(t.context_captured_at)})", style=COLOR_DIM)
+                table.add_row(ctx, "", "")
+
+            # Lead rendered FIRST, always, with a real badge -- not a
+            # suffix on whatever order teams.json's member list happens
+            # to have (the Lead's live finding, 2026-08-18: today's order
+            # is just list order). Everyone else follows in their
+            # existing order.
+            lead_member = next((m for m in t.members if m.is_lead), None) if t.has_lead else None
+            ordered_members = ([lead_member] if lead_member else []) + [m for m in t.members if m is not lead_member]
+
+            for m in ordered_members:
                 name = m.tmux or "(not bound)"
-                if m.is_inbox:
-                    name += " ← inbox"
+                is_lead_row = m is lead_member
+                # Model folded into the existing activity column as
+                # compact text ("busy · sonnet"), not a fourth column
+                # (SPEC-teams.md SS5) -- this panel already has less
+                # spare width than Engine's fixed-34-col rail, and a
+                # dedicated column risks crowding at real terminal
+                # widths sooner than a dim inline suffix does.
                 activity = m.activity or ("idle" if m.liveness == LIVENESS_RUNNING else "")
+                if m.model:
+                    # compact_model_name(), not the raw m.model -- an
+                    # adopted member's model comes back from /status as
+                    # "Opus (claude-opus-5)" verbatim (found live
+                    # building Engine's own equivalent column), which
+                    # doesn't fit a compact inline suffix.
+                    model_short = compact_model_name(m.model)
+                    activity = f"{activity} · {model_short}" if activity else model_short
                 status_style = {
                     LIVENESS_RUNNING: COLOR_OK if not m.activity else COLOR_WARN,
                     LIVENESS_STOPPED: COLOR_DIM,
                     LIVENESS_LOST: COLOR_ERR,
                 }.get(m.liveness, COLOR_DIM)
+                name_text = Text("  ", style=COLOR_DIM)
+                if is_lead_row:
+                    name_text.append("LEAD ", style=f"bold {COLOR_ACCENT}")
+                name_text.append(f"{liveness_icon(m.liveness)} {name}", style=liveness_color(m.liveness))
                 table.add_row(
-                    Text(f"  {liveness_icon(m.liveness)} {name}", style=liveness_color(m.liveness)),
+                    name_text,
                     Text(activity, style=COLOR_DIM),
                     Text(m.liveness, style=status_style),
                 )
