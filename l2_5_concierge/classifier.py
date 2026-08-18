@@ -32,10 +32,13 @@ constrained re-ask in classify().
 
 Third addition: assess_retention(), NOT_ADDRESSED's retention half
 (SPEC-L2.5's sixth intent class). Not a 6th label in classify()'s return
-value -- CHAT is already fully suppressed (never speaks, never forwards,
-see concierge.py's guard), so the only remaining question for a
-CHAT-classified transcript is whether it stays on disk. See
-assess_retention's own docstring for the asymmetric confidence bar.
+value -- a CHAT transcript never forwards, so the only two remaining
+questions are whether it stays on disk and whether Jarvis answers it
+aloud. assess_retention answers both, because both turn on the same
+ADDRESSED/AMBIENT/UNSURE verdict, and computing it twice would mean two
+model calls on the latency-critical path for one question. See its own
+docstring for the asymmetric confidence bar, and concierge.py's CHAT
+branch for the speech gate built on the returned verdict.
 """
 from __future__ import annotations
 
@@ -130,13 +133,26 @@ def _looks_imperative(text: str) -> bool:
     return any(p.search(text) for p in _IMPERATIVE_PATTERNS)
 
 
-def assess_retention(text: str) -> tuple[bool, str]:
+def assess_retention(text: str) -> tuple[bool, str, str | None]:
     """Only meaningful for a CHAT-classified transcript. Decides whether
     the dictation gets written to ~/.jarvis/dictations/ at all, or
     discarded -- the retention half of NOT_ADDRESSED (SPEC-L2.5's sixth
-    intent class). CHAT itself already never speaks or forwards (see
-    concierge.py's guard); this is purely about whether an artifact
-    survives.
+    intent class). A CHAT transcript still never forwards to L3.
+
+    Returns (retain, reason, verdict). The third element is the raw
+    ADDRESSED/AMBIENT/UNSURE verdict, or None when the imperative
+    short-circuit below answered the retention question without ever
+    asking the model.
+
+    Returning the verdict rather than swallowing it is the fix for a
+    real, observed failure (2026-08-18, Ayman's live test): he said
+    "What's up? How's it going?" directly to Jarvis, this function ran,
+    the model answered ADDRESSED in 624ms -- and Jarvis said nothing,
+    because the caller's guard keyed on the CHAT label instead of on
+    this verdict. The information needed to be right was computed,
+    logged, and then thrown away. The verdict is the whole point of the
+    call; the retention boolean was only ever one thing built on top of
+    it.
 
     The one place the project's usual fail-toward-dispatch asymmetry
     inverts, and inverts for a specific reason: forwarding an ambiguous
@@ -155,7 +171,13 @@ def assess_retention(text: str) -> tuple[bool, str]:
     concierge.py's retention-decision logging, "log the event, never the
     content")."""
     if _looks_imperative(text):
-        return True, "imperative-shaped despite CHAT classification, retaining"
+        # verdict=None deliberately, and it is NOT a missing value the
+        # caller should treat as ADDRESSED: an imperative-shaped
+        # utterance that still classified CHAT is the ambiguous case,
+        # and answering it with a friendly acknowledgement would imply
+        # an instruction was accepted when nothing was forwarded. Silent
+        # and retained is the safe direction, same as before.
+        return True, "imperative-shaped despite CHAT classification, retaining", None
     # Lowercased before the model call -- found by testing, not a
     # theoretical concern: "Thanks, appreciate it." (capital T, the exact
     # shape Whisper always produces -- it capitalizes sentence starts)
@@ -167,8 +189,8 @@ def assess_retention(text: str) -> tuple[bool, str]:
     # instability rather than trying to prompt around it.
     verdict = assess_addressed(text.lower())
     if verdict == "AMBIENT":
-        return False, "high confidence not-addressed (ambient + no imperative pattern)"
-    return True, f"retaining, insufficient confidence to discard (verdict={verdict})"
+        return False, "high confidence not-addressed (ambient + no imperative pattern)", verdict
+    return True, f"retaining, insufficient confidence to discard (verdict={verdict})", verdict
 
 
 def classify(text: str) -> Classification:
