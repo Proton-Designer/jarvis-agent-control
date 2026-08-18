@@ -32,12 +32,14 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent.parent / "l4_controller"))
 import blocked_state  # noqa: E402
+import dispatch_state as dispatch_state_mod  # noqa: E402
 import say_feedback  # noqa: E402
 
 import orchestrator as orchestrator_mod
 import runtime as runtime_mod
 import teams as teams_mod
 import wake as wake_mod
+import wake_signal as wake_signal_mod
 from models import (
     LIVENESS_LOST,
     JarvisState,
@@ -51,6 +53,13 @@ WAKE_INTERVAL_S = 1.0
 TEAMS_INTERVAL_S = 3.0  # effective cadence once per-member activity is added; membership/liveness alone would be ~1s
 RUNTIME_INTERVAL_S = 2.5
 SPEND_INTERVAL_S = 45.0
+
+# SPEC-blockers.md SS5.3: "a session that blocks and unblocks itself
+# within seconds is not worth reporting." No spec-mandated number --
+# 5s is a judgment call, easy to retune, chosen to comfortably cover a
+# session answering its own question via a quick follow-up tool call
+# without holding real blocks silent for long.
+BLOCKED_SETTLE_DELAY_S = 5.0
 
 
 def _initial_state() -> JarvisState:
@@ -126,33 +135,97 @@ class Poller:
                 # Expensive per-member tier (SS6.1, SPEC-blockers.md stage
                 # 1): folded into this same cadence per TEAMS_INTERVAL_S's
                 # own comment, not a separate slower loop. Mutates
-                # teams_list's members in place; newly_blocked is stage
-                # 1's actual detection trigger.
-                newly_blocked = teams_mod.enrich_running_members(teams_list)
+                # teams_list's members in place -- detection only, no
+                # speaking here (enrich_running_members() never speaks by
+                # design; see its docstring).
+                teams_mod.enrich_running_members(teams_list)
                 with self._lock:
                     self._state.teams = teams_list
                     self._state.unassigned = unassigned_list
                     self._state.teams_polled_at = time.time()
                     self._state.teams_expected_interval = TEAMS_INTERVAL_S
                     self._state.teams_error = None
-                # Escalation (the actual audio) happens here, outside the
-                # lock and outside teams.py's pure state-reading functions
-                # -- speak() is fire-and-forget/non-blocking, so this
-                # doesn't stall the next tick, and exactly one escalation
-                # fires per blocking episode (mark_blocked() already
-                # de-duped newly_blocked to first-detection-only).
-                for team, member in newly_blocked:
-                    label = f"{team.id}'s {member.tmux}" if member.tmux else team.id
-                    say_feedback.speak(
-                        f"{label} is waiting on a question: {member.blocked_question}"
-                    )
-                    blocked_state.mark_surfaced(member.claude_session)
-                    with self._lock:
-                        member.blocked_surfaced = True
+                self._maybe_escalate_blocked(teams_list)
             except Exception as e:  # noqa: BLE001
                 with self._lock:
                     self._state.teams_error = str(e)
             self._stop.wait(TEAMS_INTERVAL_S)
+
+    def _maybe_escalate_blocked(self, teams_list) -> None:
+        """SPEC-blockers.md SS5.3: not immediately on detection. Collects
+        every member that has been blocked (and unsurfaced) for at least
+        BLOCKED_SETTLE_DELAY_S, and -- only if it is actually safe to
+        speak right now -- announces all of them in ONE batched utterance
+        naming sessions, never reading the question text aloud (the
+        console shows the detail; voice is the notification). Runs every
+        tick but is a no-op unless something is both pending and safe --
+        so a block detected mid-dictation simply waits here, unspoken,
+        until a later tick finds the mic clear, which is what makes this
+        "speak at the end of the dictation" rather than "speak on a
+        timer" in practice."""
+        now = time.time()
+        pending = [
+            (team, member)
+            for team in teams_list
+            for member in team.members
+            if member.blocked_question is not None
+            and not member.blocked_surfaced
+            and member.blocked_since is not None
+            and (now - member.blocked_since) >= BLOCKED_SETTLE_DELAY_S
+        ]
+        if not pending or not self._safe_to_speak():
+            return
+
+        labels = [self._member_label(team, member) for team, member in pending]
+        if len(labels) == 1:
+            text = f"{labels[0]} is waiting on a question."
+        else:
+            text = f"{len(labels)} sessions are waiting on questions: " + ", ".join(labels[:-1]) + f", and {labels[-1]}."
+        say_feedback.speak(text)
+
+        for team, member in pending:
+            blocked_state.mark_surfaced(member.claude_session)
+            with self._lock:
+                member.blocked_surfaced = True
+
+    def _safe_to_speak(self) -> bool:
+        """Fails closed on anything uncertain. Two independent gates:
+
+        1. The mic. If the wake daemon isn't even running (confirmed via
+           the pgrep-based JarvisState.wake.running, not this file's own
+           existence), there's no live mic session to corrupt, so it's
+           safe regardless of wake_state.json's content -- a
+           missing/stale wake_state.json with wake.running=False must
+           never itself be read as "unsafe," only as "not listening."
+           If the daemon IS running, wake_state.json must exist, be
+           fresh, and read IDLE -- CAPTURING or CANCEL_ARMED (or a stale
+           read, which per app/wake_state.py's own discipline must never
+           be trusted as "quiet, so it's fine") both block speaking.
+        2. Nothing in flight. dispatch_state.py's "forwarded" stage is
+           written the instant a transcript reaches L3 and stays that
+           way until deliver_batch() marks it "complete" -- confirm_plan's
+           spoken plan summary and cancel window both happen inside that
+           window, so gating on it also happens to be exactly "after the
+           plan summary": the first tick where forwarded flips away is
+           already past it."""
+        with self._lock:
+            wake_running = self._state.wake.running
+        if wake_running:
+            signal = wake_signal_mod.read_wake_signal()
+            if signal is None or signal.stale or signal.state != "IDLE":
+                return False
+
+        dispatch = dispatch_state_mod.dispatch_state()
+        if dispatch is not None and dispatch.get("stage") == "forwarded":
+            return False
+        return True
+
+    @staticmethod
+    def _member_label(team, member) -> str:
+        alias = team.aliases[0] if team.aliases else team.id
+        if len(team.members) == 1:
+            return alias
+        return f"{alias}'s {member.tmux}"
 
     def _loop_wake(self) -> None:
         while not self._stop.is_set():
