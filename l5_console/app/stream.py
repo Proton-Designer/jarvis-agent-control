@@ -42,8 +42,14 @@ _EVENT_FORMATTERS = {
     "concierge_fast_path_done": lambda e: (
         f"{e.get('label')} -> " + ("forwarded" if e.get("forwarded") else "answered locally")
     ),
-    "concierge_chat_suppressed": lambda e: (
-        "CHAT suppressed, " + ("kept" if e.get("retain") else "DISCARDED (not addressed)")
+    # Renamed from concierge_chat_suppressed on 2026-08-18 -- CHAT is no
+    # longer unconditionally suppressed, so the old name would have been
+    # actively misleading on the line that matters most (the one where
+    # Jarvis DID answer). Says which of the two things happened and why.
+    "concierge_chat_handled": lambda e: (
+        (f"CHAT answered ({e.get('response_chars')} chars)" if e.get("spoken")
+         else f"CHAT not answered (verdict={e.get('verdict') or 'imperative-shaped'})")
+        + (", kept" if e.get("retain") else ", DISCARDED (not addressed)")
     ),
     "l1_dictation_end": lambda e: f"dictation ended ({e.get('chars')} chars)",
     "l1_concierge_round_trip": lambda e: (

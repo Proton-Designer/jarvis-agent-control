@@ -506,7 +506,22 @@ def _report_and_deliver(
 
     handoff_wall_time = time.time()
     end_to_end_s = handoff_wall_time - stop_wall_time
-    print(f"concierge result: {result!r}")
+    # Was a raw `{result!r}` dict dump, which Ayman reasonably read as
+    # "it sent my transcription to an agent" on a turn where
+    # forwarded=False and nothing had been sent anywhere (2026-08-18).
+    # The routing was correct and the console said the opposite; a
+    # terminal line that requires parsing a Python dict to learn whether
+    # your words left the machine is not an acceptable answer to the
+    # only question this line exists to answer. State the outcome first,
+    # in words, and keep the dict behind it for debugging.
+    if result.get("forwarded"):
+        outcome = f"FORWARDED to {orchestrator_target}"
+    elif result.get("response"):
+        outcome = f"answered locally, nothing sent to any agent: {result['response']!r}"
+    else:
+        outcome = "no response, nothing sent to any agent"
+    print(f"concierge: {result.get('label')} -> {outcome}")
+    print(f"  (raw: {result!r})")
     print(f"stop-word-to-handoff-return wall-clock: {end_to_end_s:.3f}s")
     log_event(
         "l1_concierge_round_trip", label=result.get("label"), spoken=bool(result.get("response")),
