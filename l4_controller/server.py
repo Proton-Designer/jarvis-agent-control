@@ -81,14 +81,17 @@ def spend(session_id: str) -> dict:
 
 
 @app.tool()
-def report_dispatch_stage(stage: str, detail: str = "") -> dict:
-    """Optional: push a note about where you are in handling the current
-    dictation (e.g. "plan_spoken" plus the narrated summary text) so the
-    concierge can surface it if asked "what's it doing?". This is color,
-    not a requirement -- the concierge's forwarded/complete tracking does
-    not depend on this ever being called, so skipping it is never a
-    correctness problem, just a slightly less specific answer."""
-    _report_dispatch_stage(stage, detail)
+def report_dispatch_stage(dictation_ref: str, stage: str, detail: str = "") -> dict:
+    """Optional: push a note about where you are in handling a specific
+    dictation (dictation_ref is the path you were told to read it from --
+    e.g. "plan_spoken" plus the narrated summary text) so the concierge
+    can surface it if asked "what's it doing?". This is color, not a
+    requirement -- the concierge's forwarded/complete tracking does not
+    depend on this ever being called, so skipping it is never a
+    correctness problem, just a slightly less specific answer. dictation_ref
+    is required (not defaulted to "the current one") because more than one
+    dictation can be in flight at once -- see dispatch_state.py."""
+    _report_dispatch_stage(dictation_ref, stage, detail)
     return {"ok": True}
 
 
@@ -130,10 +133,15 @@ def confirm_plan(phrases: list[str], cancel_window_s: float = 2.5) -> dict:
 
 
 @app.tool()
-def deliver_batch(instructions: list[dict], retry_busy_once: bool = True) -> dict:
+def deliver_batch(instructions: list[dict], dictation_ref: str, retry_busy_once: bool = True) -> dict:
     """
     instructions: list of {"target": <friendly name or session id>,
     "payload": <text to deliver>}.
+
+    dictation_ref: the path you were told to read this dictation from (the
+    same string the pointer message gave you). Required so the completion
+    this call records closes out THIS dictation specifically -- more than
+    one can be in flight at once now, see dispatch_state.py.
 
     Resolves each target via the live registry (never guesses at a session
     that isn't running), delivers via the tmux transport (pane-state gated,
@@ -235,8 +243,9 @@ def deliver_batch(instructions: list[dict], retry_busy_once: bool = True) -> dic
     log_event("last_send_issued", count=len(instructions), failures=len(failures))
     # Code-driven "complete" marker for the concierge's dispatch-in-flight
     # state -- this is the point the batch actually has a real result, not
-    # an L3 self-report. See dispatch_state.py.
-    mark_dispatch_complete({"count": len(instructions), "failures": len(failures)})
+    # a router self-report. Scoped to THIS dictation only. See
+    # dispatch_state.py.
+    mark_dispatch_complete(dictation_ref, {"count": len(instructions), "failures": len(failures)})
 
     if failures:
         speak(

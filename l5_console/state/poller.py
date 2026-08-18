@@ -209,12 +209,17 @@ class Poller:
            read, which per app/wake_state.py's own discipline must never
            be trusted as "quiet, so it's fine") both block speaking.
         2. Nothing in flight. dispatch_state.py's "forwarded" stage is
-           written the instant a transcript reaches L3 and stays that
-           way until deliver_batch() marks it "complete" -- confirm_plan's
-           spoken plan summary and cancel window both happen inside that
-           window, so gating on it also happens to be exactly "after the
-           plan summary": the first tick where forwarded flips away is
-           already past it."""
+           written the instant a transcript reaches the router and stays
+           that way until deliver_batch() marks it "complete" --
+           confirm_plan's spoken plan summary and cancel window both
+           happen inside that window, so gating on it also happens to be
+           exactly "after the plan summary": the first tick where
+           forwarded flips away is already past it. Checks ANY dispatch,
+           not just the most recent -- dispatch_state.py is now keyed by
+           dictation_ref (SPEC-orchestration.md SS0.1) because more than
+           one can be genuinely in flight at once; gating on only the
+           latest would miss an earlier dictation still running while a
+           later one has already been forwarded too."""
         with self._lock:
             wake_running = self._state.wake.running
         if wake_running:
@@ -222,8 +227,7 @@ class Poller:
             if signal is None or signal.stale or signal.state != "IDLE":
                 return False
 
-        dispatch = dispatch_state_mod.dispatch_state()
-        if dispatch is not None and dispatch.get("stage") == "forwarded":
+        if dispatch_state_mod.any_forwarded():
             return False
         return True
 
