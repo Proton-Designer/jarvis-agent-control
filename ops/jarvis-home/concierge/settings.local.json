@@ -1,0 +1,25 @@
+{
+  "permissions": {
+    "allow": [
+      "mcp__jarvis-l4-readonly__list_sessions",
+      "mcp__jarvis-l4-readonly__session_activity",
+      "mcp__jarvis-l4-readonly__spend",
+      "mcp__jarvis-l4-readonly__jarvis_say",
+      "mcp__jarvis-l4-readonly__handoff_to_router"
+    ],
+    "deny": [
+      "Bash",
+      "Write",
+      "Edit",
+      "NotebookEdit",
+      "Agent",
+      "Task",
+      "WebFetch",
+      "WebSearch"
+    ]
+  },
+  "enabledMcpjsonServers": [
+    "jarvis-l4-readonly",
+    "jarvis-l4"
+  ]
+}

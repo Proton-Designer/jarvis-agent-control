@@ -1,0 +1,19 @@
+{
+  "permissions": {
+    "allow": [
+      "mcp__jarvis-l4__list_sessions",
+      "mcp__jarvis-l4__session_activity",
+      "mcp__jarvis-l4__spend",
+      "mcp__jarvis-l4__report_dispatch_stage",
+      "mcp__jarvis-l4__confirm_plan",
+      "mcp__jarvis-l4__deliver_batch",
+      "mcp__jarvis-l4__list_teams",
+      "mcp__jarvis-l4__register_team_by_adoption",
+      "mcp__jarvis-l4__register_team_fresh"
+    ],
+    "deny": []
+  },
+  "enabledMcpjsonServers": [
+    "jarvis-l4"
+  ]
+}
