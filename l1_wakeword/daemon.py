@@ -298,6 +298,16 @@ def default_deliver(text: str, orchestrator_target: str | None = None, live_deli
     sys.path.insert(0, str(Path(__file__).parent.parent / "l4_controller"))
     from l2_l3_handoff import deliver_transcript, DEFAULT_ORCHESTRATOR_TARGET  # noqa: E402
     from transport import TmuxTransport  # noqa: E402
+    from instant_ack import speak_instant_ack  # noqa: E402
+
+    # SPEC-orchestration.md SS1.1: fires before ANYTHING else below --
+    # this is the earliest point after "that's it" where the final
+    # transcript exists, so it's the right hook regardless of what
+    # currently sits downstream (today: a direct forward; once the Haiku
+    # concierge lands, this stays the first line and the concierge
+    # invocation becomes what follows it, not what precedes it).
+    if live_deliver:
+        speak_instant_ack(text)
 
     target = orchestrator_target or DEFAULT_ORCHESTRATOR_TARGET
     if not live_deliver:
