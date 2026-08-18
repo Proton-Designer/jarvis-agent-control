@@ -199,6 +199,18 @@ class SetupScreen(Screen):
             result = setup_state.create_fresh_member(tmux_name, root, model)
             results.append((tmux_name, result))
 
+        # create_fresh_member resolves `root` internally (symlinked
+        # prefixes like /tmp -> /private/tmp) and reports the RESOLVED
+        # value back per-result -- self.root must be updated to match
+        # before create_team() uses it below, or the registered team's
+        # root would not byte-for-byte match the live session's actual
+        # pane_current_path, which teams.py's member_liveness() requires.
+        # Found live 2026-08-18 (a /tmp-rooted scratch test); invisible
+        # for any root under $HOME, which is never symlinked in practice.
+        resolved_roots = {r["root"] for _name, r in results if r.get("root")}
+        if len(resolved_roots) == 1:
+            self.root = resolved_roots.pop()
+
         failed = [(name, r) for name, r in results if not r["ok"]]
         if failed:
             body = self._body()

@@ -65,7 +65,17 @@ def preseed_mcp_trust(root: str) -> None:
 def create_fresh_member(tmux_name: str, root: str, model: str) -> dict:
     """Launches one brand-new Claude Code session with MCP trust
     pre-seeded so it never hits the confirmed-live silent no-tools gap.
-    Returns {"ok", "claude_session", "detail"}.
+    Returns {"ok", "claude_session", "detail", "root"} -- callers that
+    subsequently register this member (create_team) MUST use the
+    RETURNED root, not whatever they originally passed in: this function
+    resolves it (see below), and a caller using its own unresolved copy
+    would register a team whose root doesn't byte-for-byte match the
+    live session's actual pane_current_path, which teams.py's
+    member_liveness() requires -- found live exactly this way
+    (2026-08-18): l5_console/app/setup_flow.py's Create-Fresh flow and
+    this module's own team_registry_tools.py caller both had this latent
+    bug, invisible for any root under $HOME (never symlinked in
+    practice) and only surfaced by a /tmp-rooted scratch test.
 
     Resolves the new session's UUID via /status (claude_session_id()),
     NOT by reading its transcript file off disk. Originally built the
@@ -82,7 +92,22 @@ def create_fresh_member(tmux_name: str, root: str, model: str) -> dict:
     returned a UUID with zero jsonl files existing anywhere in the
     project directory. Fine to use here specifically because, same as
     adoption, this is a one-time creation-time call, not a polling
-    operation."""
+    operation.
+
+    root is resolved (symlinks/`..` collapsed) before anything else uses
+    it -- found live (2026-08-18, team_registry_tools.py's canary): a
+    root under a symlinked prefix (e.g. /tmp, which macOS symlinks to
+    /private/tmp) launches tmux fine (`-c` just cd's there), but Claude
+    Code's own project-path resolution for ~/.claude.json lands on the
+    RESOLVED path, so preseed_mcp_trust() below -- keyed on the
+    caller's literal, unresolved `root` -- silently wrote its trust
+    entry under a path the launched session never looks up, and the
+    session sat on the real MCP-trust prompt instead of skipping it.
+    Resolving once here, at the one place both the tmux launch and the
+    trust preseed derive from, fixes it for every caller (console and
+    router alike) rather than requiring each one to remember to pass an
+    already-resolved path."""
+    root = str(Path(root).resolve())
     Path(root).mkdir(parents=True, exist_ok=True)
     _write_mcp_json(root)
     preseed_mcp_trust(root)
@@ -95,15 +120,15 @@ def create_fresh_member(tmux_name: str, root: str, model: str) -> dict:
         )
         subprocess.run(["tmux", "send-keys", "-t", tmux_name, "Enter"], check=True, capture_output=True)
     except subprocess.CalledProcessError as e:
-        return {"ok": False, "claude_session": None, "detail": f"tmux launch failed: {e.stderr.decode(errors='replace')}"}
+        return {"ok": False, "claude_session": None, "detail": f"tmux launch failed: {e.stderr.decode(errors='replace')}", "root": root}
 
     if not wait_for_ready(tmux_name):
-        return {"ok": False, "claude_session": None, "detail": "did not reach READY -- MCP prompt may not have been pre-seeded correctly, check manually"}
+        return {"ok": False, "claude_session": None, "detail": "did not reach READY -- MCP prompt may not have been pre-seeded correctly, check manually", "root": root}
 
     session_id = claude_session_id(tmux_name)
     if session_id is None:
-        return {"ok": False, "claude_session": None, "detail": "session came up but /status didn't report a session id -- cannot verify identity"}
-    return {"ok": True, "claude_session": session_id, "detail": "created"}
+        return {"ok": False, "claude_session": None, "detail": "session came up but /status didn't report a session id -- cannot verify identity", "root": root}
+    return {"ok": True, "claude_session": session_id, "detail": "created", "root": root}
 
 
 def adopt_candidate_info(tmux_name: str) -> dict:
