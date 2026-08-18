@@ -195,7 +195,7 @@ class Rail(Widget):
         activity.border_title = "RECENT"
         with activity:
             yield PlainStatic("", id="rail_activity_body")
-        yield Footer()
+        yield Footer(id="rail_footer")
 
     def update_state(self, state: JarvisState) -> None:
         self.query_one("#rail_wake", RailWake).update_state(state.wake)
@@ -208,6 +208,7 @@ class Rail(Widget):
             and not state.wake.error
             and not is_stale(state.wake.polled_at, state.wake.expected_interval)
         )
+        self.query_one("#rail_footer", Footer).update_wake_state(self._wake_running)
         self.query_one("#rail_engine", RailEngine).update_state(state.engine)
         self.query_one("#rail_teams", RailTeams).update_state(
             state.teams, state.teams_error, state.teams_polled_at, state.teams_expected_interval

@@ -22,7 +22,7 @@ from __future__ import annotations
 from rich.text import Text
 from textual.widgets import Static
 
-from format_helpers import COLOR_ACCENT, COLOR_DIM
+from format_helpers import COLOR_ACCENT, COLOR_DIM, COLOR_MUTED
 
 
 class PlainStatic(Static):
@@ -43,11 +43,45 @@ class Footer(PlainStatic):
 
     KEYBINDS = [("space", "stop listening"), ("a", "add team"), ("r", "reconnect"), ("q", "quit")]
 
+    def __init__(self, *args, **kwargs) -> None:
+        super().__init__(*args, **kwargs)
+        self._wake_running = False
+
     def on_mount(self) -> None:
+        self._render_footer()
+
+    def update_wake_state(self, running: bool) -> None:
+        # space is a real, always-registered binding (main.py's
+        # action_panic_stop_wake) regardless of wake.running -- it's
+        # never disabled, it's just a no-op while nothing is listening
+        # (action_panic_stop_wake's own early-return). Muting the
+        # footer entry when inert is cosmetic, not a change to what the
+        # key does; found live 2026-08-18 that showing it at the same
+        # weight as every other always-live key while stopped read as
+        # "this will do something."
+        if running == self._wake_running:
+            return
+        self._wake_running = running
+        self._render_footer()
+
+    def _render_footer(self) -> None:
+        # Named _render_footer, not _render -- Widget._render() is a
+        # REAL internal Textual method (returns a Visual for the
+        # rendering pipeline). A same-named override here silently
+        # replaced it, returning None instead of a Visual, and Textual's
+        # own compositor crashed on the next render pass trying to call
+        # .render_strips() on that None -- AttributeError: 'NoneType'
+        # object has no attribute 'render_strips'. Same collision class
+        # already found once this session (a method named `_attach` in
+        # engine_flow.py shadowed Widget._attach()) -- underscore-
+        # prefixed Textual internals are real API, not free names.
         text = Text()
         for i, (key, label) in enumerate(self.KEYBINDS):
             if i:
                 text.append("   ")
-            text.append(f"[{key}]", style=f"bold {COLOR_ACCENT}")
-            text.append(f" {label}", style=COLOR_DIM)
+            muted = key == "space" and not self._wake_running
+            key_color = COLOR_MUTED if muted else f"bold {COLOR_ACCENT}"
+            label_color = COLOR_MUTED if muted else COLOR_DIM
+            text.append(f"[{key}]", style=key_color)
+            text.append(f" {label}", style=label_color)
         self.update(text)

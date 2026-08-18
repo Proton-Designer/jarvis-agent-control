@@ -223,7 +223,15 @@ class EnginePanel(Widget):
     EnginePanel { height: auto; border: solid $panel; padding: 1; margin-bottom: 1; border-title-color: $text-muted; }
     EnginePanel .role_caption { margin-top: 1; }
     EnginePanel .role_caption.first { margin-top: 0; }
-    EnginePanel Button { width: 100%; margin-top: 1; }
+    /* Compact by design (the Lead's live finding, 2026-08-18): Textual's
+       default Button border ("tall") plus this app's original
+       margin-top:1 cost 4 rows per button -- 5 possible buttons per
+       role clipped ORCHESTRATOR's Remove off the bottom at a normal
+       170x44 window. Information (name/model/effort/status) should
+       dominate the panel; controls should be compact -- border:none
+       plus a 1-row height makes each button exactly 1 row, margin-top:0
+       keeps them touching rather than spaced like the info block above. */
+    EnginePanel Button { width: 100%; border: none !important; margin-top: 0; }
     """
 
     def compose(self) -> ComposeResult:
@@ -479,12 +487,18 @@ class Console(Widget):
             with Vertical(id="console_right"):
                 yield StreamPanel(id="console_stream")
                 yield TeamsPanel(id="console_teams")
-        yield Footer()
+        yield Footer(id="console_footer")
 
     def update_state(self, state: JarvisState) -> None:
         self.query_one("#console_wake", WakePanel).update_state(state.wake)
         self.query_one("#console_engine", EnginePanel).update_state(state.engine)
         self.query_one("#console_runtime", RuntimePanel).update_state(state.runtime)
+        # Same trusted-boolean discipline as WakePanel's own
+        # self._wake_running: an errored or stale wake reading must not
+        # let the footer confidently claim space is inert either.
+        self.query_one("#console_footer", Footer).update_wake_state(
+            bool(state.wake.running and not state.wake.error and not is_stale(state.wake.polled_at, state.wake.expected_interval))
+        )
         self.query_one("#console_teams", TeamsPanel).update_state(
             state.teams, state.teams_error, state.unassigned, state.teams_polled_at, state.teams_expected_interval
         )

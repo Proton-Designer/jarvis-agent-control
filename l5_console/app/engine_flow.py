@@ -237,9 +237,7 @@ class AttachRoleScreen(Screen):
         # One /status round-trip, adoption-time only (same discipline
         # setup.adopt_candidate_info() already documents for team
         # adoption) -- gives claude_session (required by attach_role())
-        # and model (best-effort record field) in the same capture, plus
-        # a real ai-title summary to prefer over the bare tmux name as
-        # the pre-filled default, when one exists.
+        # and model (best-effort record field) in the same capture.
         await body.mount(PlainStatic("Checking session..."))
         info = await asyncio.to_thread(adopt_candidate_info, tmux)
         await self._clear()
@@ -252,7 +250,19 @@ class AttachRoleScreen(Screen):
             back_button.focus()
             return
 
-        default_name = info.get("summary") or tmux
+        # Default is the generated per-role name ("Concierge 2"), NEVER
+        # Claude Code's own ai-title summary -- the Lead's live finding,
+        # 2026-08-18: a summary describes the session's first message
+        # ("Role and tools overview"), not what the session IS, and reads
+        # exactly like the UUID complaint this whole "never a UUID"
+        # requirement already exists to prevent, just in a new costume.
+        # The summary IS still worth showing, just not as the name --
+        # informational only, to help identify which real session this
+        # is, same reason setup_flow.py's Adopt step shows it.
+        default_name = engine_roles.preview_default_name(self.role)
+        summary = info.get("summary")
+        if summary:
+            await body.mount(PlainStatic(f"({tmux} -- last seen: {summary})"))
         await body.mount(PlainStatic("Name -- confirm the suggested default, or edit it:"))
         name_input = Input(value=default_name, id="name_input")
         await body.mount(name_input)
@@ -302,7 +312,7 @@ class AttachRoleScreen(Screen):
 
     async def on_input_submitted(self, event: Input.Submitted) -> None:
         if event.input.id == "name_input":
-            await self._do_attach(event.value.strip() or self._pending["tmux"])
+            await self._do_attach(event.value.strip() or engine_roles.preview_default_name(self.role))
 
     async def on_button_pressed(self, event: Button.Pressed) -> None:
         if event.button.id == "cancel":
@@ -311,4 +321,4 @@ class AttachRoleScreen(Screen):
             await self._show_list_step()
         elif event.button.id == "finish_submit":
             name = self.query_one("#name_input", Input).value.strip()
-            await self._do_attach(name or self._pending["tmux"])
+            await self._do_attach(name or engine_roles.preview_default_name(self.role))

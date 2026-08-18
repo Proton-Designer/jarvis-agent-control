@@ -23,6 +23,13 @@ COLOR_WARN = "#E0A34A"
 COLOR_ERR = "#EE6055"
 COLOR_ACCENT = "#4FD6E0"
 COLOR_DIM = "#6B7688"
+# A step below COLOR_DIM -- for a control that is currently inert, not
+# merely secondary. Footer's "[space] stop listening" needs this
+# distinction specifically: the binding is correct (space IS stop-only,
+# by ruling), but showing it at the same weight as every other always-
+# live key when wake isn't running reads as "this will do something" --
+# the Lead's live finding, 2026-08-18.
+COLOR_MUTED = "#4A5262"
 COLOR_INK = "#C9D2DE"
 
 
