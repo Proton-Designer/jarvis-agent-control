@@ -32,6 +32,23 @@ import time
 import uuid
 from pathlib import Path
 
+if os.environ.get("JARVIS_MUTE") == "1":
+    # Fails LOUD and specific here, not as a confusing downstream timing
+    # assertion -- found live (the Lead, first run): running this muted
+    # made the `subprocess.run` patch below never fire at all (mute skips
+    # that call entirely), so every timing/ordering check quietly measured
+    # nothing and failed on the arming assertion with no clue why. A test
+    # whose failure doesn't say what's wrong teaches the next person to
+    # distrust it rather than fix their invocation.
+    print(
+        "REFUSING TO RUN: this canary must not run under JARVIS_MUTE=1. "
+        "The subprocess.run patch below is what keeps it silent, not mute -- "
+        "under mute, say_feedback's worker skips the `say` call entirely, so "
+        "the patched fake never runs and every timing/ordering check in this "
+        "file becomes vacuous. Unset JARVIS_MUTE and run again."
+    )
+    sys.exit(1)
+
 os.environ["JARVIS_TEST_RUN"] = f"speech-queue-canary-{uuid.uuid4().hex[:8]}"
 
 sys.path.insert(0, str(Path(__file__).parent))
