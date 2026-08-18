@@ -45,6 +45,7 @@ from signal_view import Signal  # noqa: E402
 from wake_state import read_wake_state  # noqa: E402
 from setup_flow import SetupScreen  # noqa: E402
 from reconnect_flow import ReconnectScreen  # noqa: E402
+from team_flow import TeamManageScreen  # noqa: E402
 from quit_warning import QuitWarningScreen  # noqa: E402
 import wake_control  # noqa: E402
 
@@ -82,6 +83,7 @@ class JarvisConsole(App):
     BINDINGS = [
         ("a", "add_team", "Add team"),
         ("r", "reconnect", "Reconnect"),
+        ("t", "manage_teams", "Manage teams"),
         ("q", "quit", "Quit"),
         ("space", "panic_stop_wake", "Stop listening"),
     ]
@@ -91,6 +93,9 @@ class JarvisConsole(App):
 
     def action_reconnect(self) -> None:
         self.push_screen(ReconnectScreen())
+
+    def action_manage_teams(self) -> None:
+        self.push_screen(TeamManageScreen())
 
     async def action_panic_stop_wake(self) -> None:
         # space is a panic key, not a toggle -- it only ever stops,
@@ -140,7 +145,7 @@ class JarvisConsole(App):
         # slipping through the per-widget fix. len(screen_stack) > 1
         # means a SetupScreen/ReconnectScreen is pushed on top of the
         # base Rail/Console/Signal screen.
-        if action in ("add_team", "reconnect") and len(self.screen_stack) > 1:
+        if action in ("add_team", "reconnect", "manage_teams") and len(self.screen_stack) > 1:
             return False
         return True
 

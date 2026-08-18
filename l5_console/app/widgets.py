@@ -41,7 +41,7 @@ class Footer(PlainStatic):
 
     DEFAULT_CSS = "Footer { height: 1; color: $text-muted; }"
 
-    KEYBINDS = [("space", "stop listening"), ("a", "add team"), ("r", "reconnect"), ("q", "quit")]
+    KEYBINDS = [("space", "stop listening"), ("a", "add team"), ("r", "reconnect"), ("t", "manage teams"), ("q", "quit")]
 
     def __init__(self, *args, **kwargs) -> None:
         super().__init__(*args, **kwargs)

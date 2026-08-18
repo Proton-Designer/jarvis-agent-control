@@ -539,7 +539,7 @@ class TeamsPanel(PlainStatic):
         # on styling. Deliberately a LIST here, not two separate calls,
         # so a future action (remove, swap-lead) is one more tuple, not
         # a rewrite of this section.
-        hints = build_hint_line([("a", "add team"), ("r", "reconnect")])
+        hints = build_hint_line([("a", "add team"), ("r", "reconnect"), ("t", "manage teams")])
 
         grid = Table.grid(padding=(1, 0, 0, 0))
         grid.add_row(table)
