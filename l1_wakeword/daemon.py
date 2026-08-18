@@ -81,7 +81,24 @@ RECOVERABLE_THRESHOLD = 0.3
 # sentences (no wake-word-like phrasing) scored a max of 0.002 against this
 # model -- zero false positives anywhere near 0.3 for the cancel window.
 SILENCE_SAFETY_NET_S = 50.0
-SOCKET_PATH = Path.home() / ".jarvis" / "l1.sock"
+
+sys.path.insert(0, str(Path(__file__).parent.parent))
+from jarvis_paths import jarvis_home  # noqa: E402
+
+SOCKET_PATH = jarvis_home() / "l1.sock"
+# The l5_console TUI's Signal view + always-visible meter (SPEC-TUI.md
+# §3) read this -- state (IDLE/CAPTURING/CANCEL_ARMED) and a real-time
+# audio level, the one thing in the whole console that reports what the
+# microphone is actually receiving rather than what the system believes.
+# Written only from live() (a real mic session), never --simulate --
+# there's no real audio level to report for a pre-recorded file, and a
+# stale/absent file during simulate testing is the correct signal, not a
+# gap to paper over. The console gates on JarvisState.wake.running (the
+# authoritative pgrep-based signal) before trusting anything in this
+# file at all -- this file adds detail once the process is already known
+# alive, it is never the thing that decides "is it alive."
+WAKE_STATE_PATH = jarvis_home() / "wake_state.json"
+WAKE_STATE_WRITE_INTERVAL_S = 0.1  # ~10Hz -- smooth enough to read as "live," far below the ~31Hz frame rate to keep file-write I/O light
 
 # --- Stop phrase: matched on TRANSCRIPT TEXT, not acoustics ---
 #
@@ -380,6 +397,34 @@ class DictationSession:
 
     def full_transcript(self) -> str:
         return " ".join(t for t in self.chunks_transcribed if t)
+
+
+def _frame_level(frame_i16: np.ndarray) -> float:
+    """RMS level, normalized to roughly 0.0-1.0 -- a meter tracking peak
+    amplitude alone spikes on transients and reads jumpy; RMS is the
+    standard "how loud does this actually sound" measure most real audio
+    meters use. int16 full-scale is 32768; speech rarely drives RMS
+    anywhere near that, so this will mostly read as a modest fraction
+    even during normal talking -- expected, not a bug, same way a real
+    VU meter doesn't sit near full scale for ordinary speech."""
+    if frame_i16.size == 0:
+        return 0.0
+    rms = float(np.sqrt(np.mean(frame_i16.astype(np.float64) ** 2)))
+    return min(1.0, rms / 32768.0)
+
+
+def _write_wake_state_file(state: str, level: float) -> None:
+    """Best-effort -- a failure here (disk full, permissions) must never
+    take down the wake-word loop over a UI convenience file. Throttled by
+    the caller (WAKE_STATE_WRITE_INTERVAL_S), not here -- this function
+    always writes when called."""
+    try:
+        WAKE_STATE_PATH.parent.mkdir(parents=True, exist_ok=True)
+        WAKE_STATE_PATH.write_text(json.dumps({
+            "state": state, "level": round(level, 4), "updated_at": time.time(),
+        }))
+    except OSError:
+        pass
 
 
 def _write_wav(path: Path, pcm_i16: np.ndarray):
@@ -835,10 +880,21 @@ async def live(whisper: WhisperDaemon, live_deliver: bool = False, orchestrator_
     with stream:
         print(f"[{time.strftime('%H:%M:%S')}] listening for \"hey jarvis\" -- Ctrl-C to stop")
         cancel_task = asyncio.create_task(cancel_socket_server(controller))
+        last_wake_state_write = 0.0
         try:
             while True:
                 frame = await frame_queue.get()
                 controller.on_frame(frame, time.time())
+                # Throttled to WAKE_STATE_WRITE_INTERVAL_S, not every
+                # frame (~31Hz) -- smooth enough for a live meter, far
+                # less file-write I/O. Level computed from every frame
+                # regardless of whether this tick writes, so a throttled
+                # write still reflects the CURRENT frame, not a stale one
+                # from several frames ago.
+                now = time.time()
+                if now - last_wake_state_write >= WAKE_STATE_WRITE_INTERVAL_S:
+                    _write_wake_state_file(controller.state, _frame_level(frame))
+                    last_wake_state_write = now
         finally:
             cancel_task.cancel()
             print(f"[{time.strftime('%H:%M:%S')}] input overflow count this session: {overflow_count}")
