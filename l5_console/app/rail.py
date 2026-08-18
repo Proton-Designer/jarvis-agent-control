@@ -15,20 +15,19 @@ import time
 
 from textual.app import ComposeResult
 from textual.containers import Vertical, VerticalScroll
-from textual.reactive import reactive
 from textual.widget import Widget
-from textual.widgets import Static
+from widgets import PlainStatic
 
 from staleness import is_stale
+from stream import StreamReader
+from format_helpers import liveness_icon, team_liveness
 
 import sys
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent / "state"))
-from models import JarvisState, LIVENESS_RUNNING, LIVENESS_STOPPED, LIVENESS_LOST  # noqa: E402
+from models import JarvisState, LIVENESS_RUNNING  # noqa: E402
 
-
-def _liveness_icon(liveness: str) -> str:
-    return {LIVENESS_RUNNING: "●", LIVENESS_STOPPED: "○", LIVENESS_LOST: "✕"}.get(liveness, "?")
+RAIL_ACTIVITY_MAX_LINES = 30
 
 
 def _staleness_suffix(polled_at: float, expected_interval: float) -> str:
@@ -55,23 +54,23 @@ def _wake_line(wake) -> str:
     return f"{icon} wake: {label}"
 
 
-class RailWake(Static):
+class RailWake(PlainStatic):
     def update_state(self, wake) -> None:
         self.update(_wake_line(wake))
 
 
-class RailOrchestrator(Static):
+class RailOrchestrator(PlainStatic):
     def update_state(self, orch) -> None:
         if orch.error:
             self.update(f"⚠ orchestrator: error -- {orch.error}")
             return
-        icon = _liveness_icon(orch.liveness)
+        icon = liveness_icon(orch.liveness)
         tools = "tools ok" if orch.tools_reachable else "NO TOOLS"
         suffix = _staleness_suffix(orch.polled_at, orch.expected_interval)
         self.update(f"{icon} orchestrator: {orch.liveness} · {tools}{suffix}")
 
 
-class RailTeams(Static):
+class RailTeams(PlainStatic):
     def update_state(self, teams: list, teams_error, polled_at, expected_interval) -> None:
         if teams_error:
             self.update(f"⚠ teams: error -- {teams_error}")
@@ -83,28 +82,11 @@ class RailTeams(Static):
         suffix = _staleness_suffix(polled_at, expected_interval)
         lines = [f"teams: {len(teams)} ({live} live){suffix}"]
         for t in teams:
-            team_liveness = _team_liveness(t)
-            lines.append(f"  {_liveness_icon(team_liveness)} {t.id} ({len(t.members)})")
+            lines.append(f"  {liveness_icon(team_liveness(t))} {t.id} ({len(t.members)})")
         self.update("\n".join(lines))
 
 
-def _team_liveness(team) -> str:
-    """Derived from members, never stored -- per the Lead's ruling: a
-    team-level liveness field that could disagree with its own members
-    is a second source of truth that can drift from the first. running
-    if ANY member is running (the team is reachable through at least
-    one path); otherwise stopped if any member has resumable history,
-    else lost."""
-    if not team.members:
-        return LIVENESS_LOST
-    if any(m.liveness == LIVENESS_RUNNING for m in team.members):
-        return LIVENESS_RUNNING
-    if any(m.liveness == LIVENESS_STOPPED for m in team.members):
-        return LIVENESS_STOPPED
-    return LIVENESS_LOST
-
-
-class RailRuntime(Static):
+class RailRuntime(PlainStatic):
     """Ambient, not primary (§3) -- deliberately the least prominent
     section in Rail."""
 
@@ -120,7 +102,7 @@ class RailRuntime(Static):
         self.update(f"runtime: {models} · {mem}{suffix}\n  {spend}{spend_suffix}")
 
 
-class RailUnassigned(Static):
+class RailUnassigned(PlainStatic):
     def update_state(self, unassigned: list) -> None:
         if not unassigned:
             self.update("")
@@ -149,6 +131,11 @@ class Rail(Widget):
     }
     """
 
+    def __init__(self, *args, **kwargs) -> None:
+        super().__init__(*args, **kwargs)
+        self._stream = StreamReader()
+        self._activity_lines: list[str] = []
+
     def compose(self) -> ComposeResult:
         with Vertical():
             yield RailWake(id="rail_wake")
@@ -157,7 +144,7 @@ class Rail(Widget):
             yield RailRuntime(id="rail_runtime")
             yield RailUnassigned(id="rail_unassigned")
         with VerticalScroll(id="rail_activity"):
-            yield Static("recent activity", id="rail_activity_header")
+            yield PlainStatic("", id="rail_activity_body")
 
     def update_state(self, state: JarvisState) -> None:
         self.query_one("#rail_wake", RailWake).update_state(state.wake)
@@ -167,3 +154,14 @@ class Rail(Widget):
         )
         self.query_one("#rail_runtime", RailRuntime).update_state(state.runtime)
         self.query_one("#rail_unassigned", RailUnassigned).update_state(state.unassigned)
+        self._update_activity()
+
+    def _update_activity(self) -> None:
+        new_lines = self._stream.poll()
+        if not new_lines:
+            return
+        self._activity_lines.extend(new_lines)
+        self._activity_lines = self._activity_lines[-RAIL_ACTIVITY_MAX_LINES:]
+        body = self.query_one("#rail_activity_body", PlainStatic)
+        body.update("\n".join(self._activity_lines))
+        self.query_one("#rail_activity", VerticalScroll).scroll_end(animate=False)

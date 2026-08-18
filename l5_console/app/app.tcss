@@ -1,13 +1,16 @@
-/* Jarvis Console styling. Rail-only for now (build order step 2) --
-   Console/Signal layout rules get added here as they're built, not in a
-   separate stylesheet, so the whole app stays one reflowing widget tree
-   per SPEC-TUI.md §3 rather than three apps in disguise. */
+/* Jarvis Console styling. Rail + Console built (build order steps 2-3)
+   -- Signal's rules get added here when it's built, not in a separate
+   stylesheet, so the whole app stays one reflowing widget tree per
+   SPEC-TUI.md §3 rather than three apps in disguise. Visibility between
+   Rail/Console is toggled in main.py's on_resize via `display`, not CSS
+   media queries -- Textual has no native container-query equivalent as
+   of 8.2.8, and app.size is the source of truth main.py already has. */
 
 Screen {
     background: $surface;
 }
 
-Rail {
+Rail, Console {
     background: $surface;
     color: $text;
 }
