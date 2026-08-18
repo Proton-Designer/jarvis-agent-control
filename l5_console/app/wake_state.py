@@ -26,11 +26,21 @@ wake.running=False must never be read as "still listening."
 from __future__ import annotations
 
 import json
+import sys
 import time
 from pathlib import Path
 from dataclasses import dataclass
 
-WAKE_STATE_PATH = Path.home() / ".jarvis" / "wake_state.json"
+sys.path.insert(0, str(Path(__file__).parent.parent.parent))
+from jarvis_paths import jarvis_home  # noqa: E402
+
+# Same jarvis_home() indirection daemon.py itself writes through -- so
+# JARVIS_TEST_RUN isolates this reader too. Hardcoding ~/.jarvis here
+# (as this module used to) meant a test harness setting JARVIS_TEST_RUN
+# for the daemon side alone would still have the console reading/racing
+# the real shared prod path -- exactly the "test fixture writes into
+# shared runtime state" mistake, just on the read side instead.
+WAKE_STATE_PATH = jarvis_home() / "wake_state.json"
 
 # How long a wake_state.json write is trusted before being treated as
 # stale -- daemon.py writes at ~10Hz (WAKE_STATE_WRITE_INTERVAL_S=0.1 on

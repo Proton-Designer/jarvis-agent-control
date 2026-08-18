@@ -32,7 +32,7 @@ class Signal(Widget):
         background: $surface;
     }
     Signal > Vertical {
-        width: auto;
+        width: 100%;
         height: auto;
         align: center middle;
     }

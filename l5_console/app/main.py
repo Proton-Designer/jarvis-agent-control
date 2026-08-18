@@ -112,13 +112,29 @@ class JarvisConsole(App):
         signal = self.query_one("#signal", Signal)
         if self._dictating:
             signal.display = True
-            rail.display = False
-            console.display = False
-        else:
-            wide = self.size.width >= RAIL_CONSOLE_BREAKPOINT
-            signal.display = False
-            rail.display = not wide
-            console.display = wide
+            # Defense in depth, not just the one CSS bug it was found
+            # from (Signal's inner Vertical auto-sizing to 0 while
+            # hidden -- fixed in signal_view.py): never trust that
+            # `display = True` alone means Signal actually has something
+            # on screen. Confirm a non-zero laid-out size before hiding
+            # Rail/Console, so any future way Signal could fail to
+            # render self-heals instead of producing a blank screen --
+            # "if the new view can't render, keep the old one." Signal
+            # was display:none last tick, so its size here is stale
+            # pre-layout on the very first tick this flips true; that
+            # tick falls through to the normal branch below and keeps
+            # whichever of Rail/Console already fits, and the next
+            # meter tick (0.1s later) picks up the fresh, confirmed
+            # size and switches over -- a small delay, never a blank
+            # frame.
+            if signal.size.width > 0 and signal.size.height > 0:
+                rail.display = False
+                console.display = False
+                return
+        wide = self.size.width >= RAIL_CONSOLE_BREAKPOINT
+        signal.display = False
+        rail.display = not wide
+        console.display = wide
 
     def _refresh_state(self) -> None:
         # Synchronous call on the app's own event-loop tick -- get_state()
