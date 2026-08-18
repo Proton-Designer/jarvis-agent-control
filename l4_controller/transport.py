@@ -92,7 +92,75 @@ def _is_known_readonly_view(view_text: str) -> bool:
 # Only applies to BUSY. PERMISSION_PROMPT and UNKNOWN/real-typed-content
 # are untouched -- a different hazard class this investigation says
 # nothing about.
-BUSY_TOLERANT_COMMANDS = {"/compact"}
+BUSY_TOLERANT_COMMANDS = {"/compact", "/btw"}
+
+# Per-command positive view markers for a command that is BOTH busy-
+# tolerant AND opens a view (today: only /btw -- SPEC-orchestration.md
+# SS1.5). Deliberately NOT added to PaneStatePatterns.persistent_view:
+# classify_pane's single, mutually-exclusive verdict is correct for every
+# other caller and stays that way (the Lead's ruling, 2026-08-18) -- BUSY
+# is checked before PERSISTENT_VIEW there on purpose, and /btw's view can
+# legitimately coexist on screen with the target's own unrelated BUSY
+# state for its entire lifetime, which is the whole reason the command
+# exists ("ask a quick side question without interrupting Claude's
+# current work" -- confirmed live it really does run concurrently, not
+# queued behind the busy turn: asked live "are you busy right now" while
+# a real 20s tool call was in flight, and /btw answered "I'm a separate
+# lightweight instance... the main session is carrying on with its own
+# work independently"). Routing this through classify_pane_ansi() would
+# mean BUSY wins by priority for as long as the target stays busy,
+# hiding a view that is genuinely open and genuinely answered --
+# confirmed live: /btw's answer was fully rendered on screen while the
+# pane still classified as BUSY.
+#
+# Deliberately a dict keyed by exact command, not a generic "does this
+# response have a footer" heuristic or a boolean flag on the transport --
+# a future busy-tolerant command must be added here BY NAME, with its own
+# verified marker, rather than inheriting this bypass by accident.
+#
+# "Esc to close" (distinct wording from "esc to cancel", which
+# permission_prompt_pairs and blocked_question_pairs already use for
+# PERMISSION_PROMPT/BLOCKED_QUESTION -- no collision) verified stable
+# live against Claude Code v2.1.234 (2026-08-18) across 3 samples: a
+# single short answer, a multi-answer history view, and a still-
+# computing "Answering..." state -- present in the footer from the
+# moment the view opens in all three, unlike "c to copy"/"f to fork"
+# (only appear once an answer is ready) or "x to clear history" (only
+# once 2+ entries exist). See btw_view_canary.py.
+BUSY_TOLERANT_VIEW_MARKERS = {"/btw": re.compile(r"esc to close", re.IGNORECASE)}
+
+# /btw's view opens (and matches its marker above) BEFORE its own answer
+# has actually finished generating -- confirmed live: the marker appears
+# immediately, showing a spinner + "Answering..." placeholder, distinct
+# from the read-back content itself. Breaking on first-marker-match alone
+# (as _handle_readonly_view does for /cost/usage/status, where content is
+# static the instant the view opens) would capture that placeholder
+# instead of the real answer essentially every time -- the first poll
+# tick lands well before a real model call resolves. So the busy-tolerant
+# path waits out this SECOND, narrower pending state before treating the
+# content as final. Bounded, not indefinite: /btw is still expected to
+# answer in a few seconds (SS1's "no latency budget" is Sonnet's routing
+# tier, not license for an unbounded wait inside a synchronous delivery
+# call) -- times out to whatever was last captured rather than hanging,
+# same "never block forever" discipline as every other poll in this file.
+BTW_PENDING_MARKER = re.compile(r"answering", re.IGNORECASE)
+BTW_ANSWER_SETTLE_POLL_ATTEMPTS = 10
+BTW_ANSWER_SETTLE_POLL_INTERVAL_S = 1.0
+
+
+def _busy_tolerant_view_open(plain_pane_text: str, leading_token: str) -> bool:
+    """True only if `leading_token`'s own positive marker is found in the
+    capture. False is the only safe default -- never inferred from the
+    ABSENCE of some other state. (An earlier draft of the /btw fix
+    treated "classify_pane_ansi() says BUSY" as evidence the view had
+    closed; that is exactly this project's recurring failure-reads-as-
+    success bug, arriving through the fix for it -- BUSY is a legitimate
+    SURROUNDING state for this command, never itself the success signal.)
+    Scanned against the full capture, not just the tail, matching
+    persistent_view's own existing rationale in pane_state.py -- a long
+    /btw answer can push its footer well past the last 10 lines."""
+    marker = BUSY_TOLERANT_VIEW_MARKERS.get(leading_token)
+    return marker is not None and bool(marker.search(plain_pane_text))
 
 
 @dataclass
@@ -351,6 +419,14 @@ class TmuxTransport(Transport):
         window, stop and report it as a delivery failure rather than
         sending anything further into an uncertain state.
         """
+        leading_token = command.strip().split(" ", 1)[0]
+        if leading_token in BUSY_TOLERANT_VIEW_MARKERS:
+            # A busy-tolerant readonly command's view can legitimately
+            # coexist on screen with the target's own unrelated BUSY
+            # state -- classify_pane_ansi()'s single mutually-exclusive
+            # verdict would hide it. See BUSY_TOLERANT_VIEW_MARKERS.
+            return self._handle_busy_tolerant_view(target, command, leading_token)
+
         view_content = None
         for _ in range(VIEW_OPEN_POLL_ATTEMPTS):
             time.sleep(VIEW_OPEN_POLL_INTERVAL_S)
@@ -373,6 +449,90 @@ class TmuxTransport(Transport):
             time.sleep(DISMISS_VERIFY_POLL_INTERVAL_S)
             ansi_text = self.capture_pane(target)
             if classify_pane_ansi(ansi_text, self.patterns) == PaneState.READY:
+                return DeliveryResult(
+                    ok=True, detail=f"delivered to {target}", view_content=view_content
+                )
+
+        return DeliveryResult(
+            ok=False,
+            detail=f"{command}'s view on {target} did not dismiss cleanly after Escape — "
+            "pane left in an uncertain state, needs manual attention",
+            reason="dismiss_failed",
+            view_content=view_content,
+        )
+
+    def _handle_busy_tolerant_view(self, target: str, command: str, leading_token: str) -> DeliveryResult:
+        """
+        Same capture-then-dismiss-then-return-content contract as
+        _handle_readonly_view, for a command whose view can legitimately
+        coexist on screen with the target's own unrelated BUSY state
+        (today: only /btw). Detection uses the command's own POSITIVE
+        marker (BUSY_TOLERANT_VIEW_MARKERS) directly against the raw
+        capture, never classify_pane_ansi()'s single mutually-exclusive
+        verdict -- that verdict resolves BUSY over PERSISTENT_VIEW by
+        priority (correct for every other caller; the Lead's ruling,
+        2026-08-18), which would hide this view for as long as the
+        target's unrelated main turn stays busy -- exactly the case this
+        command exists for.
+
+        Success on both ends is defined by the marker's own presence or
+        absence, NEVER by inferring from some other state:
+          - open   = marker found in the capture
+          - closed = marker ABSENT after Escape
+        BUSY is an acceptable surrounding state throughout (the whole
+        point of the command) but is never itself read as evidence about
+        this view -- an earlier draft of this fix treated "landed back on
+        BUSY after Escape" as a successful dismissal, which is exactly
+        this project's recurring failure-reads-as-success bug arriving
+        through the fix meant to prevent it: if Escape didn't land and
+        the view is genuinely still open while the main turn is busy,
+        that draft would have reported a clean dismissal anyway.
+
+        Never sends Escape without first POSITIVELY finding the marker --
+        same discipline _recover_stuck_view already applies, for the same
+        reason: the /config incident happened because
+        PaneState.PERSISTENT_VIEW alone was never sufficient to justify a
+        keystroke (it shares a marker with /cost/usage/status). If the
+        marker is never found, do nothing beyond reporting the failure --
+        no Escape sent on a guess.
+        """
+        view_content = None
+        for _ in range(VIEW_OPEN_POLL_ATTEMPTS):
+            time.sleep(VIEW_OPEN_POLL_INTERVAL_S)
+            plain_text = self.capture_pane_plain(target)
+            if _busy_tolerant_view_open(plain_text, leading_token):
+                view_content = plain_text.strip()
+                break
+
+        if view_content is None:
+            return DeliveryResult(
+                ok=False,
+                detail=f"{command} on {target} did not open the expected view within "
+                f"{VIEW_OPEN_POLL_ATTEMPTS * VIEW_OPEN_POLL_INTERVAL_S:.1f}s",
+                reason="view_not_opened",
+            )
+
+        # The view opened, but its OWN content may still be a pending
+        # placeholder (e.g. /btw's "Answering..."), not the real answer
+        # yet -- wait that out too, bounded, before treating view_content
+        # as final. Re-checks the open marker on every tick as well: if
+        # the view closed on its own somehow mid-wait, stop waiting on a
+        # marker that's no longer there rather than looping to timeout.
+        for _ in range(BTW_ANSWER_SETTLE_POLL_ATTEMPTS):
+            if not BTW_PENDING_MARKER.search(view_content):
+                break
+            time.sleep(BTW_ANSWER_SETTLE_POLL_INTERVAL_S)
+            plain_text = self.capture_pane_plain(target)
+            if not _busy_tolerant_view_open(plain_text, leading_token):
+                break
+            view_content = plain_text.strip()
+
+        subprocess.run([self.tmux_bin, "send-keys", "-t", target, "Escape"], check=True)
+
+        for _ in range(DISMISS_VERIFY_POLL_ATTEMPTS):
+            time.sleep(DISMISS_VERIFY_POLL_INTERVAL_S)
+            plain_text = self.capture_pane_plain(target)
+            if not _busy_tolerant_view_open(plain_text, leading_token):
                 return DeliveryResult(
                     ok=True, detail=f"delivered to {target}", view_content=view_content
                 )

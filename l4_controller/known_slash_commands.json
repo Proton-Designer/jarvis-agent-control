@@ -3,7 +3,8 @@
     "/compact": "none",
     "/cost": "readonly",
     "/usage": "readonly",
-    "/status": "readonly"
+    "/status": "readonly",
+    "/btw": "readonly"
   },
   "blocked": {
     "/config": "interactive settings picker -- confirmed live that Enter on a highlighted row toggles a real, global setting (disabled Ayman's auto-compact preference by accident during testing, 2026-08-17). Never send.",

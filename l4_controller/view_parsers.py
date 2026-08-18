@@ -78,11 +78,57 @@ def parse_model(view_text: str) -> str | None:
     return model_m.group(1).strip()
 
 
+def parse_btw(view_text: str) -> str | None:
+    """/btw's view accumulates a history of every question asked in that
+    pane's lifetime (SPEC-orchestration.md SS1.5) -- extracts the answer
+    to the MOST RECENT query only (the last line starting with "/btw "),
+    never the first/only one found, so a second delivery to the same
+    target doesn't re-read a stale prior answer. Bounded by "Esc to
+    close" (transport.py's own positive marker for this view -- see
+    BUSY_TOLERANT_VIEW_MARKERS), which is present in the footer
+    regardless of how many entries exist. Returns None (never a
+    truncated guess) if either boundary isn't found, or if the region
+    between them is empty (the still-pending "Answering..." case should
+    already have been waited out by transport.py's
+    BTW_ANSWER_SETTLE_POLL before this is ever called, but this stays
+    honest about it either way rather than assuming that always
+    succeeded)."""
+    lines = view_text.splitlines()
+    query_idx = None
+    for i, line in enumerate(lines):
+        if line.strip().startswith("/btw "):
+            query_idx = i
+    if query_idx is None:
+        return None
+
+    footer_idx = None
+    for i in range(query_idx + 1, len(lines)):
+        if "esc to close" in lines[i].lower():
+            footer_idx = i
+            break
+    if footer_idx is None:
+        return None
+
+    answer_lines = [ln.strip() for ln in lines[query_idx + 1 : footer_idx] if ln.strip()]
+    if not answer_lines:
+        return None
+    answer = " ".join(answer_lines)
+    if re.fullmatch(r"[✻✢✽✶⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏]?\s*answering[….]*", answer, re.IGNORECASE):
+        # Still-pending placeholder, not a real answer -- transport.py's
+        # BTW_ANSWER_SETTLE_POLL should already wait this out before
+        # returning content, but staying honest here too rather than
+        # assuming that always succeeded (never speak "Answering..." as
+        # though it were the answer).
+        return None
+    return answer
+
+
 VIEW_PARSERS.update(
     {
         "/cost": parse_cost_or_usage,
         "/usage": parse_cost_or_usage,
         "/status": parse_status,
+        "/btw": parse_btw,
     }
 )
 
