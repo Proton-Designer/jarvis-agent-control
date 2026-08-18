@@ -33,12 +33,19 @@ from __future__ import annotations
 from mcp.server.mcpserver import MCPServer
 
 import tools_read
+import tools_voice
 
 app = MCPServer(name="jarvis-l4-readonly")
 
 list_sessions = app.tool()(tools_read.list_sessions)
 session_activity = app.tool()(tools_read.session_activity)
 spend = app.tool()(tools_read.spend)
+
+# jarvis_say is on BOTH surfaces deliberately -- speaking is not
+# authority. See tools_voice.py's docstring: this module never imports
+# transport, never touches tmux, never writes to a session, so exposing
+# it here does not weaken the read-only guarantee the split exists for.
+jarvis_say = app.tool()(tools_voice.jarvis_say)
 
 
 if __name__ == "__main__":
