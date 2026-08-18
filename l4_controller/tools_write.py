@@ -20,6 +20,7 @@ import time
 from cancel_listener import cancel_socket_available
 from dispatch_state import mark_dispatch_complete, report_dispatch_stage as _report_dispatch_stage
 from latency_log import log_event
+from member_identity import verify_and_refresh_identity
 from providers import registry, transport
 from registry import UnknownSessionError
 from say_feedback import speak, speak_with_cancel_window
@@ -127,6 +128,18 @@ def deliver_batch(instructions: list[dict], dictation_ref: str, retry_busy_once:
             failures.append(f"{target_name} (cancel_unavailable)")
             speak(f"Cancel unavailable, {target_name} not sent.")
             continue
+
+        # Known-gap fix (SPEC-orchestration.md): a registered team member
+        # whose Claude process crashed and relaunched reads as a normal
+        # RUNNING session via tmux-name+cwd liveness alone -- routing work
+        # to it on the assumption it remembers anything would be silent
+        # amnesia. Checked here, not on a poll loop (see
+        # member_identity.py's docstring for why), and never blocks
+        # delivery -- only announces, since the new instruction may not
+        # need any prior context at all.
+        identity = verify_and_refresh_identity(session_id)
+        if identity["restarted"]:
+            speak(identity["detail"])
 
         result = transport.deliver(session_id, payload)
 
