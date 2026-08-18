@@ -41,8 +41,9 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent.parent / "l4_controller"))
+import blocked_state  # noqa: E402
 from l2_l3_handoff import DEFAULT_ORCHESTRATOR_TARGET  # noqa: E402
-from providers import list_sessions  # noqa: E402
+from providers import list_sessions, session_activity  # noqa: E402
 
 from models import LIVENESS_LOST, LIVENESS_RUNNING, LIVENESS_STOPPED, Team, TeamMember, UnassignedSession  # noqa: E402
 
@@ -158,3 +159,50 @@ def discover_teams_and_unassigned() -> tuple[list[Team], list[UnassignedSession]
     ]
 
     return teams, unassigned
+
+
+def enrich_running_members(teams: list[Team]) -> list[tuple[Team, TeamMember]]:
+    """The "expensive" per-member tier (SS6.1, docs/SPEC-blockers.md stage
+    1): one pane-capture round-trip per RUNNING member
+    (providers.session_activity()) to fill in TeamMember.activity, and to
+    detect/track blocked-question episodes via blocked_state.py.
+    Deliberately separate from discover_teams_and_unassigned (the cheap
+    tier) -- called by the caller on its own cadence, not fused into every
+    liveness check.
+
+    Mutates the given Team/TeamMember objects in place and returns the
+    subset of members that just became NEWLY blocked (i.e.
+    blocked_state.mark_blocked() returned True this call). Only file
+    bookkeeping happens here -- deciding whether/how to escalate (speak)
+    a newly-blocked member, and calling blocked_state.mark_surfaced() once
+    that's actually done, is left to the caller (poller.py). Triggering
+    real audio from inside a plain state-reading function would be exactly
+    the kind of unannounced-audio surprise this project has been burned by
+    before and specifically guards against."""
+    newly_blocked: list[tuple[Team, TeamMember]] = []
+    for team in teams:
+        for member in team.members:
+            if member.liveness != LIVENESS_RUNNING or member.tmux is None:
+                continue
+
+            result = session_activity(member.tmux)
+            member.activity = result.get("activity")
+
+            tracked = blocked_state.get_blocked(member.claude_session)
+            if result.get("state") == "blocked_question" and result.get("blocked"):
+                blocked = result["blocked"]
+                if tracked is None:
+                    blocked_state.mark_blocked(member.claude_session, blocked["question"], blocked["options"])
+                    tracked = blocked_state.get_blocked(member.claude_session)
+                    newly_blocked.append((team, member))
+                member.blocked_question = tracked["question"]
+                member.blocked_since = tracked["since"]
+                member.blocked_surfaced = tracked["surfaced"]
+            else:
+                if tracked is not None:
+                    blocked_state.clear_blocked(member.claude_session)
+                member.blocked_question = None
+                member.blocked_since = None
+                member.blocked_surfaced = False
+
+    return newly_blocked

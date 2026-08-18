@@ -24,9 +24,15 @@ than looking falsely fresh.
 
 from __future__ import annotations
 
+import sys
 import threading
 import time
 from dataclasses import replace
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).parent.parent.parent / "l4_controller"))
+import blocked_state  # noqa: E402
+import say_feedback  # noqa: E402
 
 import orchestrator as orchestrator_mod
 import runtime as runtime_mod
@@ -117,12 +123,32 @@ class Poller:
         while not self._stop.is_set():
             try:
                 teams_list, unassigned_list = teams_mod.discover_teams_and_unassigned()
+                # Expensive per-member tier (SS6.1, SPEC-blockers.md stage
+                # 1): folded into this same cadence per TEAMS_INTERVAL_S's
+                # own comment, not a separate slower loop. Mutates
+                # teams_list's members in place; newly_blocked is stage
+                # 1's actual detection trigger.
+                newly_blocked = teams_mod.enrich_running_members(teams_list)
                 with self._lock:
                     self._state.teams = teams_list
                     self._state.unassigned = unassigned_list
                     self._state.teams_polled_at = time.time()
                     self._state.teams_expected_interval = TEAMS_INTERVAL_S
                     self._state.teams_error = None
+                # Escalation (the actual audio) happens here, outside the
+                # lock and outside teams.py's pure state-reading functions
+                # -- speak() is fire-and-forget/non-blocking, so this
+                # doesn't stall the next tick, and exactly one escalation
+                # fires per blocking episode (mark_blocked() already
+                # de-duped newly_blocked to first-detection-only).
+                for team, member in newly_blocked:
+                    label = f"{team.id}'s {member.tmux}" if member.tmux else team.id
+                    say_feedback.speak(
+                        f"{label} is waiting on a question: {member.blocked_question}"
+                    )
+                    blocked_state.mark_surfaced(member.claude_session)
+                    with self._lock:
+                        member.blocked_surfaced = True
             except Exception as e:  # noqa: BLE001
                 with self._lock:
                     self._state.teams_error = str(e)
