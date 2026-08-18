@@ -14,12 +14,17 @@ never blocks another section's update -- an expensive spend() round-trip
 stalling does not stall orchestrator/wake liveness, which is exactly the
 point of separating the clocks per SS6.1.
 
-**On a failed check: the previous good data is kept, `error` is set, and
-`polled_at` is NOT advanced.** A failure isn't fresher data, it's a
-confirmation the check itself is broken right now -- leaving polled_at at
-the last real success means staleness (polled_at + expected_interval,
-computed by the consumer) grows naturally across repeated failures rather
-than looking falsely fresh.
+**On a failed check: the previous good DATA is kept and `error` is set,
+but `polled_at` is still advanced on every attempt, success or failure.**
+`polled_at` answers "is this loop alive and attempting", not "did the
+last attempt succeed" -- `error` is the signal for the latter. Conflating
+them was a real bug (found live 2026-08-18, Ayman's own console): a check
+that had never once succeeded left its polled_at at the initial 0.0
+forever, so staleness computed as ~56 years old, and the UI showed a
+healthy loop that was failing every attempt as "STALE" -- indistinguishable
+from a loop that had silently died. Advancing polled_at unconditionally
+and leaving `error` to carry the failure keeps those two questions
+separate.
 """
 
 from __future__ import annotations
@@ -123,7 +128,7 @@ class Poller:
             except Exception as e:  # noqa: BLE001 -- must never take this thread down
                 with self._lock:
                     old = self._state.orchestrator
-                new = replace(old, error=str(e))
+                new = replace(old, polled_at=time.time(), error=str(e))
             with self._lock:
                 self._state.orchestrator = new
             self._stop.wait(ORCHESTRATOR_INTERVAL_S)
@@ -148,6 +153,8 @@ class Poller:
                 self._maybe_escalate_blocked(teams_list)
             except Exception as e:  # noqa: BLE001
                 with self._lock:
+                    self._state.teams_polled_at = time.time()
+                    self._state.teams_expected_interval = TEAMS_INTERVAL_S
                     self._state.teams_error = str(e)
             self._stop.wait(TEAMS_INTERVAL_S)
 
@@ -237,7 +244,7 @@ class Poller:
             except Exception as e:  # noqa: BLE001
                 with self._lock:
                     old = self._state.wake
-                new = replace(old, error=str(e))
+                new = replace(old, polled_at=time.time(), error=str(e))
             with self._lock:
                 self._state.wake = new
             self._stop.wait(WAKE_INTERVAL_S)
@@ -251,7 +258,7 @@ class Poller:
                 old = self._state.runtime
                 self._state.runtime = replace(
                     old,
-                    polled_at=time.time() if error is None else old.polled_at,
+                    polled_at=time.time(),
                     expected_interval=RUNTIME_INTERVAL_S,
                     error=error,
                     models_resident=models if models_err is None else old.models_resident,
@@ -279,13 +286,13 @@ class Poller:
                         # ok=False/summary=None/raw=None on any unparseable or
                         # refused check, no invented reason string).
                         self._state.runtime = replace(
-                            old, spend_expected_interval=SPEND_INTERVAL_S,
+                            old, spend_polled_at=time.time(), spend_expected_interval=SPEND_INTERVAL_S,
                             spend_error="orchestrator /cost check did not return a parseable result",
                         )
             except Exception as e:  # noqa: BLE001
                 with self._lock:
                     old = self._state.runtime
                     self._state.runtime = replace(
-                        old, spend_expected_interval=SPEND_INTERVAL_S, spend_error=str(e),
+                        old, spend_polled_at=time.time(), spend_expected_interval=SPEND_INTERVAL_S, spend_error=str(e),
                     )
             self._stop.wait(SPEND_INTERVAL_S)
