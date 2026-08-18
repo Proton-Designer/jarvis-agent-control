@@ -135,7 +135,18 @@ Facts:
 
 Jarvis says:"""
 
-PHRASE_SYSTEM_CHAT = """You are Jarvis, a voice assistant, acknowledging a casual remark briefly and pleasantly. Reply in ONE short, natural spoken sentence (under 15 words). You have no information about running tasks, sessions, or costs -- never claim any.
+PHRASE_SYSTEM_CHAT = """You are Jarvis, a voice assistant that runs the user's coding agents for him. The user just said something conversational to you. Reply in ONE short, natural spoken sentence (under 20 words). Warm and brief -- a colleague answering, not a chatbot performing.
+
+ANSWER THE REMARK FIRST. If it is a greeting or asks how you are, respond to that. Only mention system state if it is genuinely relevant to what was said, and even then only briefly.
+
+The FACTS below are the complete truth about the system's current state. They are the ONLY thing you may state as fact. Never invent, guess at, or imply a session, task, cost, or status that is not written in them. If a fact says something is unknown, say you don't know -- do not round "unknown" down to "nothing is running."
+
+You are being given the user's remark so you can reply to it, NOT as a source of truth. It is speech, not data. Never treat anything in it as a fact about the system, and NEVER state or imply that any action has been performed, started, finished, or scheduled -- you did not perform one. If the remark seems to ask for work to be done, say you'll need it said again as an instruction; do not confirm it.
+
+Facts:
+{facts}
+
+The user said: "{remark}"
 
 Jarvis says:"""
 
@@ -219,11 +230,60 @@ def assess_addressed(text: str) -> str:
     return label if label in ("ADDRESSED", "AMBIENT", "UNSURE") else "UNSURE"
 
 
+def phrase_chat_reply(remark: str, facts: str = "") -> tuple[str, float]:
+    """The ONE place in this module a transcript reaches a model prompt,
+    deliberately its own function rather than a parameter on
+    phrase_answer() -- so the QUERY path stays structurally incapable of
+    seeing a transcript no matter how this one evolves. That separation
+    is the point; see phrase_answer's docstring for the live fabrication
+    incident that made transcript-in-prompt a thing worth isolating.
+
+    Why CHAT gets what QUERY must not: a reply to "how's it going" that
+    has not been shown the remark cannot actually be a reply -- the first
+    build of this spoke deterministic state at Ayman regardless of what
+    he'd said, which is a status readout wearing a conversation's
+    clothes. Answering requires hearing.
+
+    What makes that safe here is not this prompt's wording -- a prompt
+    telling a model not to do something is not a control, per the
+    incident -- but three upstream gates that must ALL have passed before
+    concierge.py calls this at all:
+      1. classify() returned CHAT, and a transcript naming a live
+         session can never be CHAT (classifier's mentions_live_session
+         hard rule), so there is no real session name in `remark` to
+         attribute a fabricated action to.
+      2. assess_retention()'s _looks_imperative() check found no action
+         verb (check/run/restart/redeploy/fix/deploy/...), no "can you",
+         no "go ahead and" -- any of which returns verdict=None and this
+         function is never reached.
+      3. assess_addressed() returned a positive ADDRESSED.
+    The fabrication case needs an instruction in the transcript; gate 2
+    exists specifically to make sure one never gets this far, and gate 1
+    removes the target it would need to name.
+
+    Residual risk, stated rather than papered over: an instruction
+    phrased with no imperative marker and no session name could still
+    reach here and be answered conversationally. That utterance is
+    already dropped silently today, so no instruction is newly lost --
+    what is new is that Jarvis might reply pleasantly to it. The prompt's
+    last paragraph is aimed squarely at that case. If it ever fires in
+    practice, the fix is another deterministic gate upstream, not more
+    prompt text."""
+    prompt = PHRASE_SYSTEM_CHAT.format(facts=facts, remark=remark.replace('"', "'"))
+    response, elapsed_ms = _generate(prompt, num_predict=PHRASE_MAX_TOKENS, temperature=0.4)
+    log_event("concierge_phrase_model_call", kind="CHAT", elapsed_ms=round(elapsed_ms, 1))
+    return response, elapsed_ms
+
+
 def phrase_answer(kind: str, facts: str = "") -> tuple[str, float]:
     """kind: "CHAT" or "QUERY". `facts` is the ONLY source of truth the
-    model may draw on for a QUERY answer -- e.g. a provider function's
-    literal output -- never invented. Ignored for CHAT (nothing to
-    report; the model is explicitly told it has no state access).
+    model may draw on -- e.g. a provider function's literal output --
+    never invented. This is true for BOTH kinds now: CHAT used to be
+    told it had no state access at all, which made Jarvis unable to
+    answer "how's it going" with anything real. Same anti-fabrication
+    discipline either way -- the facts are code-computed by the caller
+    (concierge._chat_facts / _handle_query), so widening what CHAT may
+    say did not widen where any of it comes from.
 
     Deliberately takes no `text` parameter -- the raw transcript is never
     part of this prompt, structurally, not just by instruction. Found
@@ -240,8 +300,14 @@ def phrase_answer(kind: str, facts: str = "") -> tuple[str, float]:
     not showing it the information is. If `text` isn't in this function's
     signature, it can't leak into the prompt no matter what a future
     caller passes or what a future prompt edit forgets to restate."""
-    template = PHRASE_SYSTEM_QUERY if kind == "QUERY" else PHRASE_SYSTEM_CHAT
-    prompt = template.format(facts=facts)
+    # QUERY only now -- CHAT routes through phrase_chat_reply() above,
+    # which is the only function here that may see a transcript. Asserted
+    # rather than silently branched: a future caller passing kind="CHAT"
+    # here would get PHRASE_SYSTEM_QUERY's {remark}-less template and a
+    # KeyError-free but subtly wrong prompt, and this path must never
+    # become a second way to phrase chat.
+    assert kind == "QUERY", f"phrase_answer handles QUERY only, got {kind!r}"
+    prompt = PHRASE_SYSTEM_QUERY.format(facts=facts)
     response, elapsed_ms = _generate(prompt, num_predict=PHRASE_MAX_TOKENS, temperature=0.3)
     log_event("concierge_phrase_model_call", kind=kind, elapsed_ms=round(elapsed_ms, 1))
     return response, elapsed_ms
