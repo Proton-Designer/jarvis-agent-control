@@ -72,7 +72,7 @@ class TeamMember:
     claude_session: str  # stable identity -- Claude Code's own session UUID, never PID/tmux name
     liveness: str
     activity: str | None  # only meaningful when liveness == LIVENESS_RUNNING
-    is_inbox: bool
+    is_lead: bool  # renamed from is_inbox (SPEC-teams.md SS2) -- vocabulary only, still computed, never stored per-member
     # Reserved for docs/SPEC-blockers.md, not yet populated by anything --
     # blocked is its own distinct member state (a running session quietly
     # waiting on a human, not a variant of idle/busy), so it needs its own
@@ -83,6 +83,21 @@ class TeamMember:
     blocked_question: str | None = None  # the captured question text, untrusted content, never instructions
     blocked_since: float | None = None  # unix timestamp blocking was first observed
     blocked_surfaced: bool = False  # whether this has already been spoken/escalated to Ayman
+    # SPEC-teams.md SS6: model is cheap (already fetched at adoption,
+    # previously discarded); effort is only ever known for a member THIS
+    # app created itself -- verified live (2026-08-18) that /status does
+    # not expose it at all, so an adopted (pre-existing) member's effort
+    # is permanently None, not a bug to chase.
+    model: str | None = None
+    effort: str | None = None
+    # SPEC-teams.md SS2: the last time member_identity.py actually
+    # confirmed this member's claude_session matched at dispatch time --
+    # None if never dispatched to. NOT re-verified on a poll (that
+    # function is documented adoption/dispatch-time-only, never a polling
+    # operation) -- a consumer showing "active" should render "unverified
+    # since <this timestamp>" rather than a false-confident live status
+    # once it's been a while, rather than this layer guessing a threshold.
+    identity_verified_at: float | None = None
 
 
 @dataclass
@@ -90,9 +105,25 @@ class Team:
     id: str
     aliases: list[str]
     root: str  # exact, unmodified registry root -- teams.py matches liveness against this byte-for-byte, never display_path
-    inbox_reachable: bool
+    has_lead: bool  # SPEC-teams.md SS2: is ANY lead pointer set at all -- independent of reachability, so "no lead, live members" is a distinct, renderable state from "lead unreachable"
+    lead_reachable: bool  # renamed from inbox_reachable -- only meaningful when has_lead is True
     members: list[TeamMember] = field(default_factory=list)
     display_path: str = ""  # root with $HOME collapsed to "~" -- cosmetic only, see UnassignedSession.display_path
+    # SPEC-teams.md SS3: folded directly into Team by the poller (per
+    # ue6rruxg's request, 2026-08-18) rather than a second per-team call
+    # path at render time -- every other panel renders from ONE
+    # get_state() call per tick, and N teams x N context-file reads per
+    # tick would be the first thing to break that. None = never captured.
+    # A CLAUDE.md-sourced team's fields are re-read from the live file
+    # every poll tick (never cached) so they're never stale by
+    # construction, same instinct as everything else "liveness" in this
+    # project; an agent-sourced team's fields come from the on-disk
+    # capture and only change when Refresh is pressed.
+    context_summary: str | None = None
+    context_subsystems: list[str] = field(default_factory=list)
+    context_tech_stack: list[str] = field(default_factory=list)
+    context_captured_at: float | None = None
+    context_source: str | None = None  # "agent" | "claude_md" | None
 
 
 @dataclass

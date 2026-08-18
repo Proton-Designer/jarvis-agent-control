@@ -113,6 +113,27 @@ def _has_history(root: str, claude_session: str) -> bool:
     return jsonl_path.exists()
 
 
+def _lead_claude_session(entry: dict) -> str | None:
+    """Resolves a team's lead pointer to a claude_session (SPEC-teams.md
+    SS2: "key it on claude_session, not tmux name"). Reads-only migration
+    for an OLD record: a legacy `entry["inbox"]` value is a TMUX NAME, not
+    a claude_session -- resolved here by looking up which member currently
+    has that tmux, WITHOUT writing anything back (this module never
+    writes; the on-disk key only actually becomes "lead" the next time
+    set_lead() runs for that team -- see team_actions.py). A legacy
+    pointer to a tmux name that matches no current member (renamed,
+    removed) resolves to None, same as no lead at all -- fails closed,
+    never a stale name mistaken for a live pointer."""
+    lead = entry.get("lead")
+    if lead is not None:
+        return lead
+    legacy_inbox_tmux = entry.get("inbox")
+    if not legacy_inbox_tmux:
+        return None
+    member = next((m for m in entry.get("members", []) if m.get("tmux") == legacy_inbox_tmux), None)
+    return member["claude_session"] if member else None
+
+
 def member_liveness(root: str, member: dict, live_by_name: dict[str, dict]) -> tuple[str, str | None, str | None]:
     """Returns (liveness, tmux_binding, activity). tmux_binding is the
     CURRENT tmux name if genuinely running, else None."""
@@ -164,7 +185,13 @@ def discover_teams_and_unassigned() -> tuple[list[Team], list[UnassignedSession]
     teams: list[Team] = []
     claimed_tmux_names: set[str] = set()
 
+    # Local import, same reason as the engine_roles one below: this
+    # module (team_context.py) itself imports load_registry/save_registry
+    # from teams.py, so a top-level import here would be circular.
+    import team_context
+
     for entry in registry:
+        lead_claude_session = _lead_claude_session(entry)
         members: list[TeamMember] = []
         for m in entry.get("members", []):
             liveness, tmux_binding, activity = member_liveness(entry["root"], m, live_by_name)
@@ -176,19 +203,26 @@ def discover_teams_and_unassigned() -> tuple[list[Team], list[UnassignedSession]
                     claude_session=m["claude_session"],
                     liveness=liveness,
                     activity=activity,
-                    is_inbox=(m.get("tmux") == entry.get("inbox")),
+                    is_lead=(m["claude_session"] == lead_claude_session),
+                    model=m.get("model"),
+                    effort=m.get("effort"),
+                    identity_verified_at=m.get("identity_verified_at"),
                 )
             )
-        inbox_member = next((mm for mm in members if mm.is_inbox), None)
-        inbox_reachable = bool(inbox_member and inbox_member.liveness == LIVENESS_RUNNING)
+        lead_member = next((mm for mm in members if mm.is_lead), None)
+        has_lead = lead_claude_session is not None
+        lead_reachable = bool(lead_member and lead_member.liveness == LIVENESS_RUNNING)
+        context_fields = team_context.context_fields_for(entry)
         teams.append(
             Team(
                 id=entry["id"],
                 aliases=list(entry.get("aliases", [])),
                 root=entry["root"],
                 display_path=_display_path(entry["root"]),
-                inbox_reachable=inbox_reachable,
+                has_lead=has_lead,
+                lead_reachable=lead_reachable,
                 members=members,
+                **context_fields,
             )
         )
 

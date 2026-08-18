@@ -253,15 +253,55 @@ def _read_ai_title(claude_session: str) -> str | None:
 def create_team(team_id: str, aliases: list[str], root: str, inbox_tmux: str, members: list[dict]) -> None:
     """members: [{"tmux", "claude_session"}, ...]. Appends to the
     registry -- never overwrites an existing team with the same id
-    silently."""
+    silently.
+
+    Enforces three things this function did NOT check before
+    (SPEC-teams.md SS1.2, SS2) -- all raise ValueError, same convention
+    the existing team_id check already used, so an existing caller that
+    already pre-checks team_id itself (team_registry_tools.py does) gets
+    the new checks for free as an additional safety net, not a new
+    contract to learn:
+      - `root` (resolved) must not already belong to another team.
+      - every entry in `aliases` must not already belong to another
+        team's aliases (case-insensitive).
+      - `members` must be non-empty -- a team with zero members was a
+        reachable, silently-valid state before this.
+
+    `inbox_tmux` (a tmux name, unchanged caller-facing contract) is
+    resolved HERE to that member's claude_session and stored as the
+    team's `lead` -- SS2's "key it on claude_session, not tmux name"
+    happens internally so team_registry_tools.py's call shape never has
+    to change. Empty string means no lead, same as before."""
     registry = load_registry()
     if any(t["id"] == team_id for t in registry):
         raise ValueError(f"a team with id {team_id!r} is already registered")
+    if not members:
+        raise ValueError("a team must have at least one member")
+
+    resolved_root = str(Path(root).resolve())
+    for t in registry:
+        if t["root"] == resolved_root:
+            raise ValueError(f"{resolved_root!r} is already registered as team {t['id']!r}")
+
+    normalized_new_aliases = {a.strip().lower() for a in aliases}
+    for t in registry:
+        existing_aliases = {a.strip().lower() for a in t.get("aliases", [])}
+        collision = normalized_new_aliases & existing_aliases
+        if collision:
+            raise ValueError(f"alias {sorted(collision)[0]!r} is already used by team {t['id']!r}")
+
+    lead_claude_session = None
+    if inbox_tmux:
+        lead_member = next((m for m in members if m.get("tmux") == inbox_tmux), None)
+        if lead_member is None:
+            raise ValueError(f"inbox_tmux {inbox_tmux!r} is not one of this team's own members")
+        lead_claude_session = lead_member["claude_session"]
+
     registry.append({
         "id": team_id,
         "aliases": aliases,
-        "root": root,
-        "inbox": inbox_tmux,
+        "root": resolved_root,
+        "lead": lead_claude_session,
         "members": members,
     })
     save_registry(registry)

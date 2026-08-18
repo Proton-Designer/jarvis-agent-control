@@ -51,13 +51,17 @@ def _team_to_dict(team) -> dict:
         "id": team.id,
         "aliases": team.aliases,
         "root": team.root,
-        "inbox_reachable": team.inbox_reachable,
+        # Renamed alongside models.py's Team/TeamMember rename
+        # (SPEC-teams.md SS2 -- "lead", not "inbox"; has_lead is new,
+        # distinguishing "no lead assigned" from "lead unreachable").
+        "has_lead": team.has_lead,
+        "lead_reachable": team.lead_reachable,
         "members": [
             {
                 "tmux": m.tmux,
                 "claude_session": m.claude_session,
                 "liveness": m.liveness,
-                "is_inbox": m.is_inbox,
+                "is_lead": m.is_lead,
             }
             for m in team.members
         ],
