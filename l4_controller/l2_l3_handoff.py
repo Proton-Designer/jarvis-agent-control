@@ -116,6 +116,34 @@ def _format_session_list(sessions: list[dict]) -> str:
     return "; ".join(parts)
 
 
+def _format_team_list() -> str:
+    """Registered teams, with the aliases Ayman actually says out loud.
+
+    Deliberately reports "no teams are registered" as a distinct,
+    explicit statement rather than as an omitted section. An absent
+    section reads as "teams were not mentioned"; a present one saying
+    none exist reads as "there are none" -- and the router acts very
+    differently on those two. Same reason a provider failure must produce
+    "unknown" rather than "nothing" everywhere else in this system.
+    """
+    import sys as _sys
+    _sys.path.insert(0, str(Path(__file__).parent.parent / "l5_console" / "state"))
+    import teams as _teams
+
+    team_list, _unassigned = _teams.discover_teams_and_unassigned()
+    if not team_list:
+        return "Registered teams: none. (Do not invent one -- if an instruction names a team that is not here, hold it and say so.)"
+
+    parts = []
+    for t in team_list:
+        names = ", ".join(t.aliases) if t.aliases else t.id
+        members = ", ".join(
+            f"{m.tmux}{' [LEAD]' if m.is_lead else ''} ({m.liveness})" for m in t.members
+        ) or "no members"
+        parts.append(f"{t.id} -- Ayman may call it: {names} -- root {t.root} -- members: {members}")
+    return "Registered teams: " + " | ".join(parts)
+
+
 def _looks_like_real_server_process(cmdline: str) -> bool:
     if " -c " in cmdline or cmdline.rstrip().endswith(" -c"):
         return False
@@ -249,9 +277,46 @@ def deliver_transcript(
     # fallback if this list looks stale or wrong; this only removes the
     # round trip on the common path, it doesn't remove the tool.
     sessions = list_sessions()
+
+    # REGISTERED TEAMS, injected alongside the raw session list.
+    #
+    # Found live, 2026-08-18, and it is the bug that made the first real
+    # end-to-end run fail. The pointer used to carry ONLY tmux sessions --
+    # names and cwds -- and never mentioned teams at all. So a team called
+    # "gateway" with aliases "gateway"/"the gateway"/"api gateway",
+    # registered and live, was invisible: the router saw a session named
+    # `claude-gateway-scratch` in some directory and had no way to know
+    # Ayman's word for it.
+    #
+    # Worse in combination with CLAUDE.md's own guidance, which tells the
+    # router this injection IS its source of truth and it need not call
+    # list_sessions itself. That is a good optimisation and stays -- but
+    # it means the router was told to trust an injection that omitted the
+    # one thing it needed to route. It duly concluded no gateway existed,
+    # and on the NEXT dictation reused that conclusion rather than
+    # re-checking, which is the anti-fabrication rule failing at the
+    # routing layer: it sourced "there is no gateway" from memory instead
+    # of from a live call.
+    #
+    # Aliases are the whole point. Team.id and Team.aliases are what Ayman
+    # actually says out loud, and they are human-authored, always present,
+    # and never stale -- the real routing key, of which captured project
+    # context is only an enrichment (SPEC-teams.md §0).
+    try:
+        teams_text = _format_team_list()
+    except Exception as e:
+        # Never let a registry read failure block a dispatch: the raw
+        # session list alone is what the router had before this existed,
+        # so degrade to exactly that rather than dropping the instruction.
+        # Say so in the pointer, though -- a router that silently gets a
+        # thinner pointer would route worse with no idea why.
+        log_event("handoff_team_list_failed", error=str(e))
+        teams_text = "Registered teams: UNAVAILABLE (registry read failed -- route from the session list alone, and say so if you cannot)"
+
     pointer = (
         f"New dictation at {path} — read it and route the instructions inside. "
         f"Live sessions right now (captured at send time): {_format_session_list(sessions)}"
+        f"\n{teams_text}"
     )
     result = transport.deliver(orchestrator_target, pointer)
     log_event("pointer_delivered", ok=result.ok, target=orchestrator_target)
