@@ -95,9 +95,11 @@ class SetupScreen(Screen):
         await self._clear()
         body = self._body()
         await body.mount(PlainStatic("Add a team -- which kind?"))
-        await body.mount(Button("Adopt agents already running", id="kind_adopt"))
+        adopt_button = Button("Adopt agents already running", id="kind_adopt")
+        await body.mount(adopt_button)
         await body.mount(Button("Start a fresh team", id="kind_fresh"))
         await body.mount(Button("Cancel", id="cancel", variant="error"))
+        adopt_button.focus()
 
     async def _on_kind_chosen(self, kind: str) -> None:
         self.kind = kind
@@ -121,7 +123,9 @@ class SetupScreen(Screen):
                 "No unassigned running sessions found. Start a session first, "
                 "or use 'Start a fresh team' instead."
             ))
-            await body.mount(Button("Back", id="back_to_kind"))
+            back_button = Button("Back", id="back_to_kind")
+            await body.mount(back_button)
+            back_button.focus()
             return
 
         await body.mount(PlainStatic("Which directory? (live sessions grouped by working directory)"))
@@ -132,6 +136,7 @@ class SetupScreen(Screen):
             names = ", ".join(s.tmux for s in sessions)
             await listview.append(ListItem(Label(f"{working_dir}  ({len(sessions)}: {names})"), name=working_dir))
         await body.mount(Button("Back", id="back_to_kind"))
+        listview.focus()
 
     async def _on_adopt_group_chosen(self, working_dir: str) -> None:
         self.root = working_dir
@@ -149,13 +154,15 @@ class SetupScreen(Screen):
         await self._clear()
         body = self._body()
         await body.mount(PlainStatic("New team -- target directory:"))
-        await body.mount(Input(placeholder="/path/to/project", id="fresh_root"))
+        root_input = Input(placeholder="/path/to/project", id="fresh_root")
+        await body.mount(root_input)
         await body.mount(PlainStatic("How many agents?"))
         await body.mount(Input(placeholder="1", id="fresh_count"))
         await body.mount(PlainStatic(f"Model for all agents (default: {self.fresh_model}):"))
         await body.mount(Input(placeholder="sonnet or opus", id="fresh_model_input"))
         await body.mount(Button("Create", id="fresh_submit", variant="success"))
         await body.mount(Button("Back", id="back_to_kind"))
+        root_input.focus()
 
     async def _on_fresh_submit(self) -> None:
         body = self._body()
@@ -198,14 +205,18 @@ class SetupScreen(Screen):
             for name, r in failed:
                 await body.mount(PlainStatic(f"  {name}: {r['detail']}"))
             succeeded = [(name, r) for name, r in results if r["ok"]]
+            continue_button = None
             if succeeded:
                 await body.mount(PlainStatic(f"{len(succeeded)} did come up -- you can still form a team from those, or cancel."))
                 self.candidates = [
                     {"tmux": name, "claude_session": r["claude_session"], "model": model, "summary": "(freshly created, no summary yet)"}
                     for name, r in succeeded
                 ]
-                await body.mount(Button("Continue with the ones that came up", id="continue_partial"))
-            await body.mount(Button("Cancel", id="cancel", variant="error"))
+                continue_button = Button("Continue with the ones that came up", id="continue_partial")
+                await body.mount(continue_button)
+            cancel_button = Button("Cancel", id="cancel", variant="error")
+            await body.mount(cancel_button)
+            (continue_button or cancel_button).focus()
             return
 
         self.candidates = [
@@ -228,6 +239,7 @@ class SetupScreen(Screen):
                 ListItem(Label(f"{c['tmux']}  [{c['model']}]  {summary}"), name=c["tmux"])
             )
         await body.mount(Button("Back", id="cancel", variant="error"))
+        listview.focus()
 
     async def _on_inbox_chosen(self, tmux_name: str) -> None:
         self.inbox_tmux = tmux_name
@@ -240,11 +252,13 @@ class SetupScreen(Screen):
         body = self._body()
         default_id = _slugify(Path(self.root).name) if self.root else "team"
         await body.mount(PlainStatic("Team id (short, no spaces):"))
-        await body.mount(Input(value=default_id, id="team_id_input"))
+        id_input = Input(value=default_id, id="team_id_input")
+        await body.mount(id_input)
         await body.mount(PlainStatic("Spoken aliases (comma-separated -- how you'll refer to it by voice):"))
         await body.mount(Input(placeholder=f"the {default_id} project, {default_id}", id="aliases_input"))
         await body.mount(Button("Create team", id="finish_submit", variant="success"))
         await body.mount(Button("Back", id="cancel", variant="error"))
+        id_input.focus()
 
     async def _on_alias_submit(self) -> None:
         body = self._body()
@@ -261,7 +275,9 @@ class SetupScreen(Screen):
 
         await self._clear()
         await body.mount(PlainStatic(f"✓ team {team_id!r} created, inbox: {self.inbox_tmux}"))
-        await body.mount(Button("Done", id="cancel", variant="success"))
+        done_button = Button("Done", id="cancel", variant="success")
+        await body.mount(done_button)
+        done_button.focus()
 
     # --- Shared helpers -----------------------------------------------------
 

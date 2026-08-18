@@ -61,8 +61,10 @@ class ReconnectScreen(Screen):
         # no-op choice.
         reconnectable = [t for t in current.teams if any(m.liveness == LIVENESS_STOPPED for m in t.members)]
         if not reconnectable:
+            close_button = Button("Close", id="close")
             await body.mount(PlainStatic("No teams have stopped (reconnectable) members right now."))
-            await body.mount(Button("Close", id="close"))
+            await body.mount(close_button)
+            close_button.focus()
             return
 
         await body.mount(PlainStatic("Reconnect which team?"))
@@ -72,6 +74,7 @@ class ReconnectScreen(Screen):
             stopped_count = sum(1 for m in t.members if m.liveness == LIVENESS_STOPPED)
             await listview.append(ListItem(Label(f"{t.id}  ({stopped_count} stopped)"), name=t.id))
         await body.mount(Button("Close", id="close"))
+        listview.focus()
 
     async def on_list_view_selected(self, event: ListView.Selected) -> None:
         if event.list_view.id != "reconnect_team_list":
@@ -86,8 +89,10 @@ class ReconnectScreen(Screen):
         await self._clear()
         body = self._body()
         if "error" in result:
+            close_button = Button("Close", id="close")
             await body.mount(PlainStatic(f"⚠ {result['error']}"))
-            await body.mount(Button("Close", id="close"))
+            await body.mount(close_button)
+            close_button.focus()
             return
         if not result["results"]:
             await body.mount(PlainStatic(f"{team_id}: nothing needed reconnecting (already all running)."))
@@ -100,7 +105,9 @@ class ReconnectScreen(Screen):
             for r in result["results"]:
                 mark = "✓" if r["ok"] else "✗"
                 await body.mount(PlainStatic(f"  {mark} {r['tmux']}: {r['detail']}"))
-        await body.mount(Button("Close", id="close"))
+        close_button = Button("Close", id="close")
+        await body.mount(close_button)
+        close_button.focus()
 
     async def on_button_pressed(self, event: Button.Pressed) -> None:
         if event.button.id == "close":
