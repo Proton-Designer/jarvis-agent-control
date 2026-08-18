@@ -16,6 +16,7 @@ from widgets import PlainStatic
 from staleness import is_stale
 from stream import StreamReader
 from format_helpers import liveness_icon, team_liveness
+from meter import Meter
 import wake_control
 
 import sys
@@ -55,10 +56,18 @@ class WakePanel(Widget):
     WakePanel #wake_status { margin-bottom: 1; }
     """
 
+    def __init__(self, *args, **kwargs) -> None:
+        super().__init__(*args, **kwargs)
+        self._wake_running = False  # cached from the last slow-clock update_state(); see update_meter()
+
     def compose(self) -> ComposeResult:
         yield PlainStatic("", id="wake_status")
+        yield Meter(id="wake_meter", width=24)
         yield PlainStatic("", id="wake_action_result")
         yield Button("start", id="wake_button", variant="success")
+
+    def update_meter(self, wake_state) -> None:
+        self.query_one("#wake_meter", Meter).update_meter(self._wake_running, wake_state)
 
     def update_state(self, wake) -> None:
         # Stated explicitly per the Lead's ruling: this method is the
@@ -70,6 +79,12 @@ class WakePanel(Widget):
         # after a successful stop() call would reintroduce the exact bug
         # this rule exists to prevent: rendering "stopped" before a poll
         # has actually confirmed the process is gone.
+        #
+        # self._wake_running (read by update_meter() on the separate fast
+        # clock) defaults to False here and is only set True in the fully
+        # -trusted branch below -- an error or stale wake reading must
+        # never let the meter claim it's showing live data.
+        self._wake_running = False
         status = self.query_one("#wake_status", PlainStatic)
         button = self.query_one("#wake_button", Button)
         if wake.error:
@@ -85,6 +100,7 @@ class WakePanel(Widget):
             status.update("● wake: listening")
             button.label = "stop"
             button.variant = "error"
+            self._wake_running = True
         else:
             status.update("○ wake: stopped")
             button.label = "start"
@@ -242,3 +258,6 @@ class Console(Widget):
             state.teams, state.teams_error, state.unassigned, state.teams_polled_at, state.teams_expected_interval
         )
         self.query_one("#console_stream", StreamPanel).poll_stream()
+
+    def update_meter(self, wake_state) -> None:
+        self.query_one("#console_wake", WakePanel).update_meter(wake_state)

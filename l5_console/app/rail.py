@@ -21,6 +21,7 @@ from widgets import PlainStatic
 from staleness import is_stale
 from stream import StreamReader
 from format_helpers import liveness_icon, team_liveness
+from meter import Meter
 
 import sys
 from pathlib import Path
@@ -135,10 +136,12 @@ class Rail(Widget):
         super().__init__(*args, **kwargs)
         self._stream = StreamReader()
         self._activity_lines: list[str] = []
+        self._wake_running = False  # cached from the last slow-clock update_state(); see update_meter()
 
     def compose(self) -> ComposeResult:
         with Vertical():
             yield RailWake(id="rail_wake")
+            yield Meter(id="rail_meter", width=16)
             yield RailOrchestrator(id="rail_orch")
             yield RailTeams(id="rail_teams")
             yield RailRuntime(id="rail_runtime")
@@ -148,6 +151,15 @@ class Rail(Widget):
 
     def update_state(self, state: JarvisState) -> None:
         self.query_one("#rail_wake", RailWake).update_state(state.wake)
+        # Only trust wake.running as a real "is it alive" signal when the
+        # reading itself is neither errored nor stale -- an error/stale
+        # wake reading must never let the meter claim it's showing live
+        # data (matches WakePanel's identical guard in console.py).
+        self._wake_running = bool(
+            state.wake.running
+            and not state.wake.error
+            and not is_stale(state.wake.polled_at, state.wake.expected_interval)
+        )
         self.query_one("#rail_orch", RailOrchestrator).update_state(state.orchestrator)
         self.query_one("#rail_teams", RailTeams).update_state(
             state.teams, state.teams_error, state.teams_polled_at, state.teams_expected_interval
@@ -155,6 +167,15 @@ class Rail(Widget):
         self.query_one("#rail_runtime", RailRuntime).update_state(state.runtime)
         self.query_one("#rail_unassigned", RailUnassigned).update_state(state.unassigned)
         self._update_activity()
+
+    def update_meter(self, wake_state) -> None:
+        """Called on main.py's separate, faster clock (SPEC-TUI.md §6.1's
+        dual-clock principle -- the meter needs to look live, JarvisState's
+        ~1s poll doesn't). wake_running comes from the last slow-clock
+        update_state(), not re-derived here -- at most ~1s stale on "is it
+        running at all," which is the JarvisState poll's own native
+        cadence anyway, not a new staleness this introduces."""
+        self.query_one("#rail_meter", Meter).update_meter(self._wake_running, wake_state)
 
     def _update_activity(self) -> None:
         new_lines = self._stream.poll()
