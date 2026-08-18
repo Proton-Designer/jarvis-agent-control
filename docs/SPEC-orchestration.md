@@ -200,6 +200,90 @@ after.
 
 ---
 
+## 1.6 How the concierge session is actually launched
+
+Found by standing it up live, 2026-08-18. Two of these are non-obvious
+and each one silently breaks the tier if missed.
+
+```
+claude --model haiku \
+       --permission-mode acceptEdits \
+       --mcp-config ~/Jarvis-concierge/.mcp.json \
+       --strict-mcp-config
+```
+
+**`--strict-mcp-config` is mandatory, not tidiness.** Without it the
+session inherits every user-level MCP server — Gmail, Drive, Calendar,
+Chrome, Playwright, terminal-mcp — 100+ tools. Two consequences, both
+observed:
+
+1. **The read-only split becomes meaningless.** All the work in §0.2 to
+   make the concierge structurally incapable of acting is void if the same
+   session can read the user's email. The guarantee is only as narrow as
+   the narrowest surface actually attached.
+2. **Tool resolution degrades.** With that many tools loaded, the model
+   emitted a call for a tool not in its schema (`bash`), got
+   `No such tool available`, and then **fabricated an explanation** —
+   "I'm unable to call the tool due to permission restrictions" — when
+   `/mcp` showed `jarvis-l4-readonly ✔ connected · 3 tools` and the tools
+   were pre-approved. Nothing was restricted. It invented a cause for its
+   own failure.
+
+   That last part is the thing to remember about this tier: **Haiku will
+   narrate a plausible reason for a failure it does not understand.** It
+   is why §1.2's grounding rules are written as hard prohibitions rather
+   than guidance, and why a concierge answer must never be the only
+   evidence that something is or isn't true.
+
+**Read tools must be pre-approved** via `.claude/settings.local.json`:
+
+```json
+{"permissions": {"allow": [
+  "mcp__jarvis-l4-readonly__list_sessions",
+  "mcp__jarvis-l4-readonly__session_activity",
+  "mcp__jarvis-l4-readonly__spend"
+]}}
+```
+
+Otherwise every single read raises an approval dialog and the concierge
+blocks — which defeats the one job this tier has. A settings file is used
+rather than clicking "don't ask again" so the configuration is explicit,
+reviewable, and reproducible instead of hidden session state.
+
+Safe because the surface is read-only *by construction* (§0.2), not
+because we chose to trust it.
+
+**First launch in a fresh directory raises an MCP trust prompt.** Setup,
+not runtime — `SPEC-TUI.md` §5.2 already covers this. It must be answered
+by a human, once, per directory.
+
+## 1.7 Measured concierge latency
+
+Live, Haiku 4.5, Claude Code 2.1.234, from Claude Code's own turn timer:
+
+| Query | Tools | Time |
+|---|---|---|
+| "Nice one" | none | **1s** |
+| "How are you doing today?" | none | **2s** |
+| "What sessions are up?" | `list_sessions` | **3–4s** |
+| "How much have I spent?" | `spend` | **7s** |
+
+**The "always ~2s" premise holds only for tool-free replies.** A
+tool-grounded answer costs 3–7s, and `spend` is the worst because it
+drives `/cost` on another session. Anything that must feel instant —
+the acknowledgement in §1.1 — cannot depend on this tier at all, which is
+exactly why that ack is templated and fires before the concierge is
+invoked.
+
+Reply quality was good without further prompting, including for speech:
+
+> *"Two up — orchestrator and concierge."*
+> *"Sixty-four cents this session, seventeen percent of your limit used."*
+
+Note it wrote the numbers out for the ear unprompted.
+
+---
+
 # Phase 2 — The return channel
 
 Without this, Sonnet finishes 30 seconds later with nobody listening. It

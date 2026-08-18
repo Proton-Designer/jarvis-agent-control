@@ -1,0 +1,13 @@
+{
+  "permissions": {
+    "allow": [
+      "mcp__jarvis-l4-readonly__list_sessions",
+      "mcp__jarvis-l4-readonly__session_activity",
+      "mcp__jarvis-l4-readonly__spend"
+    ],
+    "deny": []
+  },
+  "enabledMcpjsonServers": [
+    "jarvis-l4-readonly"
+  ]
+}

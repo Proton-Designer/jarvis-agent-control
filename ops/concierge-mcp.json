@@ -1,0 +1,11 @@
+{
+  "mcpServers": {
+    "jarvis-l4-readonly": {
+      "command": "/Users/aymanmohammed/Desktop/Jarvis/l4_controller/.venv/bin/python3",
+      "args": ["/Users/aymanmohammed/Desktop/Jarvis/l4_controller/server_readonly.py"],
+      "env": {
+        "JARVIS_MUTE": "0"
+      }
+    }
+  }
+}
