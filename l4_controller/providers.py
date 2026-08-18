@@ -20,7 +20,7 @@ import re
 from pane_state import PaneState, classify_pane_ansi
 from registry import SessionRegistry
 from transport import TmuxTransport
-from view_parsers import summarize_view
+from view_parsers import parse_session_id, summarize_view
 
 registry = SessionRegistry()
 transport = TmuxTransport(registry=registry)
@@ -92,6 +92,38 @@ def session_activity(session_id: str) -> dict:
                 break
 
     return {"session_id": session_id, "state": state.value, "activity": activity}
+
+
+def claude_session_id(session_id: str) -> str | None:
+    """The tmux target's own Claude Code session UUID, via /status --
+    the reliable, in-band way to map a live tmux pane to its identity.
+    Deliberately not `ps eww`/env-var based: verified live that
+    CLAUDE_CODE_SESSION_ID is a tmux-server-global value inherited from
+    server startup, not per-pane, and returns the SAME wrong UUID for
+    every pane in one tmux server -- see view_parsers.parse_session_id's
+    docstring for the full finding. Returns None on any failure (target
+    not READY, unparseable view) -- never guesses at an identity.
+
+    ADOPTION-TIME ONLY. NEVER call this on a polling/liveness loop.
+    /status is an intrusive ~1s round-trip -- it types into the target
+    session, opens a persistent view, captures, dismisses. Fine as a
+    one-time cost when Ayman explicitly adopts a pre-existing session
+    into a team (SPEC-TUI.md SS5.1); completely unacceptable run every
+    poll tick, since it would put visible text into every one of Ayman's
+    real sessions every few seconds. Resolve once at adoption, store the
+    UUID in teams.json, never ask again -- per-poll liveness matches on
+    tmux session name + working directory instead (cheap, and sufficient
+    to answer "is this known member still alive", which is a different
+    question from "what is this pane's identity"). Reconnect and fresh
+    creation don't need this function at all: reconnect already knows
+    the UUID (it launched `--resume <uuid>` itself), and fresh creation
+    can identify its own new transcript file directly after launch,
+    which is cheaper and unambiguous since nothing else is starting at
+    the same moment."""
+    result = transport.deliver(session_id, "/status")
+    if not result.ok or result.view_content is None:
+        return None
+    return parse_session_id(result.view_content)
 
 
 def spend(session_id: str) -> dict:
