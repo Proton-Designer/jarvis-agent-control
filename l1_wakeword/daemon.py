@@ -248,25 +248,70 @@ def verify_wake_trigger(whisper: WhisperDaemon, preroll_frames: "collections.deq
 
 
 def default_deliver(text: str, orchestrator_target: str | None = None, live_deliver: bool = False, wake_score: float | None = None):
-    """Production hookup -- routes every finished dictation through the
-    L2.5 concierge (classify -> answer locally, or forward unchanged)
-    instead of calling deliver_transcript directly. `live_deliver` only
-    gates the concierge's OWN forwarding decision for a DISPATCH/UNSURE
-    classification -- CONTROL/QUERY/CHAT get classified and answered
-    locally regardless, since answering locally never touches a real
-    orchestrator session (it can still speak, gated separately by
-    JARVIS_MUTE, same as everything else that calls say_feedback.speak).
-    See l2_5_concierge/concierge.py's own --live-deliver flag and the
-    incident that motivated it: a smoke test without this flag delivered
-    fake test text into a real live orchestrator session by accident.
+    """Production hookup. As of 2026-08-18 this delivers the transcript
+    STRAIGHT THROUGH to the orchestrator target -- the L2.5 local-model
+    concierge is DISCONNECTED, on Ayman's decision.
 
-    wake_score passes the START trigger's acoustic score through to the
-    concierge purely for its NOT_ADDRESSED discard-event logging -- see
-    concierge.handle_transcript's docstring."""
-    sys.path.insert(0, str(Path(__file__).parent.parent / "l2_5_concierge"))
-    from concierge import handle_transcript, DEFAULT_ORCHESTRATOR_TARGET  # noqa
+    Why: L2.5's only advantage over a Claude session was speed, and a
+    Haiku session measured ~2s against our local path's 1.4-2.1s. At
+    parity on the one axis it won on, everything else favours Haiku --
+    it has tools, it has conversation memory across turns (the local
+    model had NONE; every utterance was judged in total isolation, so
+    "what about the other one?" was meaningless to it), and it does not
+    fail arithmetic. Measurements behind that call are in the Lead's
+    notes and in git history around 7060a55.
+
+    The concierge code is deliberately LEFT ON DISK, intact and still
+    tested by its two canaries (chat_gate_canary.py 7/7,
+    classify_canary.py 24/24). This is a wiring change, not a deletion:
+    if the Haiku layer disappoints, reconnecting is re-importing
+    handle_transcript here. Nothing about it was found wrong -- it was
+    outgrown.
+
+    INTERIM STATE, and it is not the destination. The Haiku concierge
+    does not exist yet, so right now EVERY utterance forwards, including
+    "cancel" and "how's it going". That is deliberate: it is the
+    fail-toward-dispatch direction this project has ruled for
+    everywhere, and forwarding something trivial costs a wasted turn
+    while dropping something real is silent. Until Haiku lands, expect
+    no sub-second answers and no local chat.
+
+    ONE THING GENUINELY LOST HERE, flagged rather than buried: the
+    "was this addressed to me?" check ran LOCALLY, before anything left
+    the machine. Ayman verified it live on 2026-08-18 -- he talked ABOUT
+    Jarvis, it stayed silent and never wrote the transcript to disk. With
+    the concierge disconnected, a false wake trigger now forwards
+    whatever it overheard. verify_wake_trigger() still filters false
+    ACOUSTIC fires (it re-transcribes and rejects, and rejects a lot),
+    so this only bites when someone genuinely says "hey jarvis" near a
+    conversation that was not for Jarvis. Narrow, but real, and it is an
+    open decision for the build spec -- not a thing to discover later.
+
+    live_deliver=False still means nothing touches a real tmux session,
+    same contract as before and for the same reason: a smoke test once
+    delivered fake test text into a live orchestrator by accident.
+
+    wake_score is accepted and unused for now -- it fed the concierge's
+    NOT_ADDRESSED discard logging. Kept in the signature so callers do
+    not change and so the acoustic-false-trigger rate stays measurable
+    when the addressed check comes back at whatever layer owns it."""
+    sys.path.insert(0, str(Path(__file__).parent.parent / "l4_controller"))
+    from l2_l3_handoff import deliver_transcript, DEFAULT_ORCHESTRATOR_TARGET  # noqa: E402
+    from transport import TmuxTransport  # noqa: E402
+
     target = orchestrator_target or DEFAULT_ORCHESTRATOR_TARGET
-    return handle_transcript(text, orchestrator_target=target, live_deliver=live_deliver, wake_score=wake_score)
+    if not live_deliver:
+        print(f"(live_deliver=False: NOT forwarding to {target!r} -- would send: {text!r})")
+        return {"label": "FORWARDED", "forwarded": False, "delivery": None, "retain": True}
+
+    delivery = deliver_transcript(text, TmuxTransport(), orchestrator_target=target)
+    # "forwarded" means actually delivered, never merely attempted --
+    # deliver_transcript returns None on a real failure (no jarvis-l4
+    # tools connected), and reporting that as success is precisely the
+    # silence-read-as-success failure this project keeps finding.
+    delivered = delivery is not None and getattr(delivery, "ok", False)
+    log_event("l1_direct_forward", forwarded=delivered, chars=len(text))
+    return {"label": "FORWARDED", "forwarded": delivered, "delivery": delivery, "retain": True}
 
 
 class DictationSession:
@@ -473,21 +518,20 @@ def _report_and_deliver(
     text: str, chunk_log: list[dict], live_deliver: bool, orchestrator_target: str | None,
     stop_wall_time: float, wake_score: float | None = None,
 ):
-    """Always routes through the L2.5 concierge now, regardless of
-    live_deliver -- CONTROL/QUERY/CHAT get classified and answered on
-    every run (including plain --simulate testing with no flags), since
-    none of that touches a real orchestrator session. live_deliver only
-    reaches the concierge's own DISPATCH/UNSURE forwarding gate (see
-    default_deliver / concierge.handle_transcript's --live-deliver
-    semantics) -- there is no separate short-circuit here any more.
+    """Hands the finished transcript to default_deliver(), which since
+    2026-08-18 forwards it straight to the orchestrator -- no local
+    classification step in between.
 
-    The chunk log is written AFTER default_deliver() returns, not
-    before, and only if the concierge says retain=True (the default for
-    everything except a high-confidence NOT_ADDRESSED discard -- see
-    classifier.assess_retention). This is the actual fix for "a false
-    trigger persists a transcription of Ayman's private conversation to
-    disk permanently": a discarded dictation is now never written in the
-    first place, not written-then-deleted. Printing the transcript to
+    The chunk log is still written AFTER default_deliver() returns and
+    only if it reports retain=True. That ordering was the fix for "a
+    false trigger persists a transcription of a private conversation to
+    disk permanently" -- discarded means never written, not
+    written-then-deleted. NOTE that nothing currently returns
+    retain=False: the local NOT_ADDRESSED check was the only producer of
+    it and it is disconnected, so every dictation is now written. The
+    ordering is kept deliberately so that whichever layer owns the
+    addressed check next inherits a working discard path rather than
+    having to rebuild one. Printing the transcript to
     this process's own console is unaffected either way -- during any
     session where this daemon is running, Ayman (or whoever's watching,
     per the standing no-unattended-mic rule) is already present in the
@@ -520,7 +564,7 @@ def _report_and_deliver(
         outcome = f"answered locally, nothing sent to any agent: {result['response']!r}"
     else:
         outcome = "no response, nothing sent to any agent"
-    print(f"concierge: {result.get('label')} -> {outcome}")
+    print(f"routing: {result.get('label')} -> {outcome}")
     print(f"  (raw: {result!r})")
     print(f"stop-word-to-handoff-return wall-clock: {end_to_end_s:.3f}s")
     log_event(
@@ -1042,10 +1086,12 @@ if __name__ == "__main__":
     # few seconds mid-conversation would not be. Printed, not silent --
     # same "confidence from watching it react" reasoning as every other
     # state transition in this file.
-    print(f"[{time.strftime('%H:%M:%S')}] warming classifier model...")
-    sys.path.insert(0, str(Path(__file__).parent.parent / "l2_5_concierge"))
-    from ollama_client import warm_up  # noqa: E402
-    warm_up()
+    # No local model to warm any more (concierge disconnected
+    # 2026-08-18 -- see default_deliver). Startup is now just whisper +
+    # the wake model. Left the surrounding reasoning above intact: it
+    # explains WHY warming belongs at startup rather than on the first
+    # utterance, and it will apply again to whatever the Haiku layer
+    # needs to prime.
     print(f"[{time.strftime('%H:%M:%S')}] ready")
 
     kwargs = {"model_path": Path(args.model)} if args.model else {}
