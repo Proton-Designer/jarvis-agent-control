@@ -33,6 +33,7 @@ from __future__ import annotations
 from mcp.server.mcpserver import MCPServer
 
 import tools_read
+import tools_handoff
 import tools_voice
 
 app = MCPServer(name="jarvis-l4-readonly")
@@ -46,6 +47,13 @@ spend = app.tool()(tools_read.spend)
 # transport, never touches tmux, never writes to a session, so exposing
 # it here does not weaken the read-only guarantee the split exists for.
 jarvis_say = app.tool()(tools_voice.jarvis_say)
+
+# The concierge's only way to pass work onward. Takes NO target -- the
+# router is resolved from engine.json inside the tool -- so it is not
+# the arbitrary-dispatch capability the read-only split exists to
+# withhold. See tools_handoff.py. Deliberately NOT on server.py: the
+# router has no reason to hand off to itself.
+handoff_to_router = app.tool()(tools_handoff.handoff_to_router)
 
 
 if __name__ == "__main__":

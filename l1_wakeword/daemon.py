@@ -248,79 +248,94 @@ def verify_wake_trigger(whisper: WhisperDaemon, preroll_frames: "collections.deq
 
 
 def default_deliver(text: str, orchestrator_target: str | None = None, live_deliver: bool = False, wake_score: float | None = None):
-    """Production hookup. As of 2026-08-18 this delivers the transcript
-    STRAIGHT THROUGH to the orchestrator target -- the L2.5 local-model
-    concierge is DISCONNECTED, on Ayman's decision.
+    """Production hookup. Delivers each finished dictation to whichever
+    session Ayman attached to the CONCIERGE role in the console.
 
-    Why: L2.5's only advantage over a Claude session was speed, and a
-    Haiku session measured ~2s against our local path's 1.4-2.1s. At
-    parity on the one axis it won on, everything else favours Haiku --
-    it has tools, it has conversation memory across turns (the local
-    model had NONE; every utterance was judged in total isolation, so
-    "what about the other one?" was meaningless to it), and it does not
-    fail arithmetic. Measurements behind that call are in the Lead's
-    notes and in git history around 7060a55.
+    This is the join the whole two-tier design was for. The chain is now:
 
-    The concierge code is deliberately LEFT ON DISK, intact and still
-    tested by its two canaries (chat_gate_canary.py 7/7,
-    classify_canary.py 24/24). This is a wiring change, not a deletion:
-    if the Haiku layer disappoints, reconnecting is re-importing
-    handle_transcript here. Nothing about it was found wrong -- it was
-    outgrown.
+        voice -> L1 (wake + whisper)
+              -> CONCIERGE (Haiku, read tools + jarvis_say + handoff_to_router)
+              -> ROUTER    (Sonnet, write tools, dispatches to teams)
+              -> teams
 
-    INTERIM STATE, and it is not the destination. The Haiku concierge
-    does not exist yet, so right now EVERY utterance forwards, including
-    "cancel" and "how's it going". That is deliberate: it is the
-    fail-toward-dispatch direction this project has ruled for
-    everywhere, and forwarding something trivial costs a wasted turn
-    while dropping something real is silent. Until Haiku lands, expect
-    no sub-second answers and no local chat.
+    The concierge either answers Ayman itself (~1-2s) or calls
+    handoff_to_router and returns immediately. It cannot dispatch: its MCP
+    surface has no deliver_batch and tools_write is not in its process.
 
-    ONE THING GENUINELY LOST HERE, flagged rather than buried: the
-    "was this addressed to me?" check ran LOCALLY, before anything left
-    the machine. Ayman verified it live on 2026-08-18 -- he talked ABOUT
-    Jarvis, it stayed silent and never wrote the transcript to disk. With
-    the concierge disconnected, a false wake trigger now forwards
-    whatever it overheard. verify_wake_trigger() still filters false
-    ACOUSTIC fires (it re-transcribes and rejects, and rejects a lot),
-    so this only bites when someone genuinely says "hey jarvis" near a
-    conversation that was not for Jarvis. Narrow, but real, and it is an
-    open decision for the build spec -- not a thing to discover later.
+    TARGET COMES FROM engine.json, NOT FROM A CONSTANT. The old
+    DEFAULT_ORCHESTRATOR_TARGET ("claude-orchestrator") was a hardcoded
+    name that had to match a session someone remembered to start with
+    exactly that name. Now the console owns it: whatever Ayman attached
+    is what receives his voice, and swapping the concierge in the UI
+    changes where his words go with no code change and no restart.
 
-    live_deliver=False still means nothing touches a real tmux session,
-    same contract as before and for the same reason: a smoke test once
-    delivered fake test text into a live orchestrator by accident.
+    `orchestrator_target`, if passed, still wins -- it is how the CLI and
+    the canaries drive a throwaway target without touching the real
+    engine. Production passes None.
 
-    wake_score is accepted and unused for now -- it fed the concierge's
-    NOT_ADDRESSED discard logging. Kept in the signature so callers do
-    not change and so the acoustic-false-trigger rate stays measurable
-    when the addressed check comes back at whatever layer owns it."""
+    FAILS CLOSED AND AUDIBLY, which is the point rather than a detail.
+    If no concierge is attached, or the attached one isn't running, Ayman
+    just spoke a full instruction into a system with nowhere to put it.
+    He finds out NOW, out loud, instead of discovering later that nothing
+    happened -- the failure class this project has found in six different
+    places and ruled against every time.
+
+    Note the console's own start gate (SPEC-engine-roles.md §6) already
+    refuses to open the microphone when either role is missing, so this
+    should rarely fire. "Should rarely fire" is not "cannot fire": the
+    role can die between pressing start and finishing a sentence, and a
+    guard that only holds when an earlier guard held is not a guard.
+    """
+    from say_feedback import speak, PRIORITY_HIGH  # noqa: E402
+
+    if orchestrator_target is None:
+        sys.path.insert(0, str(Path(__file__).parent.parent / "l5_console" / "state"))
+        try:
+            import engine_roles
+            record = engine_roles.get_role_record("concierge")
+            liveness = engine_roles.role_liveness("concierge")
+        except Exception as e:
+            log_event("l1_target_lookup_failed", error=str(e))
+            print(f"CONCIERGE LOOKUP FAILED: {e!r} -- nothing sent")
+            speak("I couldn't find the concierge, so nothing was sent.", priority=PRIORITY_HIGH)
+            return {"label": "NO_TARGET", "forwarded": False, "delivery": None, "retain": True}
+
+        if not record:
+            log_event("l1_no_concierge_attached")
+            print("NO CONCIERGE ATTACHED -- nothing sent")
+            speak("No concierge is attached, so I couldn't send that anywhere.", priority=PRIORITY_HIGH)
+            return {"label": "NO_TARGET", "forwarded": False, "delivery": None, "retain": True}
+
+        # `running` (bool), not a "state" string -- role_liveness()'s
+        # actual shape is {attached, running, liveness, record,
+        # tools_reachable}. I guessed "state"/"RUNNING" here first and it
+        # read as not-running for a session that was genuinely up. It
+        # failed CLOSED, which is the correct direction for a guess to
+        # fail, but it is still a guess: read the contract, don't infer it.
+        if not liveness.get("running"):
+            log_event("l1_concierge_not_running", liveness=liveness.get("liveness"))
+            print(f"CONCIERGE NOT RUNNING (liveness={liveness.get('liveness')}) -- nothing sent")
+            speak("The concierge isn't running, so I couldn't send that anywhere.", priority=PRIORITY_HIGH)
+            return {"label": "NO_TARGET", "forwarded": False, "delivery": None, "retain": True}
+
+        target = record["tmux"]
+    else:
+        target = orchestrator_target
+
     sys.path.insert(0, str(Path(__file__).parent.parent / "l4_controller"))
-    from l2_l3_handoff import deliver_transcript, DEFAULT_ORCHESTRATOR_TARGET  # noqa: E402
+    from l2_l3_handoff import deliver_transcript  # noqa: E402
     from transport import TmuxTransport  # noqa: E402
-    from instant_ack import speak_instant_ack  # noqa: E402
 
-    # SPEC-orchestration.md SS1.1: fires before ANYTHING else below --
-    # this is the earliest point after "that's it" where the final
-    # transcript exists, so it's the right hook regardless of what
-    # currently sits downstream (today: a direct forward; once the Haiku
-    # concierge lands, this stays the first line and the concierge
-    # invocation becomes what follows it, not what precedes it).
-    if live_deliver:
-        speak_instant_ack(text)
-
-    target = orchestrator_target or DEFAULT_ORCHESTRATOR_TARGET
     if not live_deliver:
         print(f"(live_deliver=False: NOT forwarding to {target!r} -- would send: {text!r})")
         return {"label": "FORWARDED", "forwarded": False, "delivery": None, "retain": True}
 
     delivery = deliver_transcript(text, TmuxTransport(), orchestrator_target=target)
     # "forwarded" means actually delivered, never merely attempted --
-    # deliver_transcript returns None on a real failure (no jarvis-l4
-    # tools connected), and reporting that as success is precisely the
-    # silence-read-as-success failure this project keeps finding.
+    # deliver_transcript returns None on a real failure, and reporting
+    # that as success is precisely the silence-read-as-success failure.
     delivered = delivery is not None and getattr(delivery, "ok", False)
-    log_event("l1_direct_forward", forwarded=delivered, chars=len(text))
+    log_event("l1_to_concierge", forwarded=delivered, target=target, chars=len(text))
     return {"label": "FORWARDED", "forwarded": delivered, "delivery": delivery, "retain": True}
 
 

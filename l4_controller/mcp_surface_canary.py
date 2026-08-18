@@ -62,6 +62,10 @@ def run() -> int:
 
     full_names = asyncio.run(_tool_names(server.app))
     ro_names = asyncio.run(_tool_names(server_readonly.app))
+    # The tool OBJECTS, not just names -- the handoff schema check below
+    # needs the published inputSchema, which is what a model actually
+    # sees and can fill in.
+    ro_tools = asyncio.run(server_readonly.app.list_tools())
 
     expected_full = {
         "jarvis_say",
@@ -80,11 +84,11 @@ def run() -> int:
     # tool is added, which is how it caught jarvis_say landing on the
     # read-only surface in the first place. A subset check would have said
     # nothing, and the next addition would arrive unnoticed.
-    expected_ro = {"list_sessions", "session_activity", "spend", "jarvis_say"}
+    expected_ro = {"list_sessions", "session_activity", "spend", "jarvis_say", "handoff_to_router"}
 
     check("full surface has all nine tools", full_names == expected_full, detail=f"got {sorted(full_names)}")
     check(
-        "read-only surface has exactly its three read tools plus jarvis_say",
+        "read-only surface has exactly its three read tools plus jarvis_say and handoff_to_router",
         ro_names == expected_ro,
         detail=f"got {sorted(ro_names)}",
     )
@@ -102,6 +106,31 @@ def run() -> int:
         "the read-only server's tool manager has no entry for 'deliver_batch' under any lookup",
         asyncio.run(_get_tool_or_none(server_readonly.app, "deliver_batch")) is None,
     )
+
+        # THE actual safety property for handoff_to_router, and the reason it
+    # is allowed on this surface at all: the caller cannot choose a
+    # recipient. The router is resolved from engine.json inside the tool.
+    # If a target/session parameter ever appears in this schema, the
+    # concierge has silently gained arbitrary dispatch and the entire
+    # read-only split is void -- so assert on the PUBLISHED SCHEMA, which
+    # is what a model actually sees and can fill in, rather than on the
+    # Python signature.
+    handoff = next((t for t in ro_tools if t.name == "handoff_to_router"), None)
+    check("handoff_to_router is published on the concierge surface", handoff is not None)
+    if handoff is not None:
+        props = set((handoff.input_schema or {}).get("properties", {}))
+        forbidden = {"target", "session", "session_id", "tmux", "orchestrator_target", "to", "destination"}
+        leaked = props & forbidden
+        check(
+            "handoff_to_router exposes NO target parameter -- the destination is not caller-chosen",
+            not leaked,
+            detail=f"schema properties = {sorted(props)}; forbidden present = {sorted(leaked)}",
+        )
+        check(
+            "handoff_to_router takes only the transcript",
+            props == {"transcript"},
+            detail=f"got {sorted(props)}",
+        )
 
     print("\n2. import graph -- a Haiku-only process never loads tools_write.py")
     # Deliberately a FRESH subprocess, not this process's sys.modules: this
