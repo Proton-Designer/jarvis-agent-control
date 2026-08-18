@@ -288,6 +288,29 @@ def default_deliver(text: str, orchestrator_target: str | None = None, live_deli
     """
     from say_feedback import speak, PRIORITY_HIGH  # noqa: E402
 
+    # INSTANT ACK, before anything else -- SPEC-orchestration.md §1.1.
+    # Templated, zero inference, ~0ms, so there is never silence between
+    # "that's it" and a reply that takes 1-2s to come back from a network
+    # call. It states RECEIPT only and never an outcome.
+    #
+    # Restored 2026-08-18: I dropped this when I rewrote default_deliver()
+    # to target the concierge role, replacing the whole function body and
+    # losing ue6rruxg's §1.1 work with it. instant_ack_canary.py caught it
+    # immediately, which is exactly what it was written for -- the ack is
+    # invisible when present and inaudible when missing, so nothing else
+    # would have noticed until Ayman sat through the silence himself.
+    #
+    # Fires only on a real dispatch (live_deliver), same gate as before,
+    # so smoke tests and dry runs stay silent.
+    if live_deliver:
+        try:
+            sys.path.insert(0, str(Path(__file__).parent.parent / "l4_controller"))
+            from instant_ack import speak_instant_ack  # noqa: E402
+            speak_instant_ack(text)
+        except Exception as e:
+            # Never let the courtesy layer break the dispatch it precedes.
+            log_event("instant_ack_failed", error=str(e))
+
     if orchestrator_target is None:
         sys.path.insert(0, str(Path(__file__).parent.parent / "l5_console" / "state"))
         try:

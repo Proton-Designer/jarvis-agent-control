@@ -9,7 +9,10 @@
       "mcp__jarvis-l4__deliver_batch",
       "mcp__jarvis-l4__list_teams",
       "mcp__jarvis-l4__register_team_by_adoption",
-      "mcp__jarvis-l4__register_team_fresh"
+      "mcp__jarvis-l4__register_team_fresh",
+      "Read(//Users/aymanmohammed/.jarvis/**)",
+      "Write(//Users/aymanmohammed/.jarvis/**)",
+      "Edit(//Users/aymanmohammed/.jarvis/**)"
     ],
     "deny": []
   },
