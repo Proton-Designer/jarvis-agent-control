@@ -468,6 +468,41 @@ This is a supplement to the polling architecture, not a replacement for the clas
 logic — exactly the distinction the Lead asked to have determined. It would change *when* L4
 decides to call `capture-pane`, not *what it does* with the result.
 
+### Required hardening before this ever ships: a silent-death fallback
+
+A persistent control-mode connection is a long-lived stateful thing that **can die
+silently.** If it does, `%output` simply stops arriving — no error, no exception, just no
+more wake signals. Every pane then looks permanently unchanged, and anything built on this
+would show stale state **while appearing perfectly healthy.** This is the same failure shape
+as the toolless orchestrator, the fail-open cancel socket, and the held-instruction
+resurrection-from-memory bug found earlier this project: silence read as "nothing happening"
+when it actually means "the channel is gone."
+
+So, whenever this is built: **timer-based polling stays as a permanent fallback, not a
+migration path to remove.** The event stream is an optimization layered over a floor that
+still works on its own, never a replacement for that floor. Concretely: heartbeat the
+connection, and if it drops or goes quiet past a threshold, fall back to the current-interval
+polling automatically *and* surface the degraded state visibly — absence of events must never
+be indistinguishable from absence of change.
+
+### Decision: deferred, not built now
+
+**Not building this yet, and not retrofitting L4 with it.** The current timer-based polling
+is fine at Ayman's actual scale — a handful of panes checked every couple of seconds is
+negligible load, and the k9s dual-clock principle means redraws would happen at ~2s
+regardless of the underlying data-source mechanism. L4 keeps exactly what it has; there's no
+reason to touch working, canary-guarded code for a win that doesn't matter yet at this scale.
+
+The real consumer of this design is **the TUI's state layer**, once built — it's the thing
+that needs continuous liveness across many panes without pegging a CPU, which is where the
+"eliminates polling overhead when nothing's changing" property actually pays for itself.
+Build it there, once, when the TUI is built — including the fallback requirement above from
+day one, not bolted on after a silent-failure incident.
+
+Recording this explicitly so a future reader sees "feasible, confirmed working" and correctly
+reads it as "the right building block for later," not as "should already be done" — the
+absence of an implementation here is a deliberate scope decision, not an oversight.
+
 ### Sources
 - `man tmux`, CONTROL MODE section (local, tmux 3.7b) — the authoritative protocol reference;
   the `%output`/octal-escaping and `%subscription-changed`/format-subscription behavior
