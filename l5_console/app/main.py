@@ -80,6 +80,7 @@ class JarvisConsole(App):
     BINDINGS = [
         ("a", "add_team", "Add team"),
         ("r", "reconnect", "Reconnect"),
+        ("q", "quit", "Quit"),
     ]
 
     def action_add_team(self) -> None:

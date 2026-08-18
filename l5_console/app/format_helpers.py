@@ -13,9 +13,25 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent / "state"))
 from models import LIVENESS_RUNNING, LIVENESS_STOPPED, LIVENESS_LOST  # noqa: E402
 
+# Same palette as docs/console-design-studies.html's mockups (the Lead's
+# "match the design, don't approximate it" instruction) -- exact hex
+# values, not Textual theme tokens, because these are used inside Rich
+# Text objects passed to Static.update(), which render independent of
+# the app's CSS theme resolution.
+COLOR_OK = "#46C07A"
+COLOR_WARN = "#E0A34A"
+COLOR_ERR = "#EE6055"
+COLOR_ACCENT = "#4FD6E0"
+COLOR_DIM = "#6B7688"
+COLOR_INK = "#C9D2DE"
+
 
 def liveness_icon(liveness: str) -> str:
     return {LIVENESS_RUNNING: "●", LIVENESS_STOPPED: "○", LIVENESS_LOST: "✕"}.get(liveness, "?")
+
+
+def liveness_color(liveness: str) -> str:
+    return {LIVENESS_RUNNING: COLOR_OK, LIVENESS_STOPPED: COLOR_DIM, LIVENESS_LOST: COLOR_ERR}.get(liveness, COLOR_DIM)
 
 
 def team_liveness(team) -> str:

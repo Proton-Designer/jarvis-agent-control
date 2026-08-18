@@ -8,19 +8,29 @@ import) -- never holds its own copy of truth between polls. Every
 section checks staleness.is_stale() against its own polled_at/
 expected_interval before deciding how to render, per the contract's
 governing rule: a stopped poller must never look identical to a live one.
+
+Visual pass against docs/console-design-studies.html: flat dim-label/
+bright-value rows (not full bordered panels -- Rail's mockup keeps the
+status block plain and reserves a border for the one thing worth
+framing, recent activity), same palette and Footer as console.py so
+the two densities read as one application, not two.
 """
 from __future__ import annotations
 
 import time
 
+from rich.text import Text
 from textual.app import ComposeResult
 from textual.containers import Vertical, VerticalScroll
 from textual.widget import Widget
-from widgets import PlainStatic
+from widgets import PlainStatic, Footer
 
 from staleness import is_stale
 from stream import StreamReader
-from format_helpers import liveness_icon, team_liveness
+from format_helpers import (
+    liveness_icon, liveness_color, team_liveness,
+    COLOR_OK, COLOR_WARN, COLOR_ERR, COLOR_ACCENT, COLOR_DIM, COLOR_INK,
+)
 from meter import Meter
 
 import sys
@@ -31,15 +41,11 @@ from models import JarvisState, LIVENESS_RUNNING  # noqa: E402
 RAIL_ACTIVITY_MAX_LINES = 30
 
 
-def _staleness_suffix(polled_at: float, expected_interval: float) -> str:
-    """Appended to any status line whose backing data is stale -- never a
-    subtle color change alone (SPEC-TUI.md §7: "better to look broken
-    while broken than healthy while stale"). Text that survives a
-    no-color terminal and a quick glance both."""
-    return " [STALE]" if is_stale(polled_at, expected_interval) else ""
+def _staleness_suffix() -> str:
+    return " [STALE]"
 
 
-def _wake_line(wake) -> str:
+def _wake_line(wake) -> Text:
     """The one line in this whole app that carries a real safety
     property (SPEC-TUI.md §7): it reflects state.wake.running, which
     itself only ever reflects a real pgrep of the daemon process --
@@ -47,12 +53,12 @@ def _wake_line(wake) -> str:
     of what it last did. If the underlying poll is stale, that's shown
     explicitly rather than trusting the last-known running value."""
     if wake.error:
-        return f"⚠ wake: error -- {wake.error}"
+        return Text(f"⚠ wake: error -- {wake.error}", style=COLOR_ERR)
     if is_stale(wake.polled_at, wake.expected_interval):
-        return f"? wake: unknown (data stale, last checked {time.time() - wake.polled_at:.0f}s ago)"
-    icon = "●" if wake.running else "○"
-    label = "listening" if wake.running else "stopped"
-    return f"{icon} wake: {label}"
+        return Text(f"? wake: unknown (data stale, last checked {time.time() - wake.polled_at:.0f}s ago)", style=COLOR_WARN)
+    if wake.running:
+        return Text("● LISTENING", style=f"bold {COLOR_OK}")
+    return Text("○ wake: stopped", style=COLOR_DIM)
 
 
 class RailWake(PlainStatic):
@@ -63,28 +69,38 @@ class RailWake(PlainStatic):
 class RailOrchestrator(PlainStatic):
     def update_state(self, orch) -> None:
         if orch.error:
-            self.update(f"⚠ orchestrator: error -- {orch.error}")
+            self.update(Text(f"⚠ orchestrator: error -- {orch.error}", style=COLOR_ERR))
             return
-        icon = liveness_icon(orch.liveness)
-        tools = "tools ok" if orch.tools_reachable else "NO TOOLS"
-        suffix = _staleness_suffix(orch.polled_at, orch.expected_interval)
-        self.update(f"{icon} orchestrator: {orch.liveness} · {tools}{suffix}")
+        text = Text()
+        text.append("orchestrator  ", style=COLOR_DIM)
+        text.append(f"{liveness_icon(orch.liveness)} {orch.liveness}", style=liveness_color(orch.liveness))
+        if not orch.tools_reachable:
+            text.append("  ⚠ no tools", style=COLOR_WARN)
+        if is_stale(orch.polled_at, orch.expected_interval):
+            text.append(_staleness_suffix(), style=COLOR_WARN)
+        self.update(text)
 
 
 class RailTeams(PlainStatic):
     def update_state(self, teams: list, teams_error, polled_at, expected_interval) -> None:
         if teams_error:
-            self.update(f"⚠ teams: error -- {teams_error}")
+            self.update(Text(f"⚠ teams: error -- {teams_error}", style=COLOR_ERR))
             return
+        text = Text()
+        text.append("sessions      ", style=COLOR_DIM)
         if not teams:
-            self.update("teams: none configured")
+            text.append("none configured", style=COLOR_DIM)
+            self.update(text)
             return
         live = sum(1 for t in teams if any(m.liveness == LIVENESS_RUNNING for m in t.members))
-        suffix = _staleness_suffix(polled_at, expected_interval)
-        lines = [f"teams: {len(teams)} ({live} live){suffix}"]
+        text.append(f"{len(teams)} team(s)", style=COLOR_INK)
+        text.append(f"  {live} live", style=COLOR_OK if live else COLOR_DIM)
+        if is_stale(polled_at, expected_interval):
+            text.append(_staleness_suffix(), style=COLOR_WARN)
         for t in teams:
-            lines.append(f"  {liveness_icon(team_liveness(t))} {t.id} ({len(t.members)})")
-        self.update("\n".join(lines))
+            text.append(f"\n  {liveness_icon(team_liveness(t))} {t.id}", style=liveness_color(team_liveness(t)))
+            text.append(f" ({len(t.members)})", style=COLOR_DIM)
+        self.update(text)
 
 
 class RailRuntime(PlainStatic):
@@ -93,14 +109,21 @@ class RailRuntime(PlainStatic):
 
     def update_state(self, runtime) -> None:
         if runtime.error:
-            self.update(f"runtime: error -- {runtime.error}")
+            self.update(Text(f"runtime: error -- {runtime.error}", style=COLOR_ERR))
             return
         models = ", ".join(runtime.models_resident) if runtime.models_resident else "none warm"
         mem = f"{runtime.memory_free_pct:.0f}% free" if runtime.memory_free_pct is not None else "mem ?"
-        suffix = _staleness_suffix(runtime.polled_at, runtime.expected_interval)
-        spend_suffix = _staleness_suffix(runtime.spend_polled_at, runtime.spend_expected_interval)
         spend = runtime.spend["summary"] if runtime.spend and runtime.spend.get("ok") else "spend ?"
-        self.update(f"runtime: {models} · {mem}{suffix}\n  {spend}{spend_suffix}")
+        text = Text()
+        text.append("model         ", style=COLOR_DIM)
+        text.append(models, style=COLOR_DIM)
+        text.append(f"  {mem}", style=COLOR_DIM)
+        if is_stale(runtime.polled_at, runtime.expected_interval):
+            text.append(_staleness_suffix(), style=COLOR_WARN)
+        text.append(f"\n  {spend}", style=COLOR_DIM)
+        if is_stale(runtime.spend_polled_at, runtime.spend_expected_interval):
+            text.append(_staleness_suffix(), style=COLOR_WARN)
+        self.update(text)
 
 
 class RailUnassigned(PlainStatic):
@@ -108,7 +131,7 @@ class RailUnassigned(PlainStatic):
         if not unassigned:
             self.update("")
             return
-        self.update(f"⚑ {len(unassigned)} unassigned session(s) -- press 'a' to adopt")
+        self.update(Text(f"⚑ {len(unassigned)} unassigned session(s) -- press 'a' to adopt", style=COLOR_WARN))
 
 
 class Rail(Widget):
@@ -127,8 +150,10 @@ class Rail(Widget):
     }
     #rail_activity {
         height: 1fr;
-        border-top: solid $panel;
+        border: solid $panel;
         margin-top: 1;
+        padding: 0 1;
+        border-title-color: $text-muted;
     }
     """
 
@@ -146,8 +171,11 @@ class Rail(Widget):
             yield RailTeams(id="rail_teams")
             yield RailRuntime(id="rail_runtime")
             yield RailUnassigned(id="rail_unassigned")
-        with VerticalScroll(id="rail_activity"):
+        activity = VerticalScroll(id="rail_activity")
+        activity.border_title = "RECENT"
+        with activity:
             yield PlainStatic("", id="rail_activity_body")
+        yield Footer()
 
     def update_state(self, state: JarvisState) -> None:
         self.query_one("#rail_wake", RailWake).update_state(state.wake)

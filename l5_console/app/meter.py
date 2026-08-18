@@ -12,7 +12,9 @@ render the same level differently.
 """
 from __future__ import annotations
 
+from rich.text import Text
 from widgets import PlainStatic
+from format_helpers import COLOR_ACCENT, COLOR_DIM, COLOR_WARN
 
 METER_CHARS = "▁▂▃▄▅▆▇█"
 
@@ -46,16 +48,28 @@ class Meter(PlainStatic):
 
     def update_meter(self, wake_running: bool, wake_state) -> None:
         if not wake_running:
-            self.update("mic  " + "·" * self._bar_width + "  (not listening)")
+            text = Text("mic  ", style=COLOR_DIM)
+            text.append("·" * self._bar_width, style=COLOR_DIM)
+            text.append("  (not listening)", style=COLOR_DIM)
+            self.update(text)
             return
         if wake_state is None:
-            self.update("mic  " + "?" * self._bar_width + "  (no data)")
+            text = Text("mic  ", style=COLOR_DIM)
+            text.append("?" * self._bar_width, style=COLOR_WARN)
+            text.append("  (no data)", style=COLOR_DIM)
+            self.update(text)
             return
         if wake_state.stale:
-            self.update("mic  " + "?" * self._bar_width + "  (STALE -- meter has stopped updating)")
+            text = Text("mic  ", style=COLOR_DIM)
+            text.append("?" * self._bar_width, style=COLOR_WARN)
+            text.append("  (STALE -- meter has stopped updating)", style=COLOR_WARN)
+            self.update(text)
             return
         bar = render_bar(wake_state.level, self._bar_width)
         label = {"IDLE": "listening", "CAPTURING": "dictating", "CANCEL_ARMED": "cancel window"}.get(
             wake_state.state, wake_state.state
         )
-        self.update(f"mic  {bar}  {label}")
+        text = Text("mic  ", style=COLOR_DIM)
+        text.append(bar, style=f"bold {COLOR_ACCENT}")
+        text.append(f"  {label}", style=COLOR_DIM)
+        self.update(text)

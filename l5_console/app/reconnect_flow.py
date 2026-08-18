@@ -32,13 +32,15 @@ class ReconnectScreen(Screen):
 
     DEFAULT_CSS = """
     ReconnectScreen { align: center middle; background: $surface; }
-    #reconnect_body { width: 70; height: auto; max-height: 90%; border: solid $primary; padding: 2; }
+    #reconnect_body { width: 70; height: auto; max-height: 90%; border: solid $primary; padding: 2; border-title-color: $text-muted; }
     #reconnect_body Button { margin-top: 1; }
     #reconnect_body ListView { height: auto; max-height: 12; margin-top: 1; }
     """
 
     def compose(self) -> ComposeResult:
-        yield Vertical(id="reconnect_body")
+        body = Vertical(id="reconnect_body")
+        body.border_title = "RECONNECT"
+        yield body
 
     async def on_mount(self) -> None:
         await self._show_team_list()

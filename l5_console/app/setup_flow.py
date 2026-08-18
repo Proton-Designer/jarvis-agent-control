@@ -60,7 +60,7 @@ class SetupScreen(Screen):
 
     DEFAULT_CSS = """
     SetupScreen { align: center middle; background: $surface; }
-    #setup_body { width: 70; height: auto; max-height: 90%; border: solid $primary; padding: 2; }
+    #setup_body { width: 70; height: auto; max-height: 90%; border: solid $primary; padding: 2; border-title-color: $text-muted; }
     #setup_body Button { margin-top: 1; }
     #setup_body Input { margin-top: 1; }
     #setup_body ListView { height: auto; max-height: 12; margin-top: 1; }
@@ -94,7 +94,7 @@ class SetupScreen(Screen):
     async def _show_kind_step(self) -> None:
         await self._clear()
         body = self._body()
-        await body.mount(PlainStatic("Add a team -- which kind?"))
+        body.border_title = "STEP 1 — WHICH"
         adopt_button = Button("Adopt agents already running", id="kind_adopt")
         await body.mount(adopt_button)
         await body.mount(Button("Start a fresh team", id="kind_fresh"))
@@ -113,6 +113,7 @@ class SetupScreen(Screen):
     async def _show_adopt_group_step(self) -> None:
         await self._clear()
         body = self._body()
+        body.border_title = "STEP 1 — ADOPT · WHICH DIRECTORY"
         current = state.get_state()
         groups: dict[str, list] = {}
         for u in current.unassigned:
@@ -153,7 +154,8 @@ class SetupScreen(Screen):
     async def _show_fresh_params_step(self) -> None:
         await self._clear()
         body = self._body()
-        await body.mount(PlainStatic("New team -- target directory:"))
+        body.border_title = "STEP 1 — FRESH · TARGET DIRECTORY"
+        await body.mount(PlainStatic("Target directory:"))
         root_input = Input(placeholder="/path/to/project", id="fresh_root")
         await body.mount(root_input)
         await body.mount(PlainStatic("How many agents?"))
@@ -230,7 +232,7 @@ class SetupScreen(Screen):
     async def _show_inbox_step(self) -> None:
         await self._clear()
         body = self._body()
-        await body.mount(PlainStatic("Who receives instructions? (the inbox)"))
+        body.border_title = "STEP 2 — WHO RECEIVES INSTRUCTIONS"
         listview = ListView(id="inbox_list")
         await body.mount(listview)
         for c in self.candidates:
@@ -250,6 +252,7 @@ class SetupScreen(Screen):
     async def _show_alias_step(self) -> None:
         await self._clear()
         body = self._body()
+        body.border_title = "STEP 3 — WHAT DO YOU CALL IT"
         default_id = _slugify(Path(self.root).name) if self.root else "team"
         await body.mount(PlainStatic("Team id (short, no spaces):"))
         id_input = Input(value=default_id, id="team_id_input")

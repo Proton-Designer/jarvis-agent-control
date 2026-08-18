@@ -19,10 +19,35 @@ project's own governing rules argue against).
 """
 from __future__ import annotations
 
+from rich.text import Text
 from textual.widgets import Static
+
+from format_helpers import COLOR_ACCENT, COLOR_DIM
 
 
 class PlainStatic(Static):
     def __init__(self, *args, **kwargs) -> None:
         kwargs.setdefault("markup", False)
         super().__init__(*args, **kwargs)
+
+
+class Footer(PlainStatic):
+    """The keybind bar the Lead flagged as missing entirely (docs/
+    console-design-studies.html). Shows this app's REAL bindings
+    (main.py's BINDINGS), not a copy of the mockup's illustrative footer
+    text, since the mockup covered a broader set of view-switching keys
+    this build doesn't implement. Shared between rail.py and console.py
+    so the two densities can't drift on what the keys actually do."""
+
+    DEFAULT_CSS = "Footer { height: 1; color: $text-muted; }"
+
+    KEYBINDS = [("a", "add team"), ("r", "reconnect"), ("q", "quit")]
+
+    def on_mount(self) -> None:
+        text = Text()
+        for i, (key, label) in enumerate(self.KEYBINDS):
+            if i:
+                text.append("   ")
+            text.append(f"[{key}]", style=f"bold {COLOR_ACCENT}")
+            text.append(f" {label}", style=COLOR_DIM)
+        self.update(text)

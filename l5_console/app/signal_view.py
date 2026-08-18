@@ -13,17 +13,21 @@ detail is a distraction from the one question it exists to answer.
 """
 from __future__ import annotations
 
+from rich.text import Text
 from textual.app import ComposeResult
 from textual.containers import Vertical
 from textual.widget import Widget
 
 from meter import Meter
 from widgets import PlainStatic
+from format_helpers import COLOR_OK, COLOR_WARN, COLOR_DIM
 
 SIGNAL_METER_WIDTH = 40
 
 
 class Signal(Widget):
+    BORDER_TITLE = "STATE"
+
     DEFAULT_CSS = """
     Signal {
         width: 100%;
@@ -35,6 +39,9 @@ class Signal(Widget):
         width: 100%;
         height: auto;
         align: center middle;
+        border: solid $panel;
+        padding: 2 4;
+        border-title-color: $text-muted;
     }
     #signal_state {
         text-align: center;
@@ -52,7 +59,9 @@ class Signal(Widget):
     """
 
     def compose(self) -> ComposeResult:
-        with Vertical():
+        panel = Vertical()
+        panel.border_title = "STATE"
+        with panel:
             yield PlainStatic("", id="signal_state")
             yield Meter(id="signal_meter", width=SIGNAL_METER_WIDTH)
             yield PlainStatic('say "hey jarvis" again, or pause, to stop', id="signal_hint")
@@ -64,7 +73,7 @@ class Signal(Widget):
             # main.py's should_show_signal -- these are defensive, not
             # the normal path), but if it somehow renders anyway, it must
             # not claim a dictation is happening.
-            state_line.update("? state unknown")
+            state_line.update(Text("? state unknown", style=f"bold {COLOR_WARN}"))
         else:
-            state_line.update("● DICTATING -- listening")
+            state_line.update(Text("● DICTATING -- listening", style=f"bold {COLOR_OK}"))
         self.query_one("#signal_meter", Meter).update_meter(wake_running, wake_state)
