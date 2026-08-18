@@ -38,8 +38,6 @@ from __future__ import annotations
 
 import json
 import sys
-import time
-from dataclasses import asdict
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent.parent / "l4_controller"))
@@ -85,7 +83,7 @@ def _has_history(root: str, claude_session: str) -> bool:
     return jsonl_path.exists()
 
 
-def _member_liveness(root: str, member: dict, live_by_name: dict[str, dict]) -> tuple[str, str | None, str | None]:
+def member_liveness(root: str, member: dict, live_by_name: dict[str, dict]) -> tuple[str, str | None, str | None]:
     """Returns (liveness, tmux_binding, activity). tmux_binding is the
     CURRENT tmux name if genuinely running, else None."""
     stored_tmux = member.get("tmux")
@@ -125,7 +123,7 @@ def discover_teams_and_unassigned() -> tuple[list[Team], list[UnassignedSession]
     for entry in registry:
         members: list[TeamMember] = []
         for m in entry.get("members", []):
-            liveness, tmux_binding, activity = _member_liveness(entry["root"], m, live_by_name)
+            liveness, tmux_binding, activity = member_liveness(entry["root"], m, live_by_name)
             if tmux_binding:
                 claimed_tmux_names.add(tmux_binding)
             members.append(
