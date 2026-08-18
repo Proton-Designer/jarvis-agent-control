@@ -43,6 +43,8 @@ from rail import Rail  # noqa: E402
 from console import Console  # noqa: E402
 from signal_view import Signal  # noqa: E402
 from wake_state import read_wake_state  # noqa: E402
+from setup_flow import SetupScreen  # noqa: E402
+from reconnect_flow import ReconnectScreen  # noqa: E402
 
 sys.path.insert(0, str(Path(__file__).parent.parent / "state"))
 import api as state  # noqa: E402
@@ -61,6 +63,16 @@ RAIL_CONSOLE_BREAKPOINT = 60
 class JarvisConsole(App):
     TITLE = "Jarvis"
     CSS_PATH = "app.tcss"
+    BINDINGS = [
+        ("a", "add_team", "Add team"),
+        ("r", "reconnect", "Reconnect"),
+    ]
+
+    def action_add_team(self) -> None:
+        self.push_screen(SetupScreen())
+
+    def action_reconnect(self) -> None:
+        self.push_screen(ReconnectScreen())
 
     def __init__(self, *args, **kwargs) -> None:
         super().__init__(*args, **kwargs)
