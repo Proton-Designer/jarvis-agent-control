@@ -17,15 +17,15 @@ at most one local model call + a non-blocking speak()) before daemon.py
 returns to listening is the deliberate, measured-latency design -- same
 precedent as verify_wake_trigger's ~0.5s block on the START side.
 
-NOT_ADDRESSED (SPEC-L2.5's sixth intent class) is wired as a retention
-decision on top of CHAT, not a 7th label: CHAT already never speaks or
-forwards, so the only thing left to decide for a CHAT-classified
-transcript is whether it survives to disk at all. See
-classifier.assess_retention() for the (deliberately asymmetric)
-confidence bar, and daemon.py's _report_and_deliver -- the chunk-log
-write now happens AFTER this decision, not before, so a discarded
-transcript is never written in the first place rather than being written
-then deleted.
+NOT_ADDRESSED (SPEC-L2.5's sixth intent class) is wired as a decision on
+top of CHAT, not a 7th label. It answers two questions from one model
+call: whether the transcript survives to disk, and -- since 2026-08-18 --
+whether Jarvis answers it aloud. A CHAT transcript still never forwards
+to L3. See classifier.assess_retention() for the (deliberately
+asymmetric) retention bar and the speech gate's rationale, and daemon.py's
+_report_and_deliver -- the chunk-log write happens AFTER this decision,
+not before, so a discarded transcript is never written in the first place
+rather than being written then deleted.
 """
 from __future__ import annotations
 
@@ -43,7 +43,7 @@ from transport import TmuxTransport  # noqa: E402
 
 sys.path.insert(0, str(Path(__file__).parent))
 from classifier import assess_retention, classify, Classification, CONTROL, QUERY, CHAT, DISPATCH, UNSURE  # noqa: E402
-from ollama_client import phrase_answer  # noqa: E402
+from ollama_client import phrase_answer, phrase_chat_reply  # noqa: E402
 from session_match import resolve_session as _resolve_session  # noqa: E402
 
 # In-process only, one dictation handled fully before the next starts
@@ -60,6 +60,70 @@ def _phrase(kind: str, facts: str = "") -> str:
     never anything Ayman said."""
     response, elapsed_ms = phrase_answer(kind, facts)
     log_event("concierge_phrase", kind=kind, elapsed_ms=round(elapsed_ms, 1))
+    return response
+
+
+def _chat_facts() -> str:
+    """The deterministic-before-model rule (SPEC-L2.5 requirement 1),
+    applied to small talk. Everything here is code-computed from a real
+    provider call; the phrasing model sees ONLY this string and never
+    the transcript, exactly as in _handle_query.
+
+    Why CHAT gets facts at all, when it used to be told it had none:
+    "how's it going" is the single most natural thing to say to a system
+    like this, and a Jarvis that cannot answer it with anything real is
+    a text-to-speech toy. The anti-fabrication rule was never "the model
+    must know nothing" -- it is "the model must not be the SOURCE of a
+    fact." Passing it a code-computed fact string satisfies that rule as
+    completely here as it does for QUERY.
+
+    A provider failure must produce "unknown," never "nothing" -- an
+    empty session list and an unreachable tmux look identical from the
+    model's side, and silently reporting the second as the first is the
+    exact silence-read-as-success failure this project keeps finding.
+    See PHRASE_SYSTEM_CHAT, which is told not to round unknown down to
+    nothing."""
+    parts: list[str] = []
+    try:
+        sessions = list_sessions()
+    except Exception as e:
+        log_event("concierge_chat_facts_error", source="list_sessions", error=str(e))
+        parts.append("current session state is UNKNOWN (could not be read)")
+    else:
+        if sessions:
+            names = ", ".join(s.get("alias") or s["session_id"] for s in sessions)
+            parts.append(f"{len(sessions)} agent session(s) running: {names}")
+        else:
+            parts.append("no agent sessions are running right now")
+
+    try:
+        state = dispatch_state()
+    except Exception as e:
+        log_event("concierge_chat_facts_error", source="dispatch_state", error=str(e))
+        state = None
+    else:
+        if state is None:
+            parts.append("nothing has been dispatched yet this session")
+        elif state.get("stage") == "complete":
+            parts.append("the last dispatch has finished")
+        else:
+            parts.append("a dispatch is still in progress")
+
+    return "\n".join(parts)
+
+
+def _handle_chat(text: str) -> str:
+    """The one handler that passes the transcript to a model, via
+    phrase_chat_reply() -- see its docstring for the three upstream
+    gates that make that safe and the residual risk it does not close.
+    _handle_query deliberately still does not, and phrase_answer() now
+    asserts QUERY-only so the two paths cannot converge by accident.
+
+    A reply to a greeting has to have heard the greeting; the first
+    build of this spoke deterministic state at Ayman no matter what he
+    said, which answered nothing."""
+    response, elapsed_ms = phrase_chat_reply(text, _chat_facts())
+    log_event("concierge_phrase", kind=CHAT, elapsed_ms=round(elapsed_ms, 1))
     return response
 
 
@@ -207,33 +271,90 @@ def handle_transcript(
         return {"label": result.label, "forwarded": delivered, "delivery": delivery}
 
     if result.label == CHAT:
-        # GUARD: never speak on CHAT. A false wake-word trigger on
-        # ambient conversation reaching this far would otherwise make
-        # Jarvis audibly interject an opinion into a conversation that
-        # was never addressed to it -- not recoverable the way staying
-        # silent is (Ayman can always ask again if he actually wanted an
-        # answer). Classified and logged, not silently dropped -- just
-        # not spoken. CONTROL and QUERY still speak: both are
-        # unambiguously addressed to the system, unlike CHAT, where "was
-        # this even meant for me?" is exactly what's unresolved. Skips
-        # the phrase-generation model call entirely too -- nothing needs
-        # an answer nobody will hear.
+        # GATE: speak on CHAT only when the transcript was positively
+        # judged ADDRESSED. This replaced an unconditional never-speak
+        # guard on 2026-08-18, and the distinction is the entire point.
         #
-        # NOT_ADDRESSED: the retention question this guard doesn't answer
-        # on its own. assess_retention() decides whether the transcript
-        # is worth keeping on disk at all -- see its docstring for the
-        # asymmetric confidence bar (discard only on high confidence,
-        # default to keep). Logged as an EVENT, never the content: only
-        # the decision, the reason (itself never the transcript text),
-        # char count, and the acoustic wake score for measuring the real
-        # false-trigger rate over time.
-        retain, reason = assess_retention(text)
+        # The original guard was protecting against one specific thing:
+        # a false wake-word trigger on ambient conversation making Jarvis
+        # audibly interject into a conversation that was never addressed
+        # to it -- not recoverable the way staying silent is. That
+        # concern was and remains correct. What was wrong was the
+        # discriminator: keying on the CHAT *label* answers "is this
+        # small talk?", when the question the guard actually needed
+        # answered is "was this said to me?" Those come apart exactly at
+        # the case that matters, and Ayman hit it live -- he said "What's
+        # up? How's it going?" straight at the microphone, the system
+        # ran assess_addressed(), got ADDRESSED in 624ms, and stayed
+        # silent anyway, because the verdict was only ever consumed by
+        # the retention decision. It computed the right answer and threw
+        # it away.
+        #
+        # THRESHOLD: silent on AMBIENT, and on the imperative
+        # short-circuit's None. UNSURE speaks. That is a deliberately
+        # LOWER bar than the retention decision applies to the very same
+        # verdict, and the two differing is the design, not an
+        # inconsistency -- assess_addressed() returns three-way evidence
+        # and each consumer sets its own threshold from its own cost
+        # asymmetry:
+        #   - Retention discards only on AMBIENT, because a wrong
+        #     discard is irreversible: there is no artifact left to
+        #     diagnose from.
+        #   - Speech stays silent only on AMBIENT, because a wrong
+        #     sentence is one recoverable utterance, while a wrong
+        #     silence is the failure Ayman actually hit and had no way
+        #     to tell from a crash.
+        # Measured, not assumed: "Hello. How are you doing?" -- his own
+        # example -- verdicts UNSURE, every time. A bare greeting IS
+        # ambiguous in isolation and the model is right to say so; a
+        # gate that required ADDRESSED would have stayed mute on the
+        # exact sentence this whole change exists to answer.
+        #
+        # What still protects the original concern: reaching here at all
+        # required daemon.py's verify_wake_trigger() to re-transcribe
+        # the trigger audio and positively confirm "hey jarvis" was
+        # spoken (a rejected trigger never enters CAPTURING, so no
+        # transcript is produced at all). A false acoustic fire is
+        # already filtered upstream. AMBIENT then catches the residual
+        # case verification cannot -- the name really was said, but ABOUT
+        # Jarvis rather than TO it.
+        #
+        # One model call still serves both decisions (see
+        # assess_retention's docstring): the speech gate adds no latency
+        # to the classification path, only the phrase call it enables.
+        #
+        # Logged as an EVENT, never the content: the decision, the reason
+        # (itself never the transcript text), char count, and the
+        # acoustic wake score for measuring the real false-trigger rate
+        # over time. response_chars, not the response -- same rule.
+        retain, reason, verdict = assess_retention(text)
+        response = None
+        if verdict in ("ADDRESSED", "UNSURE"):
+            try:
+                response = _handle_chat(text)
+            except Exception as e:
+                # Deliberately does NOT fall back to forwarding, unlike
+                # the CONTROL/QUERY path below. A failed chat reply is
+                # small talk that went unanswered; forwarding it would
+                # put "how's it going" in front of the orchestrator as
+                # though it were an instruction. Silence is the correct
+                # failure here, and it is the pre-2026-08-18 behaviour.
+                log_event("concierge_chat_response_error", error=str(e))
+                response = None
+        if response:
+            _last_utterance["text"] = response
+            speak(response)
         elapsed_ms = (time.monotonic() - t_start) * 1000
         log_event(
-            "concierge_chat_suppressed", chars=len(text), elapsed_ms=round(elapsed_ms, 1),
+            "concierge_chat_handled", chars=len(text), elapsed_ms=round(elapsed_ms, 1),
             retain=retain, retention_reason=reason, wake_score=wake_score,
+            verdict=verdict, spoken=bool(response),
+            response_chars=len(response) if response else 0,
         )
-        return {"label": result.label, "forwarded": False, "response": None, "spoken": False, "retain": retain}
+        return {
+            "label": result.label, "forwarded": False, "response": response,
+            "spoken": bool(response), "retain": retain,
+        }
 
     try:
         if result.label == CONTROL:
