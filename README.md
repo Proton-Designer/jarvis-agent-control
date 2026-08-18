@@ -208,6 +208,30 @@ Consequences this codebase enforces, not just documents:
   no follow-up command, nothing beyond what opened it. If it needs
   closing, that's a deliberate human action informed by actually reading
   what the footer says, never folded into an automated probing sequence.
+- **There is no staging boundary for a module a live process already has
+  imported — editing it deploys it.** Found live (2026-08-18) building
+  the blocked-view self-heal above: `l4_controller/server.py` (the real
+  orchestrator's MCP server) was running, unmuted, the whole time
+  `transport.py` was being edited. The moment the self-heal code was
+  saved, it became live behaviour in that already-running process —
+  no restart, no explicit deploy step, nothing to opt into. It fired for
+  real, unmuted, on Ayman's actual orchestrator pane (a genuinely stuck
+  `/cost` view, correctly identified, dismissed with one Escape,
+  verified, announced) before verification of the new code had even
+  finished, and before this file's own persistent-view-only /
+  positive-content-identification safeguards had been proven live
+  against `/config`. That the safeguards were already in the saved
+  version — not added after — is the only reason this is a good story
+  and not a third occurrence of the same settings-toggle hazard above:
+  had the content-identification check not existed yet, the same live
+  process would have sent the same single Escape into whatever was
+  actually stuck, unidentified. **Treat any module a running MCP server
+  has imported — `transport.py`, `providers.py`, `say_feedback.py`,
+  `pane_state.py` — as deploy-on-save, not work-in-progress**: land a
+  change complete and verified, or don't save it; there is no
+  intermediate state those files can safely sit in while a server
+  process is up. Verify against throwaway sessions before saving, not
+  after, for exactly this class of file.
 - **Partial/unrecognized slash commands are refused, not typed.**
   Confirmed live that a truncated payload like `/comp` doesn't fail
   safely — Claude Code's own completion overlay auto-submits whatever it
