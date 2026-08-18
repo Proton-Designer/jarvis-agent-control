@@ -1,0 +1,22 @@
+/* Jarvis Console styling. Rail-only for now (build order step 2) --
+   Console/Signal layout rules get added here as they're built, not in a
+   separate stylesheet, so the whole app stays one reflowing widget tree
+   per SPEC-TUI.md §3 rather than three apps in disguise. */
+
+Screen {
+    background: $surface;
+}
+
+Rail {
+    background: $surface;
+    color: $text;
+}
+
+#rail_wake, #rail_orch, #rail_teams, #rail_runtime, #rail_unassigned {
+    height: auto;
+    margin-bottom: 1;
+}
+
+#rail_unassigned {
+    color: $warning;
+}
