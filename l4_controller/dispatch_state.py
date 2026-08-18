@@ -44,6 +44,17 @@ from jarvis_paths import jarvis_home  # noqa: E402
 
 DISPATCH_STATE_PATH = jarvis_home() / "dispatch_state.json"
 
+# A real dispatch completes in ~90s. Past this, "forwarded" is not a
+# turn still running -- it is a turn whose orchestrator restarted or
+# crashed mid-flight and never got to call mark_dispatch_complete().
+# That happens routinely (an orchestrator restart abandons whatever was
+# in flight), so "forwarded" must not be trusted as live state forever:
+# same "liveness is always polled, never remembered" discipline
+# l5_console/state/teams.py applies to team membership, applied here to
+# dispatch stage. Generous on purpose -- a few minutes of margin over the
+# real ~90s completion time, not a tight SLA.
+DISPATCH_ABANDONED_AFTER_S = 180.0
+
 
 def mark_dispatch_forwarded(dictation_ref: str) -> None:
     _write(
@@ -84,8 +95,22 @@ def report_dispatch_stage(stage: str, detail: str = "") -> None:
 def dispatch_state() -> dict | None:
     """None means no dispatch has ever been recorded (fresh install / log
     rotated), not "nothing is in flight" -- callers combine this with a
-    live session_activity() poll rather than trusting staleness alone."""
-    return _read()
+    live session_activity() poll rather than trusting staleness alone.
+
+    Self-heals a "forwarded" record that has sat past
+    DISPATCH_ABANDONED_AFTER_S into stage "abandoned", persisting the
+    change so every caller (not just this one) sees the healed value --
+    a stuck "forwarded" entry must degrade to "nothing is really in
+    flight" for anything that keys off dispatch stage, not just for
+    whichever caller happens to notice first."""
+    state = _read()
+    if state is not None and state.get("stage") == "forwarded":
+        forwarded_at = state.get("forwarded_at")
+        if forwarded_at is not None and (time.time() - forwarded_at) > DISPATCH_ABANDONED_AFTER_S:
+            state["stage"] = "abandoned"
+            state["abandoned_at"] = time.time()
+            _write(state)
+    return state
 
 
 def _read() -> dict | None:
