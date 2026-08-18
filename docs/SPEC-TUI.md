@@ -72,6 +72,28 @@ reports what the system *believes*; the meter reports what the microphone
 is actually receiving. It is the only element that distinguishes "not
 hearing you" from "hearing you and doing nothing."
 
+### Signal's PIPELINE / HEARD SO FAR panels — deliberately deferred
+
+The design study's Signal mockup (`docs/console-design-studies.html`)
+also shows a per-stage pipeline visualization and a live partial
+transcript. Neither is built, and this is a deliberate decision, not a
+gap the mockup and the build silently disagree about (the Lead's ruling,
+2026-08-18):
+
+- The data doesn't exist. Nothing in `JarvisState` or daemon.py's
+  `wake_state.json` tracks per-stage pipeline position or streams partial
+  transcript text — building the instrumentation to back this would be
+  real daemon-side work justified by a design drawn before anyone had
+  used the console.
+- The meter is the load-bearing element, and it already exists. It
+  answers the question that actually recurs — "is it still hearing me"
+  — where the pipeline/transcript panels answer questions nobody has
+  asked yet.
+- **Let Ayman use Signal with just the meter first, and ask whether he
+  wants more**, rather than build ahead of that answer. If the meter
+  alone answers the question in practice, the deferred panels were
+  decoration.
+
 ---
 
 ## 4. Teams
@@ -282,6 +304,23 @@ UI is where they become visible or invisible:
 
 - **The wake control reflects reality, not intent.** It shows whether the
   daemon process is alive, never whether the button was pressed.
+- **`space` stops listening, always. It never starts.** Not a toggle,
+  deliberately (the Lead's ruling, 2026-08-18): accidentally stopping is
+  fully recoverable — press start again — but accidentally starting opens
+  the microphone without intent, the one direction this whole project
+  refuses. A toggle cannot make that distinction; a stop-only key can,
+  which is what makes it a trustworthy panic key — nothing to check about
+  current state before pressing it. Starting requires the button (or a
+  distinct, deliberate key), never `space`.
+- **Quitting the console does not stop the daemon**, and must never do so
+  silently while the mic is confirmed running. They are separate processes
+  by design — the daemon is meant to survive the console closing under
+  normal operation (e.g. a LaunchAgent-managed listener) — so a closed
+  window must not read as "the microphone stopped." Warn explicitly and
+  require an affirmative "quit anyway" rather than auto-stopping the
+  daemon on quit: killing an in-progress dictation because the window
+  closed would be its own surprise, in the same family as the button
+  claiming success before a poll confirms it.
 - **Fail loudly and legibly.** Every failure path says what happened and
   what to do. An unhelpful error at first run is worse than a slow one.
 - **Never silently succeed partially.** A partial reconnect reports what
