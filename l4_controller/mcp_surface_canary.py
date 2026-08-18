@@ -64,15 +64,27 @@ def run() -> int:
     ro_names = asyncio.run(_tool_names(server_readonly.app))
 
     expected_full = {
+        "jarvis_say",
         "list_sessions", "session_activity", "spend",
         "report_dispatch_stage", "confirm_plan", "deliver_batch",
         "list_teams", "register_team_by_adoption", "register_team_fresh",
     }
-    expected_ro = {"list_sessions", "session_activity", "spend"}
+    # jarvis_say is on BOTH surfaces deliberately (tools_voice.py): the
+    # boundary this canary guards is "can the concierge ACT on Ayman's
+    # systems," not "can it do anything at all." Speaking touches no
+    # session and imports no transport, so it does not belong on the
+    # forbidden list.
+    #
+    # Kept as an EXACT set rather than relaxed to a subset check when this
+    # was added. An exact set is the entire value here -- it fails when a
+    # tool is added, which is how it caught jarvis_say landing on the
+    # read-only surface in the first place. A subset check would have said
+    # nothing, and the next addition would arrive unnoticed.
+    expected_ro = {"list_sessions", "session_activity", "spend", "jarvis_say"}
 
     check("full surface has all nine tools", full_names == expected_full, detail=f"got {sorted(full_names)}")
     check(
-        "read-only surface has exactly the three read tools",
+        "read-only surface has exactly its three read tools plus jarvis_say",
         ro_names == expected_ro,
         detail=f"got {sorted(ro_names)}",
     )
