@@ -19,6 +19,37 @@ selectable rather than typed where at all possible. The current
 
 ---
 
+## 0. Directory layout — both roles live under ~/Jarvis/
+
+Ayman's spec says the attach picker shows "all existing sessions inside
+the jarvis directory ... because they would be located inside the same
+directory." They were not: the concierge home was first created as
+`~/Jarvis-concierge/`, a sibling. Restructured 2026-08-18 to match the
+spec's assumption:
+
+```
+~/Jarvis/
+├── CLAUDE.md          shared, NEUTRAL — both subdirs inherit it
+├── teams.json         team registry
+├── engine.json        the two role slots
+├── concierge/         CLAUDE.md + .mcp.json -> server_readonly.py
+└── orchestrator/      CLAUDE.md + .mcp.json -> server.py
+```
+
+**The parent CLAUDE.md must stay role-neutral.** Both subdirectories
+inherit it, so anything role-specific there contradicts one of them. The
+router's original 272-line CLAUDE.md moved down into `orchestrator/`
+unchanged; the parent was rewritten to hold only what is true for both.
+Verified live: a concierge started in `~/Jarvis/concierge/` correctly
+reports its own role and its three tools.
+
+**Attach-picker scope: sessions whose cwd is under `~/Jarvis/`.** Not
+system-wide. A system-wide picker would list every Claude session on the
+machine — team leads in unrelated projects included — which is precisely
+the confusion "inside the jarvis directory" was written to avoid. Team
+sessions live in their own project directories and are enumerated
+separately by `list_teams()`.
+
 ## 1. The role flag
 
 Every session in the Jarvis directory carries exactly one flag:
@@ -102,6 +133,17 @@ replacement first.
 ---
 
 ## 6. Start-button preconditions
+
+**Which button:** `#wake_button` in the console's WakePanel — the existing
+start/stop control that launches the wake daemon. There was real
+confusion here worth recording: the SPACE key is stop-only by an explicit
+ruling (accidentally stopping is recoverable; accidentally starting opens
+the microphone without intent), but the BUTTON does start. §6 gates the
+button, not the key.
+
+Gating it is right because starting the daemon opens the microphone, and
+voice input with no live concierge or no live router has nowhere to go —
+the user would speak into a system that silently cannot act.
 
 If either role has no live session, **Start must refuse and explain in
 plain language** which role is missing and what to do:
