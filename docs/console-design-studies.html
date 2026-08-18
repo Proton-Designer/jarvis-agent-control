@@ -238,7 +238,7 @@
 
   <section class="prose">
     <h3>What the interface has to do</h3>
-    <p>Four things, and only four. <strong>Toggle the microphone</strong> — one control, unambiguous, because it is the difference between a system that is listening and one that is not. <strong>Set up or reconnect the orchestrator</strong> — three states, and the interface must show which one is true rather than which one it last attempted. <strong>Show the fleet</strong> — every session Jarvis can reach, and what it is doing. <strong>Stream what is happening</strong> — wake scores, state transitions, routing decisions, as they occur.</p>
+    <p>Four things, and only four. <strong>Show and stop the microphone</strong> — unambiguous status, plus a control that only ever stops it (space is stop-only, never a toggle — accidentally stopping is recoverable, accidentally starting isn't; starting is a separate, deliberate action). <strong>Set up or reconnect the orchestrator</strong> — three states, and the interface must show which one is true rather than which one it last attempted. <strong>Show the fleet</strong> — every session Jarvis can reach, and what it is doing. <strong>Stream what is happening</strong> — wake scores, state transitions, routing decisions, as they occur.</p>
     <p>The last one is the reason a terminal wins. A graphical app would compress all of that into a status light. Here it can be the main event.</p>
   </section>
 
@@ -429,6 +429,7 @@
     </div>
 
     <p class="caption">Idle, the same screen collapses: the state block reads <span style="font-family:var(--mono)">LISTENING</span>, the pipeline greys out, and the transcript panel is replaced by the last routing summary.</p>
+    <p class="caption"><strong>PIPELINE and HEARD SO FAR, above, are deliberately deferred</strong> — not built, and not a gap between this mockup and the real console (see <code>docs/SPEC-TUI.md</code> &sect;3, "Signal's PIPELINE / HEARD SO FAR panels"). The live meter is the load-bearing element and already exists; these two answer questions nobody has asked for yet, so they wait until Ayman actually wants more than the meter gives him.</p>
 
     <div class="tradeoff">
       <div>

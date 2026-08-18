@@ -7,6 +7,17 @@ by noticing hours later that a session never finished.
 This spec covers detecting that state, resolving what can safely be
 resolved, and escalating the rest through the voice channel.
 
+Companion documents:
+- `docs/SPEC-TUI.md` — the console this builds on top of. Stage 1
+  (detect/surface, this spec's §3-§5.3) is implemented in
+  `l5_console/state/` (`blocked_state.py`, `teams.enrich_running_members()`,
+  `poller._maybe_escalate_blocked()`) and `l4_controller/pane_state.py`'s
+  `BLOCKED_QUESTION` state. §6, "Console surface," is the render-side
+  requirement on `l5_console/app/`.
+- `SPEC-L2.5-concierge.md` — §5.1's `ANSWER` intent class (routing a
+  spoken answer back to the specific blocked session that asked) is a
+  later stage, not yet built.
+
 ---
 
 ## 1. The blockers that actually occur

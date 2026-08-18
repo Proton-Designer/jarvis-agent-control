@@ -45,6 +45,14 @@ The concierge classifies every transcript into exactly one:
 | `DISPATCH` | "tell X to do Y", any instruction for an agent | Forward to L3 | unchanged |
 | `UNSURE` | anything else | **Forward to L3** | unchanged |
 
+This table is v1's five, as implemented today (`l2_5_concierge/classifier.py`).
+A sixth class, `ANSWER`, is planned for a later stage of blocked-session
+handling — see `docs/SPEC-blockers.md` SS5.1: a transcript answering a
+currently-pending question from a blocked session, routed back to that
+session rather than classified as a new instruction. Not yet built —
+stage 1 of blocked-session detection (surface + escalate by voice) is
+live; the auto-answer path that needs `ANSWER` is deliberately unbuilt.
+
 ### Governing rule: classification fails toward DISPATCH
 
 A dispatch misclassified as chat means **the instruction never happens and

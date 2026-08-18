@@ -7,7 +7,13 @@ Companion documents:
 - `docs/TUI-FRAMEWORK-RESEARCH.md` — framework evaluation, the Textual
   decision and its reasoning, `tmux -CC` feasibility, prior-art findings.
 - `SPEC-L2.5-concierge.md` — the conversational layer this sits alongside.
-- Design studies: three candidate layouts, rendered.
+- `docs/SPEC-blockers.md` — detecting a session stuck waiting on a human
+  and escalating it by voice. A distinct concern from this spec, but the
+  console is where blocked state has to render (see its SS6, "Console
+  surface"), and the state layer built for this spec is what
+  SPEC-blockers.md's detection is built on top of.
+- Design studies (`docs/console-design-studies.html`): three candidate
+  layouts, rendered.
 
 ---
 
@@ -59,7 +65,8 @@ talking, the only question that matters is whether it is still hearing you.
 
 ### Sections
 
-1. **Wake** — one control, `start` ⇄ `stop`. Never both.
+1. **Wake** — status plus a stop-only control. Not a toggle — see §7's
+   `space`-stops-never-starts ruling and why.
 2. **Orchestrator** — set up / reconnect / active.
 3. **Agents / Teams** — every team, its members, and what they are doing.
 4. **Stream** — live log of wake scores, state transitions, routing.
@@ -237,8 +244,22 @@ One function answering *what is true right now*. The UI renders it; it
 never renders from memory of what it last did.
 
 Reports: orchestrator (state, session id, tools reachable), teams (members,
-liveness, activity, inbox reachable), wake daemon (running, mic active),
-runtime (models resident, memory, spend), unassigned sessions.
+liveness, activity, inbox reachable), wake daemon (running), runtime
+(models resident, memory, spend), unassigned sessions.
+
+**Mic-active state (`IDLE`/`CAPTURING`/`CANCEL_ARMED`) is deliberately
+NOT part of this report** — a build-time decision this section originally
+predated. It lives in its own file (`~/.jarvis/wake_state.json`, written
+by `daemon.py` at ~10Hz during a real `live()` mic session, read directly
+by the console rather than routed through this poller) on its own,
+faster clock than the ~1s this function runs on — reading a small JSON
+file directly is cheap enough that funneling it through here would only
+add latency for a meter that needs to feel instant. `wake.running` here
+(the pgrep-based liveness check) stays the sole authority on whether the
+daemon process is alive at all; mic-active state is a second, independent
+signal layered on top, never a substitute for it — a stale
+`wake_state.json` claiming activity while `wake.running` is false must
+never be read as "still listening."
 
 **Unassigned sessions are shown deliberately** — a running session Jarvis
 cannot reach is how you discover something to adopt, and assigning it

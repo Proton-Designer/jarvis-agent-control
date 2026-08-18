@@ -8,10 +8,16 @@ sessions are actually running. Full spec: `voice_orchestrator_context.txt`.
 "Hey Jarvis" (wake word)
   -> L1: local wake-word detection (openWakeWord)
   -> L2: local VAD chunking + Whisper transcription, streamed to a file
+  -> L2.5: concierge (local model) — classifies the transcript; answers
+           CONTROL/QUERY/CHAT turns itself in under a second, forwards
+           DISPATCH/UNSURE turns unchanged
   -> L3: a Claude Code orchestrator session reads the dictation,
          resolves targets, confirms the plan, calls L4
   -> L4: MCP server — live session discovery, spoken plan confirmation
          + cancel window, gated tmux delivery to target sessions
+  -> L5: the console (Textual TUI) — a separate observation/control
+         surface reading state from L1/L4, not part of the dictation
+         path above
 ```
 
 **Verified end to end** (2026-08-17, simulated audio via `daemon.py
@@ -48,10 +54,25 @@ model, not a duplicate of them:
   three-bug state-machine hardening pass
 - `l2_transcription/README.md` — VAD chunking, whisper-server wrapper,
   hallucination defense
+- `SPEC-L2.5-concierge.md` — why the concierge exists (dispatch and
+  conversation have opposite latency budgets), intent classification,
+  the deterministic-before-model rule. Built and live — every dictation
+  goes through it today, not staged/parallel.
 - `l4_controller/` — no single README yet; see `FALSE_REFUSAL_MEASUREMENT.md`,
   `QUEUEING_INVESTIGATION.md`, and
   `l3_orchestrator_test/adversarial_dictations/RESULTS.md` for the
   equivalent dated-findings record
+- `l5_console/` — the Textual console (Rail/Console/Signal layouts) and
+  its state layer, read-only observer of L1/L4, not part of the
+  dictation path. Start at `docs/SPEC-TUI.md` (the spec), then
+  `docs/TUI-FRAMEWORK-RESEARCH.md` (why Textual, the `tmux -CC`
+  feasibility finding, prior-art survey), then
+  `docs/console-design-studies.html` (the three candidate layouts,
+  rendered) if you want the visual reasoning behind the layout choice.
+  `docs/SPEC-blockers.md` covers a related but separate concern: detecting
+  a Claude Code session stuck waiting on a human, and escalating it
+  through the voice channel — stage 1 (detect/surface/escalate) is built;
+  auto-answering grounded questions is a later, unbuilt stage.
 
 ## Install
 
@@ -318,7 +339,13 @@ send-keys produces characters in an input box — only holds when the
 target is genuinely at an input line.** Every place that gate gets
 relaxed or a new interaction shape gets added, re-derive from evidence
 whether the assumption still holds; don't extend a working pattern to a
-new case by analogy alone.
+new case by analogy alone. **The settings-picker incident then happened
+again** (2026-08-18, see the two-occurrence account above) — the same
+lesson, not a new one, and the fact that "assume Escape did what the
+footer of a *different* view says it does" reproduced the exact failure
+this paragraph already named is the strongest evidence yet that this is
+a durable property of interactive views generally, not a one-off bug in
+`/config` specifically.
 
 **Second, related lesson, same underlying principle in a third context:**
 a safety-relevant setting that depends on ambient shell state is not
@@ -375,7 +402,7 @@ engineer's staged-but-uncommitted files under an unrelated commit
 message. Caught before anything was pushed and split cleanly, but the
 next one might not be caught.
 
-Two rules, not suggestions:
+Three rules, not suggestions:
 
 - **Always commit with an explicit pathspec — `git commit <paths> -m
   "..."`, never a bare `git commit`, `git commit -a`, or `git add .`.**
@@ -389,6 +416,14 @@ Two rules, not suggestions:
   silently delete someone else's uncommitted work with no way to get it
   back. `reset --soft` (rewinds commits, keeps everything staged) is
   fine. If you think you need anything stronger, stop and ask first.
+- **Editing a module a live MCP server already has imported deploys it —
+  there is no staging boundary.** `transport.py`, `providers.py`,
+  `say_feedback.py`, `pane_state.py`: saving a change to one of these is
+  not "work in progress," it's live behaviour in whatever process already
+  imported it, immediately, with no restart and nothing to opt into.
+  Full account under "Auto-mode safety posture" above. Land a change to
+  one of these files complete and verified against a throwaway session,
+  or don't save it.
 
 ## What isn't built yet
 

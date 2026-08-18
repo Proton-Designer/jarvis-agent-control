@@ -1,13 +1,21 @@
 """
-Wake daemon liveness (SPEC-TUI.md SS3.1, SS7): the safety-critical field
-the console's wake control reflects. "It shows whether the daemon
+Wake daemon liveness (SPEC-TUI.md SS3.1, SS6, SS7): the safety-critical
+field the console's wake control reflects. "It shows whether the daemon
 process is alive, never whether the button was pressed" -- reality, not
 intent, same rule as everything else in this project.
 
-mic_active (IDLE/CAPTURING/CANCEL_ARMED) is deliberately not here yet --
-nothing external exposes daemon.py's internal state today. ue6rruxg is
-adding a status-file signal for that alongside Signal+meter (build step
-4); this module gets a `state` field then, additive to WakeDaemonState.
+mic_active (IDLE/CAPTURING/CANCEL_ARMED) deliberately never joins
+WakeDaemonState/JarvisState -- an earlier version of this docstring
+predicted it would (as an additive `state` field here), but the actual
+build (l5_console/app/wake_state.py) went the other way once it existed:
+mic_active lives in its own file (~/.jarvis/wake_state.json, written by
+daemon.py at ~10Hz during a real live() session) on its own, faster
+clock than this module's ~1s poll, read directly by the console rather
+than funneled through this poller -- routing a meter that needs to feel
+instant through the state layer's ~1s clock would only add latency for
+no benefit. is_running() here stays the sole authority on whether the
+daemon process is alive at all; mic-active state is a second, independent
+signal layered on top, never a substitute for it.
 """
 
 from __future__ import annotations
