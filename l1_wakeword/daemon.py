@@ -427,6 +427,27 @@ def _write_wake_state_file(state: str, level: float) -> None:
         pass
 
 
+def _clear_wake_state_file() -> None:
+    """Called once, on a CLEAN exit from live()'s loop only -- a hard
+    kill (SIGKILL, crash) can never reach this, which is expected and
+    fine: wake_state.py's reader already treats a stale `updated_at` as
+    unknown on its own (see its STALE_AFTER_S check), independent of
+    whether this ever runs. This is only closing the gap on the clean-
+    shutdown path specifically -- without it, the last real reading
+    (possibly CAPTURING) would keep rendering as live, current data for
+    up to STALE_AFTER_S after a clean stop, instead of immediately
+    reading as "no data" the moment the file is gone. Deleting rather
+    than writing a new "stopped" state value reuses read_wake_state()'s
+    already-correct, already-tested missing-file handling instead of
+    teaching every downstream consumer (meter.py, main.py's dictating
+    gate) a fourth state value that means the same thing "no data"
+    already means."""
+    try:
+        WAKE_STATE_PATH.unlink(missing_ok=True)
+    except OSError:
+        pass
+
+
 def _write_wav(path: Path, pcm_i16: np.ndarray):
     with wave.open(str(path), "wb") as wf:
         wf.setnchannels(1)
@@ -897,6 +918,7 @@ async def live(whisper: WhisperDaemon, live_deliver: bool = False, orchestrator_
                     last_wake_state_write = now
         finally:
             cancel_task.cancel()
+            _clear_wake_state_file()
             print(f"[{time.strftime('%H:%M:%S')}] input overflow count this session: {overflow_count}")
 
 

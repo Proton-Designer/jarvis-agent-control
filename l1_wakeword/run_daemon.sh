@@ -21,10 +21,18 @@ PYTHON="/opt/homebrew/opt/python@3.13/bin/python3.13"
 # onnxruntime, etc.) have to be made available explicitly, not implicitly:
 export PYTHONPATH="$(pwd)/.venv/lib/python3.13/site-packages"
 
-# Not the live-mic loop yet -- daemon.py's live-mic branch is still a
-# stub (see daemon.py's __main__). This script exists so the LaunchAgent
-# plumbing (install, KeepAlive, logs, stop switch) can be built and
-# reviewed now without loading it, per the standing no-unattended-mic
-# rule -- it gets pointed at the real live-mic entrypoint and loaded for
-# the first time during the live-mic session with Ayman present.
-exec "$PYTHON" daemon.py
+# Absolute path to daemon.py, not a bare relative "daemon.py" -- real bug,
+# found live (2026-08-18, Ayman's own session): l5_console/state/wake.py
+# detects the daemon via `pgrep -f "l1_wakeword/daemon.py"` against the
+# running process's full command line. With a bare relative path, `cd`
+# above means the actual command line is "...python3.13 daemon.py" --
+# the string "l1_wakeword/daemon.py" never appears in it, so pgrep finds
+# nothing and wake.running is permanently false even though the daemon
+# (and the wake word) is genuinely working the whole time. Only the
+# detection was broken -- exactly the "control reflects reality, not
+# intent" failure mode, arriving from a seam neither this file nor
+# wake.py could see on its own. $(pwd) is safe here specifically because
+# `cd "$(dirname "$0")"` above already made pwd absolute and correct
+# regardless of how this script itself was invoked (relative, absolute,
+# or via a symlink from the LaunchAgent).
+exec "$PYTHON" "$(pwd)/daemon.py"
