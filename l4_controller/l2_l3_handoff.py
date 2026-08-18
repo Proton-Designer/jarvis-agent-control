@@ -56,6 +56,7 @@ caller checking anything. See handoff_seam_canary.py.
 
 from __future__ import annotations
 
+import re
 import subprocess
 import sys
 import time
@@ -68,6 +69,25 @@ from say_feedback import speak
 from transport import Transport
 
 SERVER_PROCESS_PATTERN = "l4_controller/server.py"
+
+# `pgrep -f` matches this pattern as a plain substring anywhere in a
+# process's full, flattened command line -- the exact hazard already
+# found live in wake.py's is_running() (a throwaway `python -c "...#
+# l4_controller/... daemon.py placeholder..."` test fixture matched and
+# was briefly read as the real daemon). SPEC-orchestration.md's Known
+# Gaps flags this function specifically: 0.2 introduced a genuinely
+# second jarvis-l4-shaped process (server_readonly.py, Haiku's surface)
+# alongside this one (server.py, the router's), so a bare substring check
+# is no longer just theoretically fragile -- there is now a second, real,
+# similarly-named process type in the same process table. A plain
+# substring wouldn't actually collide with server_readonly.py today
+# ("server.py" isn't a substring of "server_readonly.py"), but it would
+# still collide with any unrelated process that happens to mention this
+# path in a `-c` script body, a comment, or a test fixture -- same class
+# of bug, same fix: require the real invocation shape (server.py as its
+# OWN trailing argument, not embedded in a larger string) and reject
+# anything only found inside a `-c` argument's body.
+_REAL_SERVER_INVOCATION = re.compile(r"(?:^|\s)\S*python\S*\s+\S*l4_controller/server\.py(?:\s|$)")
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 from jarvis_paths import jarvis_home  # noqa: E402
@@ -96,25 +116,45 @@ def _format_session_list(sessions: list[dict]) -> str:
     return "; ".join(parts)
 
 
-def orchestrator_has_tools() -> bool:
-    """Whether ANY jarvis-l4 MCP server process is currently running --
-    the observable signal that the orchestrator's MCP trust prompt was
-    actually answered (see README's note on it). Claude Code only spawns
-    this process once its project's .mcp.json entry is approved; declining
-    or leaving the prompt unanswered means the process never starts at
-    all. Confirmed BOTH directions live (2026-08-17), not assumed from the
-    working case: approving a fresh project's prompt spawned a new
-    server.py process within seconds; declining it left none, and that
-    session's own orchestrator turn independently confirmed "the
-    jarvis-l4 MCP tools are not available."
+def _looks_like_real_server_process(cmdline: str) -> bool:
+    if " -c " in cmdline or cmdline.rstrip().endswith(" -c"):
+        return False
+    return bool(_REAL_SERVER_INVOCATION.search(cmdline))
 
-    Matches by command-line substring only (not scoped to one orchestrator
-    session's PID) -- with a single orchestrator this is sufficient; if
-    multiple orchestrators are ever run concurrently, this would need to
-    match a specific server process to its session instead of merely
-    confirming SOME jarvis-l4 server is up somewhere."""
-    result = subprocess.run(["pgrep", "-f", SERVER_PROCESS_PATTERN], capture_output=True)
-    return result.returncode == 0
+
+def orchestrator_has_tools() -> bool:
+    """Whether the router's own jarvis-l4 MCP FULL-surface server process
+    (server.py, not server_readonly.py -- see _REAL_SERVER_INVOCATION) is
+    currently running -- the observable signal that the router's MCP
+    trust prompt was actually answered (see README's note on it). Claude
+    Code only spawns this process once its project's .mcp.json entry is
+    approved; declining or leaving the prompt unanswered means the
+    process never starts at all. Confirmed BOTH directions live
+    (2026-08-17), not assumed from the working case: approving a fresh
+    project's prompt spawned a new server.py process within seconds;
+    declining it left none, and that session's own turn independently
+    confirmed "the jarvis-l4 MCP tools are not available."
+
+    Uses `pgrep -f` for just the candidate PIDs (one per line, unambiguous
+    -- PIDs are numeric, never contain embedded newlines), then
+    `ps -p <pid>` per PID for that specific process's own command line --
+    same shape as wake.is_running(), and for the same reason: a naive
+    `pgrep -fl` breaks on a multi-line `-c "<script>"` command line.
+
+    Still scoped to "SOME real server.py process is up," not to one
+    specific router session's PID -- SPEC-orchestration.md's own "one
+    router, not a pool" ruling means that's still sufficient today. If
+    that ever changes, this would need to match a specific server process
+    to its session rather than confirming any real one is running
+    somewhere."""
+    pids = subprocess.run(["pgrep", "-f", SERVER_PROCESS_PATTERN], capture_output=True, text=True)
+    if pids.returncode != 0:
+        return False
+    for pid in pids.stdout.split():
+        cmd = subprocess.run(["ps", "-o", "command=", "-p", pid], capture_output=True, text=True)
+        if cmd.returncode == 0 and _looks_like_real_server_process(cmd.stdout):
+            return True
+    return False
 
 
 def write_dictation(text: str) -> Path:
