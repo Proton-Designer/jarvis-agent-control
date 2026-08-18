@@ -32,12 +32,23 @@ def _staleness_note(polled_at: float, expected_interval: float) -> str:
 
 class WakePanel(Widget):
     """The one interactive control with a real safety property (§7).
-    The button only ever triggers wake_control.start()/stop() -- the
-    label and icon it shows are driven exclusively by
-    JarvisState.wake.running from the next poll, never by which button
-    was clicked or this widget's own memory of the click. A click that
-    fails to actually start/stop the process shows as an unchanged
-    status line on the next poll, not a lie."""
+
+    Two separate lines, deliberately never merged into one:
+    - `#wake_status` is the ONLY thing that ever renders "listening" /
+      "stopped" -- driven exclusively by JarvisState.wake.running from
+      the next real poll, never by which button was clicked, never by
+      wake_control's return value, never by this widget's own memory of
+      what it last did. Stated explicitly so a later refactor can't
+      quietly merge this with the action-result line below and
+      reintroduce exactly the bug §7 rules out: rendering "stopped"
+      before a poll has actually confirmed the process is gone.
+    - `#wake_action_result` is an action LOG line -- "did the click
+      succeed at triggering start/stop," which is a different, weaker
+      claim than "is it running now." wake_control.stop() itself waits
+      for real process death before returning (see its docstring), so by
+      the time this line updates the process really is gone or the
+      failure is real -- but this line is still just a report of one
+      past action, not a substitute for #wake_status."""
 
     DEFAULT_CSS = """
     WakePanel { height: auto; border: solid $panel; padding: 1; margin-bottom: 1; }
@@ -50,6 +61,15 @@ class WakePanel(Widget):
         yield Button("start", id="wake_button", variant="success")
 
     def update_state(self, wake) -> None:
+        # Stated explicitly per the Lead's ruling: this method is the
+        # ONLY place "listening"/"stopped" ever gets written to
+        # #wake_status, and it only ever does so from `wake.running` on
+        # THIS poll -- never from wake_control.stop()'s return value,
+        # never carried over from a previous call. A later refactor that
+        # tries to "optimistically" set status.update("stopped") right
+        # after a successful stop() call would reintroduce the exact bug
+        # this rule exists to prevent: rendering "stopped" before a poll
+        # has actually confirmed the process is gone.
         status = self.query_one("#wake_status", PlainStatic)
         button = self.query_one("#wake_button", Button)
         if wake.error:
@@ -70,18 +90,31 @@ class WakePanel(Widget):
             button.label = "start"
             button.variant = "success"
 
-    def on_button_pressed(self, event: Button.Pressed) -> None:
+    async def on_button_pressed(self, event: Button.Pressed) -> None:
         if event.button.id != "wake_button":
             return
         result_line = self.query_one("#wake_action_result", PlainStatic)
+        button = self.query_one("#wake_button", Button)
         # Read the button's CURRENT label to decide the action -- not a
         # separately-tracked "is it running" flag on this widget, since
         # that would be exactly the kind of intent-not-reality state §7
         # rules out. The label itself was set from the last real poll.
-        if self.query_one("#wake_button", Button).label == "start":
+        if button.label == "start":
             ok, msg = wake_control.start()
-        else:
-            ok, msg = wake_control.stop()
+            result_line.update(("✓ " if ok else "⚠ ") + msg)
+            return
+
+        # Stop is the case that matters most (§7: the mic must actually
+        # close, not just receive a signal) -- wake_control.stop() blocks
+        # (as a coroutine, not the UI thread) until it has verified real
+        # process death or genuinely exhausted SIGTERM+SIGKILL, which can
+        # take a few seconds. Disable the button for that window so a
+        # second click can't race the same stop() call -- update_state()
+        # will correctly re-enable it once the next real poll confirms
+        # wake.running is false, same path as any other state change.
+        button.disabled = True
+        result_line.update("stopping...")
+        ok, msg = await wake_control.stop()
         result_line.update(("✓ " if ok else "⚠ ") + msg)
 
 

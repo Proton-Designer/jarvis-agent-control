@@ -54,6 +54,16 @@ _EVENT_FORMATTERS = {
     "pointer_delivered": lambda e: (
         f"delivered to {e.get('target')}" if e.get("ok") else f"⚠ delivery FAILED to {e.get('target')}"
     ),
+    # Wake-word scores -- the most diagnostic numbers in the whole
+    # system (the acoustic-collision investigation, the near-miss
+    # thresholds, all came from these). Score only, never the verified/
+    # rejected transcript text -- see daemon.py's log_event call sites
+    # for why a rejected trigger's content specifically must not be
+    # persisted here.
+    "wake_start_verified": lambda e: f"wake word verified (score={e.get('score')}) -> listening",
+    "wake_start_rejected": lambda e: f"wake word REJECTED by verification (score={e.get('score')})",
+    "cancel_detected": lambda e: f"cancel detected (score={e.get('score')})",
+    "cancel_window_closed": lambda e: "cancel window closed, not detected",
 }
 
 

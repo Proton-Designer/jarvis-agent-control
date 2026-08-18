@@ -46,11 +46,21 @@ unilaterally.
 """
 from __future__ import annotations
 
+import asyncio
 import signal
 import subprocess
+import time
 from pathlib import Path
 
 RUN_DAEMON_SCRIPT = Path(__file__).parent.parent.parent / "l1_wakeword" / "run_daemon.sh"
+
+# How long to wait for SIGTERM (then SIGKILL) to actually take before
+# giving up and reporting failure loudly. Real margin over daemon.py's
+# own teardown (tearing down whisper-server, one subprocess wait) without
+# leaving the user staring at "stopping..." for long on the case that
+# matters most: the mic should close promptly when asked.
+GRACE_PERIOD_S = 3.0
+POLL_INTERVAL_S = 0.2
 
 _process: subprocess.Popen | None = None
 
@@ -73,13 +83,62 @@ def start() -> tuple[bool, str]:
     return True, f"spawned (pid {_process.pid}) -- confirm via wake.running, not this return value"
 
 
-def stop() -> tuple[bool, str]:
-    """SIGTERM, matching daemon.py's own clean-shutdown handler -- not a
-    kill -9, so whisper-server gets torn down and the process exits 0
-    rather than looking like a crash to launchd/anything watching it."""
+async def stop() -> tuple[bool, str]:
+    """SIGTERM, then VERIFY the process actually died -- never just "sent
+    a signal and hoped." The Lead's ruling on why this matters: a stop
+    that only sends SIGTERM and reports success is the single worst
+    outcome this system can produce if the signal doesn't take (a future
+    edit drops run_daemon.sh's `exec`, the process is wedged in a
+    syscall) -- Ayman asked for the mic to close, believes it closed
+    because the button said so, and it didn't. So:
+
+    1. SIGTERM, matching daemon.py's own clean-shutdown handler (exits 0,
+       tears down whisper-server via its own `with` block) -- preferred,
+       not mandatory.
+    2. Poll for real exit up to GRACE_PERIOD_S. Escalate to SIGKILL if it
+       survives that -- a user asking for the mic off gets the mic off,
+       a clean shutdown is the nicer path there, not a prerequisite.
+    3. Poll again after SIGKILL, same grace period.
+    4. If it survives BOTH signals (should never happen to a normal
+       process; a syscall-wedged one is possible), return failure with
+       the PID so Ayman can kill it himself -- loud and specific, not a
+       quiet retry-forever or a generic error.
+
+    This function's return value is a report of what actually happened,
+    not an intent -- callers must not render "stopped" from this return
+    value either; see console.py's WakePanel, whose status line only
+    ever renders from JarvisState.wake.running (the next real poll), same
+    as always. This function's (ok, message) is for the action-log line
+    only."""
     global _process
     if _process is None or _process.poll() is not None:
         _process = None
         return False, "no daemon process spawned from this console session to stop"
+
+    pid = _process.pid
     _process.send_signal(signal.SIGTERM)
-    return True, f"sent SIGTERM to pid {_process.pid} -- confirm via wake.running, not this return value"
+    if await _wait_for_exit(GRACE_PERIOD_S):
+        _process = None
+        return True, f"stopped (pid {pid})"
+
+    _process.send_signal(signal.SIGKILL)
+    if await _wait_for_exit(GRACE_PERIOD_S):
+        _process = None
+        return True, f"stopped (pid {pid}, needed SIGKILL -- SIGTERM didn't take within {GRACE_PERIOD_S:.0f}s)"
+
+    # Still alive after SIGTERM AND SIGKILL -- genuinely wedged. Do not
+    # silently give up, do not keep this looking like an ordinary retry:
+    # this is the case the whole function exists to catch.
+    return False, (
+        f"COULD NOT STOP the listener -- pid {pid} is still running after SIGTERM and SIGKILL. "
+        f"Kill it yourself: kill -9 {pid}"
+    )
+
+
+async def _wait_for_exit(timeout_s: float) -> bool:
+    deadline = time.monotonic() + timeout_s
+    while time.monotonic() < deadline:
+        if _process.poll() is not None:
+            return True
+        await asyncio.sleep(POLL_INTERVAL_S)
+    return _process.poll() is not None

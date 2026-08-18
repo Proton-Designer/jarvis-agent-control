@@ -56,12 +56,14 @@ import numpy as np
 
 sys.path.insert(0, str(Path(__file__).parent))
 sys.path.insert(0, str(Path(__file__).parent.parent / "l2_transcription"))
+sys.path.insert(0, str(Path(__file__).parent.parent / "l4_controller"))
 
 from listener import load_model, FRAME_SAMPLES as WAKEWORD_FRAME_SAMPLES, SAMPLE_RATE  # noqa: E402
 from vad_chunker import SileroVAD, StreamingChunker, FRAME_SAMPLES as VAD_FRAME_SAMPLES  # noqa: E402
 from whisper_daemon import WhisperDaemon  # noqa: E402
 from session_vocab import build_prompt  # noqa: E402
 from hallucination_filter import filter_transcript  # noqa: E402
+from latency_log import log_event  # noqa: E402
 
 IDLE_THRESHOLD = 0.5
 # Cancel-window-only now (see CANCEL_ARMED below). Used to gate the STOP
@@ -427,8 +429,6 @@ def _report_and_deliver(
     durable file would be."""
     print(f"FULL TRANSCRIPT: {text!r}")
     last_whisper_ms = chunk_log[-1]["whisper_ms"] if chunk_log else None
-    sys.path.insert(0, str(Path(__file__).parent.parent / "l4_controller"))
-    from latency_log import log_event  # noqa: E402
     log_event("l1_dictation_end", chars=len(text), last_chunk_whisper_ms=last_whisper_ms)
     result = default_deliver(text, orchestrator_target=orchestrator_target, live_deliver=live_deliver, wake_score=wake_score)
 
@@ -503,11 +503,19 @@ def simulate(dictation_wav: str, whisper: WhisperDaemon, live_deliver: bool = Fa
                 accepted, verify_text = verify_wake_trigger(whisper, preroll, tmp_wav)
                 if accepted:
                     print(f"[{t:.2f}s] wake word (score={score:.3f}) verified ({verify_text!r}) -> CAPTURING")
+                    log_event("wake_start_verified", score=round(float(score), 3))
                     state = "CAPTURING"
                     session = DictationSession(vad, whisper, wake_score=score)
                     preroll.clear()
                 else:
                     print(f"[{t:.2f}s] wake word (score={score:.3f}) REJECTED by verification (heard: {verify_text!r}) -- staying IDLE")
+                    # Never log verify_text here -- it's ambient audio that
+                    # failed verification, exactly the content NOT_ADDRESSED
+                    # (l2_5_concierge/classifier.py) exists to avoid
+                    # persisting. The score is diagnostic (this is the data
+                    # the acoustic-collision investigation was built on);
+                    # what was actually said is not.
+                    log_event("wake_start_rejected", score=round(float(score), 3))
         elif state == "CAPTURING":
             # No acoustic model runs during CAPTURING any more -- the stop
             # trigger is transcript text, checked below on whatever feed()
@@ -686,11 +694,15 @@ class LiveController:
                 accepted, verify_text = verify_wake_trigger(self.whisper, self.preroll, self.tmp_wav)
                 if accepted:
                     print(f"[{time.strftime('%H:%M:%S')}] wake word (score={score:.3f}) verified ({verify_text!r}) -> CAPTURING")
+                    log_event("wake_start_verified", score=round(float(score), 3))
                     self.state = "CAPTURING"
                     self.session = DictationSession(self.vad, self.whisper, wake_score=score)
                     self.preroll.clear()
                 else:
                     print(f"[{time.strftime('%H:%M:%S')}] wake word (score={score:.3f}) REJECTED by verification (heard: {verify_text!r}) -- staying IDLE")
+                    # Never log verify_text -- see the matching comment in
+                    # simulate()'s IDLE branch for why.
+                    log_event("wake_start_rejected", score=round(float(score), 3))
         elif self.state == "CAPTURING":
             # No acoustic model runs during CAPTURING any more -- the stop
             # trigger is transcript text, checked below on whatever feed()
@@ -725,11 +737,13 @@ class LiveController:
     def _on_cancel_frame(self, frame_i16: np.ndarray, now: float):
         if now >= self._cancel_deadline:
             print(f"[{time.strftime('%H:%M:%S')}] cancel window closed, not detected -> IDLE")
+            log_event("cancel_window_closed", detected=False)
             self.state = "IDLE"
             return
         score = score_frame_ensemble(self._cancel_ensemble, frame_i16)
         if score >= RECOVERABLE_THRESHOLD:
             print(f"[{time.strftime('%H:%M:%S')}] CANCEL detected (ensemble score={score:.3f}) -> IDLE")
+            log_event("cancel_detected", score=round(float(score), 3))
             self._cancel_detected = True
             self.state = "IDLE"
 
