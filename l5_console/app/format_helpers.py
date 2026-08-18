@@ -10,6 +10,8 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
+from rich.text import Text
+
 sys.path.insert(0, str(Path(__file__).parent.parent / "state"))
 from models import LIVENESS_RUNNING, LIVENESS_STOPPED, LIVENESS_LOST  # noqa: E402
 
@@ -31,6 +33,26 @@ COLOR_DIM = "#6B7688"
 # the Lead's live finding, 2026-08-18.
 COLOR_MUTED = "#4A5262"
 COLOR_INK = "#C9D2DE"
+
+
+def build_hint_line(hints: list[tuple[str, str]]) -> Text:
+    """A row of "[key] effect" action hints -- bold accent key, dim
+    effect label, matching Footer's own keybind-bar styling exactly
+    (widgets.py). Shared so the global footer and any per-panel hint
+    area (the Lead's ruling, 2026-08-18: action hints belong with the
+    panel they act on, not only in the global footer) can never drift
+    on what a hint looks like -- one styling decision, not two places
+    to keep in sync by hand. Every hint names the EFFECT, not just the
+    key ("[a] add team", never a bare "[a]") -- the Lead's explicit
+    requirement, same reasoning as never-a-UUID: a label that requires
+    the reader to already know what it does isn't a label."""
+    text = Text()
+    for i, (key, label) in enumerate(hints):
+        if i:
+            text.append("   ")
+        text.append(f"[{key}]", style=f"bold {COLOR_ACCENT}")
+        text.append(f" {label}", style=COLOR_DIM)
+    return text
 
 
 def liveness_icon(liveness: str) -> str:

@@ -32,7 +32,7 @@ from widgets import PlainStatic, Footer
 from staleness import is_stale
 from stream import StreamReader
 from format_helpers import (
-    liveness_icon, liveness_color, team_liveness, compact_model_name,
+    liveness_icon, liveness_color, team_liveness, compact_model_name, build_hint_line,
     COLOR_OK, COLOR_WARN, COLOR_ERR, COLOR_ACCENT, COLOR_DIM, COLOR_INK,
 )
 from meter import Meter
@@ -231,7 +231,11 @@ class EnginePanel(Widget):
        dominate the panel; controls should be compact -- border:none
        plus a 1-row height makes each button exactly 1 row, margin-top:0
        keeps them touching rather than spaced like the info block above. */
-    EnginePanel Button { width: 100%; border: none !important; margin-top: 0; }
+    /* ~30% off the width (the Lead's live finding, 2026-08-18: full-
+       width Swap/Remove read as bars competing with the info above
+       them, not compact controls beside it), left-aligned to match the
+       name/model/effort text's own left edge rather than centered. */
+    EnginePanel Button { width: 70%; border: none !important; margin-top: 0; }
     """
 
     def compose(self) -> ComposeResult:
@@ -246,7 +250,15 @@ class EnginePanel(Widget):
             # attached-but-dead: bring it back before anything else
             yield Button("Activate", id=f"{role}_activate", variant="warning")
             # attached (either liveness): change or let go of it
-            yield Button("Swap", id=f"{role}_swap")
+            # variant="primary" (not the default/unvaried style): the
+            # Lead's live finding, 2026-08-18 -- the unvaried default
+            # variant renders with a background so close to the panel's
+            # own that it read as "no fill" next to Remove's solid red,
+            # making them look like two different KINDS of control
+            # rather than two actions of the same rank. Both now render
+            # as solid, same-shaped buttons; only the color signals
+            # which one is destructive.
+            yield Button("Swap", id=f"{role}_swap", variant="primary")
             yield Button("Remove", id=f"{role}_remove", variant="error")
 
     def _role_widgets(self, role: str) -> dict[str, Widget]:
@@ -391,7 +403,19 @@ class TeamsPanel(PlainStatic):
             table.add_row(Text(note.strip(), style=COLOR_WARN), "", "")
 
         if not teams:
-            table.add_row(Text("none configured", style=COLOR_DIM), "", "")
+            # The empty state IS the primary affordance for this panel's
+            # main action -- the Lead's live finding, 2026-08-18: "none
+            # configured" told him nothing was there and nothing about
+            # what to do about it, leaving the global footer's bare
+            # "[a] add team" as the only path, which requires noticing
+            # it, connecting it to this specific panel, and remembering
+            # it -- three steps of inference for the one thing an empty
+            # panel most needs to say. Named action, named key, in the
+            # panel itself.
+            empty = Text("No teams yet -- press ", style=COLOR_DIM)
+            empty.append("[a]", style=f"bold {COLOR_ACCENT}")
+            empty.append(" to add one.", style=COLOR_DIM)
+            table.add_row(empty, "", "")
 
         for t in teams:
             tl = team_liveness(t)
@@ -432,9 +456,18 @@ class TeamsPanel(PlainStatic):
         legend.append("✕ ", style=COLOR_ERR)
         legend.append("lost -- no saved history", style=COLOR_DIM)
 
+        # Per-panel action hints, not only the global footer (the Lead's
+        # ruling, 2026-08-18) -- same build_hint_line() the shared
+        # helper this and the footer both draw from, so they can't drift
+        # on styling. Deliberately a LIST here, not two separate calls,
+        # so a future action (remove, swap-lead) is one more tuple, not
+        # a rewrite of this section.
+        hints = build_hint_line([("a", "add team"), ("r", "reconnect")])
+
         grid = Table.grid(padding=(1, 0, 0, 0))
         grid.add_row(table)
         grid.add_row(legend)
+        grid.add_row(hints)
         self.update(grid)
 
 
