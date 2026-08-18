@@ -59,8 +59,45 @@ def team_by_id(teams, team_id):
     return next((t for t in teams if t.id == team_id), None)
 
 
+def _check_parse_response_regression() -> None:
+    """Fast, hermetic unit check -- no tmux needed. Reproduces the exact
+    bug ue6rruxg found live (2026-08-18): CONTEXT_PROMPT's own text
+    contains the literal field labels as a format example ("teaching the
+    format by showing it"), Claude Code echoes the typed prompt back into
+    the pane BEFORE the real reply, and the original re.search (first
+    match) grabbed the echoed prompt's own placeholder text instead of
+    the actual answer sitting further down, correctly formatted. This
+    pins the fix (_last_match, not _first_match) against regressing."""
+    fake_pane = tc.CONTEXT_PROMPT + "\n\n" + (
+        "SUMMARY: A single Python file, app.py, that prints the string "
+        "'hello' to standard output.\n"
+        "SUBSYSTEMS: single script entry point (app.py); console output via print\n"
+        "TECH_STACK: Python"
+    )
+    parsed = tc._parse_context_response(fake_pane)
+    check(
+        "parses the REAL reply, not the echoed prompt's own placeholder text",
+        parsed is not None and parsed["summary"].startswith("A single Python file"),
+        detail=str(parsed),
+    )
+    check(
+        "does not accidentally capture the prompt's own instructional text",
+        parsed is not None and "<one sentence" not in parsed["summary"],
+        detail=str(parsed),
+    )
+    check(
+        "subsystems parsed correctly from the real reply, not the placeholder",
+        parsed is not None and parsed["subsystems"] == ["single script entry point (app.py)", "console output via print"],
+        detail=str(parsed),
+    )
+
+
 def run() -> int:
     print("team_actions / team_context canary\n")
+
+    print("-1. regression: parsing the real reply, not the echoed prompt (ue6rruxg's find)")
+    _check_parse_response_regression()
+
     original_raw = TEAMS_REGISTRY_PATH.read_text() if TEAMS_REGISTRY_PATH.exists() else None
     original_existed = TEAMS_REGISTRY_PATH.exists()
     tmux_created: list[str] = []

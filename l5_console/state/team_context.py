@@ -90,10 +90,26 @@ def _read_claude_md(root: str) -> str | None:
         return None
 
 
+def _last_match(pattern: str, text: str) -> "re.Match | None":
+    """The LAST occurrence, not the first. Found live (ue6rruxg,
+    2026-08-18): CONTENT_PROMPT's own text contains the literal strings
+    "SUMMARY:", "SUBSYSTEMS:", "TECH_STACK:" -- it's teaching the format
+    by showing it -- and Claude Code always echoes the typed prompt back
+    into the pane BEFORE the real reply appears. re.search (first match)
+    was grabbing the echoed PROMPT's own placeholder text
+    ("<one sentence on what it does>") instead of the actual answer,
+    which sits further down the pane, correctly formatted. The echoed
+    input always precedes the real reply in the pane, so "last match" is
+    the correct, version-independent fix -- no dependency on a specific
+    Claude Code UI turn marker that could change across an update."""
+    matches = list(re.finditer(pattern, text))
+    return matches[-1] if matches else None
+
+
 def _parse_context_response(pane_text: str) -> dict | None:
-    summary_m = re.search(r"SUMMARY:\s*(.+)", pane_text)
-    subsystems_m = re.search(r"SUBSYSTEMS:\s*(.+)", pane_text)
-    tech_m = re.search(r"TECH_STACK:\s*(.+)", pane_text)
+    summary_m = _last_match(r"SUMMARY:\s*(.+)", pane_text)
+    subsystems_m = _last_match(r"SUBSYSTEMS:\s*(.+)", pane_text)
+    tech_m = _last_match(r"TECH_STACK:\s*(.+)", pane_text)
     if not (summary_m and subsystems_m and tech_m):
         return None
     return {
