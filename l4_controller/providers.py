@@ -20,7 +20,7 @@ import re
 from pane_state import PaneState, classify_pane_ansi
 from registry import SessionRegistry
 from transport import TmuxTransport
-from view_parsers import parse_session_id, summarize_view
+from view_parsers import parse_model, parse_session_id, summarize_view
 
 registry = SessionRegistry()
 transport = TmuxTransport(registry=registry)
@@ -124,6 +124,22 @@ def claude_session_id(session_id: str) -> str | None:
     if not result.ok or result.view_content is None:
         return None
     return parse_session_id(result.view_content)
+
+
+def adoption_info(session_id: str) -> dict:
+    """One /status round-trip returning BOTH the session UUID and model
+    -- l5_console's adoption flow (SPEC-TUI.md SS5.1) needs both per
+    candidate, and there's no reason to pay the ~1s intrusive-view cost
+    twice for one pane when a single capture already contains both
+    fields. Same adoption-time-only constraint as claude_session_id():
+    never call this from a polling loop."""
+    result = transport.deliver(session_id, "/status")
+    if not result.ok or result.view_content is None:
+        return {"claude_session": None, "model": None}
+    return {
+        "claude_session": parse_session_id(result.view_content),
+        "model": parse_model(result.view_content),
+    }
 
 
 def spend(session_id: str) -> dict:

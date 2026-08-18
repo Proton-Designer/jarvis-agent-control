@@ -65,6 +65,19 @@ def parse_session_id(view_text: str) -> str | None:
     return id_m.group(1)
 
 
+def parse_model(view_text: str) -> str | None:
+    """Structured extraction (not a spoken sentence, unlike parse_status)
+    -- the raw model name from the same /status capture, for l5_console's
+    adoption flow (SPEC-TUI.md SS5.1: candidates are listed with model +
+    self-written summary). Reads from the same view_content as
+    parse_session_id() so adoption only needs one /status round-trip per
+    candidate, not two."""
+    model_m = re.search(r"Model:\s+(\S.*)", view_text)
+    if not model_m:
+        return None
+    return model_m.group(1).strip()
+
+
 VIEW_PARSERS.update(
     {
         "/cost": parse_cost_or_usage,
