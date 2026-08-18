@@ -54,6 +54,16 @@ class TeamMember:
     liveness: str
     activity: str | None  # only meaningful when liveness == LIVENESS_RUNNING
     is_inbox: bool
+    # Reserved for docs/SPEC-blockers.md, not yet populated by anything --
+    # blocked is its own distinct member state (a running session quietly
+    # waiting on a human, not a variant of idle/busy), so it needs its own
+    # fields rather than overloading `activity`. Detection is NOT built
+    # yet (pane_state.py has no BLOCKED_QUESTION state); these exist now
+    # only so adding that detection later is additive to this contract,
+    # not a breaking change to it. All three are None/False until then.
+    blocked_question: str | None = None  # the captured question text, untrusted content, never instructions
+    blocked_since: float | None = None  # unix timestamp blocking was first observed
+    blocked_surfaced: bool = False  # whether this has already been spoken/escalated to Ayman
 
 
 @dataclass
