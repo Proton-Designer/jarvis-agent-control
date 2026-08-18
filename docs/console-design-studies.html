@@ -1,0 +1,588 @@
+<title>Jarvis Console Studies</title>
+<style>
+  :root {
+    --bg: #EFF1F4;
+    --surface: #FFFFFF;
+    --ink: #11141B;
+    --muted: #5A6272;
+    --line: #D8DCE3;
+    --accent: #0B6E75;
+    --accent-soft: #E2EFF0;
+
+    --term-bg: #0C0F14;
+    --term-surface: #10151C;
+    --term-line: #253039;
+    --term-ink: #C9D2DE;
+    --term-dim: #6B7688;
+    --term-accent: #4FD6E0;
+    --ok: #46C07A;
+    --warn: #E0A34A;
+    --err: #EE6055;
+
+    --serif: ui-serif, "New York", Georgia, "Times New Roman", serif;
+    --sans: system-ui, -apple-system, "Segoe UI", sans-serif;
+    --mono: ui-monospace, "SF Mono", SFMono-Regular, Menlo, Consolas, monospace;
+  }
+
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --bg: #0D1016;
+      --surface: #14181F;
+      --ink: #DDE3EC;
+      --muted: #8A93A3;
+      --line: #232A34;
+      --accent: #4FD6E0;
+      --accent-soft: #14262A;
+    }
+  }
+  :root[data-theme="dark"] {
+    --bg: #0D1016;
+    --surface: #14181F;
+    --ink: #DDE3EC;
+    --muted: #8A93A3;
+    --line: #232A34;
+    --accent: #4FD6E0;
+    --accent-soft: #14262A;
+  }
+
+  * { box-sizing: border-box; }
+
+  body {
+    background: var(--bg);
+    color: var(--ink);
+    font-family: var(--sans);
+    line-height: 1.65;
+    margin: 0;
+    padding: clamp(1.5rem, 5vw, 4.5rem) clamp(1rem, 5vw, 2rem) 6rem;
+    -webkit-font-smoothing: antialiased;
+  }
+
+  .wrap { max-width: 74rem; margin: 0 auto; display: flex; flex-direction: column; gap: 4rem; }
+  .prose { max-width: 40rem; }
+
+  .eyebrow {
+    font-family: var(--mono);
+    font-size: 0.72rem;
+    letter-spacing: 0.14em;
+    text-transform: uppercase;
+    color: var(--accent);
+    margin: 0 0 1rem;
+  }
+
+  h1 {
+    font-family: var(--serif);
+    font-weight: 500;
+    font-size: clamp(2.2rem, 5.5vw, 3.4rem);
+    line-height: 1.08;
+    letter-spacing: -0.02em;
+    text-wrap: balance;
+    margin: 0 0 1.25rem;
+  }
+
+  h2 {
+    font-family: var(--serif);
+    font-weight: 500;
+    font-size: clamp(1.5rem, 3vw, 1.95rem);
+    line-height: 1.2;
+    letter-spacing: -0.015em;
+    text-wrap: balance;
+    margin: 0;
+  }
+
+  h3 {
+    font-family: var(--sans);
+    font-size: 0.78rem;
+    font-weight: 650;
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+    color: var(--muted);
+    margin: 0 0 0.6rem;
+  }
+
+  p { margin: 0 0 1.1rem; }
+  p:last-child { margin-bottom: 0; }
+  .lede { font-size: 1.12rem; color: var(--muted); }
+  strong { font-weight: 620; color: var(--ink); }
+  code {
+    font-family: var(--mono);
+    font-size: 0.88em;
+    background: var(--accent-soft);
+    color: var(--accent);
+    padding: 0.1em 0.4em;
+    border-radius: 3px;
+  }
+
+  hr { border: 0; border-top: 1px solid var(--line); margin: 0; }
+
+  /* ---- proposal blocks ---- */
+  .study { display: flex; flex-direction: column; gap: 1.75rem; }
+
+  .study-head { display: flex; flex-wrap: wrap; align-items: baseline; gap: 0.5rem 1rem; }
+  .density {
+    font-family: var(--mono);
+    font-size: 0.7rem;
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
+    color: var(--muted);
+    border: 1px solid var(--line);
+    padding: 0.2rem 0.55rem;
+    border-radius: 999px;
+    white-space: nowrap;
+  }
+
+  .thesis { font-family: var(--serif); font-size: 1.2rem; font-style: italic; color: var(--muted); max-width: 44rem; margin: 0; }
+
+  .tradeoff { display: grid; grid-template-columns: repeat(auto-fit, minmax(15rem, 1fr)); gap: 1.5rem 2.5rem; }
+  .tradeoff ul { margin: 0; padding-left: 1.1rem; }
+  .tradeoff li { margin-bottom: 0.4rem; }
+  .tradeoff li::marker { color: var(--accent); }
+
+  /* ---- terminal mockups ---- */
+  .screen-scroll { overflow-x: auto; padding-bottom: 0.5rem; }
+  .screen {
+    background: var(--term-bg);
+    color: var(--term-ink);
+    font-family: var(--mono);
+    font-size: 0.775rem;
+    line-height: 1.55;
+    border-radius: 8px;
+    border: 1px solid var(--term-line);
+    padding: 0.85rem;
+    min-width: 46rem;
+    display: flex;
+    flex-direction: column;
+    gap: 0.7rem;
+  }
+  .screen.narrow { min-width: 30rem; max-width: 42rem; }
+
+  .titlebar {
+    display: flex; align-items: center; gap: 0.55rem;
+    color: var(--term-dim);
+    padding: 0 0.2rem 0.5rem;
+    border-bottom: 1px solid var(--term-line);
+    letter-spacing: 0.04em;
+  }
+  .titlebar .brand { color: var(--term-accent); font-weight: 600; letter-spacing: 0.16em; }
+  .titlebar .spacer { flex: 1; }
+
+  .cols { display: grid; gap: 0.7rem; }
+  .cols.split { grid-template-columns: minmax(0, 17rem) minmax(0, 1fr); }
+  .stack { display: flex; flex-direction: column; gap: 0.7rem; min-width: 0; }
+
+  .panel {
+    border: 1px solid var(--term-line);
+    border-radius: 5px;
+    padding: 0.85rem 0.9rem 0.8rem;
+    position: relative;
+    background: var(--term-surface);
+    min-width: 0;
+  }
+  .panel > .cap {
+    position: absolute;
+    top: -0.58rem; left: 0.75rem;
+    background: var(--term-surface);
+    padding: 0 0.4rem;
+    font-size: 0.66rem;
+    letter-spacing: 0.16em;
+    color: var(--term-dim);
+  }
+
+  .row { display: flex; align-items: center; gap: 0.5rem; white-space: nowrap; }
+  .row .grow { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+  .dim { color: var(--term-dim); }
+  .acc { color: var(--term-accent); }
+  .ok { color: var(--ok); }
+  .warn { color: var(--warn); }
+  .err { color: var(--err); }
+  .big { font-size: 1.5rem; letter-spacing: 0.08em; line-height: 1.3; }
+  .key { color: var(--term-accent); }
+
+  .meter { display: flex; gap: 2px; align-items: flex-end; height: 1.1rem; }
+  .meter i { width: 3px; background: var(--term-accent); display: block; border-radius: 1px; opacity: 0.85; }
+
+  .footbar {
+    display: flex; flex-wrap: wrap; gap: 0.15rem 1.1rem;
+    color: var(--term-dim);
+    border-top: 1px solid var(--term-line);
+    padding: 0.5rem 0.2rem 0;
+    font-size: 0.72rem;
+  }
+
+  .pipe { display: flex; align-items: center; gap: 0.55rem; flex-wrap: wrap; }
+  .node { border: 1px solid var(--term-line); border-radius: 4px; padding: 0.3rem 0.6rem; }
+  .node.on { border-color: var(--term-accent); color: var(--term-accent); }
+  .node.done { color: var(--ok); border-color: rgba(70,192,122,0.4); }
+
+  .caption { font-size: 0.85rem; color: var(--muted); max-width: 44rem; }
+
+  .verdict {
+    background: var(--surface);
+    border: 1px solid var(--line);
+    border-radius: 10px;
+    padding: clamp(1.4rem, 3vw, 2.2rem);
+    display: flex; flex-direction: column; gap: 1rem;
+  }
+
+  @media (max-width: 40rem) {
+    .cols.split { grid-template-columns: minmax(0, 1fr); }
+  }
+</style>
+
+<div class="wrap">
+
+  <header class="prose">
+    <p class="eyebrow">Design study · terminal interface</p>
+    <h1>Three consoles for Jarvis</h1>
+    <p class="lede">Jarvis runs as a daemon, an orchestrator session, and a fleet of Claude Code panes. Right now you drive all of it from memorised commands. These are three ways the control surface could look — the same functionality, at three different densities.</p>
+  </header>
+
+  <section class="prose">
+    <h3>What the interface has to do</h3>
+    <p>Four things, and only four. <strong>Toggle the microphone</strong> — one control, unambiguous, because it is the difference between a system that is listening and one that is not. <strong>Set up or reconnect the orchestrator</strong> — three states, and the interface must show which one is true rather than which one it last attempted. <strong>Show the fleet</strong> — every session Jarvis can reach, and what it is doing. <strong>Stream what is happening</strong> — wake scores, state transitions, routing decisions, as they occur.</p>
+    <p>The last one is the reason a terminal wins. A graphical app would compress all of that into a status light. Here it can be the main event.</p>
+  </section>
+
+  <hr>
+
+  <!-- ============ A ============ -->
+  <article class="study">
+    <div>
+      <div class="study-head">
+        <h2>Console</h2>
+        <span class="density">dense · full window</span>
+      </div>
+      <p class="thesis">Everything visible at once. You never wonder what state anything is in, because it is all on screen.</p>
+    </div>
+
+    <div class="screen-scroll">
+      <div class="screen">
+        <div class="titlebar">
+          <span class="brand">JARVIS</span>
+          <span class="dim">v0.4</span>
+          <span class="spacer"></span>
+          <span class="ok">● listening</span>
+        </div>
+
+        <div class="cols split">
+          <div class="stack">
+            <div class="panel">
+              <span class="cap">WAKE</span>
+              <div class="row"><span class="ok big">◉</span><span class="grow"><span class="acc">LISTENING</span><br><span class="dim">“hey jarvis”</span></span></div>
+              <div class="row dim" style="margin-top:.5rem"><span class="key">[space]</span> stop listening</div>
+            </div>
+
+            <div class="panel">
+              <span class="cap">ORCHESTRATOR</span>
+              <div class="row"><span class="ok">●</span><span class="grow">active</span></div>
+              <div class="row dim"><span class="grow">~/Jarvis</span></div>
+              <div class="row dim"><span class="grow">tools <span class="ok">✓</span> · up 4h 12m</span></div>
+              <div class="row dim" style="margin-top:.5rem"><span class="key">[r]</span> restart <span class="key">[d]</span> detach</div>
+            </div>
+
+            <div class="panel">
+              <span class="cap">RUNTIME</span>
+              <div class="row"><span class="grow">qwen2.5:7b</span><span class="ok">warm</span><span class="dim">4.7G</span></div>
+              <div class="row"><span class="grow">whisper</span><span class="ok">warm</span><span class="dim">0.5G</span></div>
+              <div class="row"><span class="grow dim">memory</span><span class="dim">38% free</span></div>
+            </div>
+          </div>
+
+          <div class="stack">
+            <div class="panel" style="min-height:11.5rem">
+              <span class="cap">STREAM</span>
+              <div class="row dim"><span>23:41:02</span><span class="grow">idle</span></div>
+              <div class="row"><span class="dim">23:41:07</span><span class="grow">wake <span class="acc">0.991</span> <span class="ok">✓ verified</span></span></div>
+              <div class="row"><span class="dim">23:41:07</span><span class="grow acc">→ CAPTURING</span></div>
+              <div class="row"><span class="dim">23:41:19</span><span class="grow">chunk 1 · 4.2s · “tell the api gateway to…”</span></div>
+              <div class="row"><span class="dim">23:41:26</span><span class="grow">chunk 2 · 6.8s · “…and the mobile app should…”</span></div>
+              <div class="row"><span class="dim">23:41:31</span><span class="grow ok">stop phrase ✓ “that’s it”</span></div>
+              <div class="row"><span class="dim">23:41:32</span><span class="grow">classify → <span class="acc">DISPATCH</span> <span class="dim">142ms</span></span></div>
+              <div class="row"><span class="dim">23:41:32</span><span class="grow">→ orchestrator · routing 4</span></div>
+            </div>
+
+            <div class="panel">
+              <span class="cap">AGENTS / TEAMS</span>
+              <div class="row"><span class="ok">●</span><span class="grow"><span class="acc">api</span> <span class="dim">· 3 agents</span></span><span class="dim">~/work/api</span></div>
+              <div class="row" style="padding-left:1.1rem"><span class="ok">●</span><span class="grow">lead <span class="dim">← inbox</span></span><span class="warn">busy</span></div>
+              <div class="row" style="padding-left:1.1rem"><span class="ok">●</span><span class="grow">eng1</span><span class="dim">idle</span></div>
+              <div class="row" style="padding-left:1.1rem"><span class="ok">●</span><span class="grow">eng2</span><span class="dim">idle</span></div>
+              <div class="row" style="margin-top:.4rem"><span class="ok">●</span><span class="grow"><span class="acc">mobile</span> <span class="dim">· 2 agents</span></span><span class="dim">~/work/mobile</span></div>
+              <div class="row" style="padding-left:1.1rem"><span class="ok">●</span><span class="grow">lead <span class="dim">← inbox</span></span><span class="dim">idle</span></div>
+              <div class="row" style="padding-left:1.1rem"><span class="dim">○</span><span class="grow dim">eng1</span><span class="dim">stopped</span></div>
+              <div class="row" style="margin-top:.4rem"><span class="dim">○</span><span class="grow dim">etl <span>· 2 agents</span></span><span class="dim">~/work/etl</span></div>
+              <div class="row" style="padding-left:1.1rem"><span class="dim">○</span><span class="grow dim">lead ← inbox</span><span class="dim">stopped</span></div>
+              <div class="row" style="padding-left:1.1rem"><span class="dim">○</span><span class="grow dim">eng1</span><span class="err">lost</span></div>
+              <div class="row" style="margin-top:.55rem"><span class="key">[n]</span><span class="grow dim">add a team</span><span class="key">[enter]</span><span class="dim">reconnect</span></div>
+            </div>
+
+            <div class="panel" style="padding:.6rem .9rem">
+              <div class="row" style="gap:1.3rem; flex-wrap:wrap; white-space:normal">
+                <span><span class="ok">●</span> <span class="dim">running</span></span>
+                <span class="dim">○ stopped — reconnectable</span>
+                <span><span class="err">lost</span> <span class="dim">— no saved history</span></span>
+                <span class="dim">idle / busy = doing now</span>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <div class="footbar">
+          <span><span class="key">w</span> wake</span>
+          <span><span class="key">o</span> orchestrator</span>
+          <span><span class="key">s</span> sessions</span>
+          <span><span class="key">l</span> logs</span>
+          <span><span class="key">?</span> help</span>
+          <span><span class="key">q</span> quit</span>
+        </div>
+      </div>
+    </div>
+
+    <div class="tradeoff">
+      <div>
+        <h3>What it's good at</h3>
+        <ul>
+          <li>Nothing is hidden behind a keystroke — memory pressure, model warmth and tool health are all just visible.</li>
+          <li>The stream sits beside the controls, so cause and effect are read together.</li>
+          <li>Scales to a fleet: the sessions panel is the natural home for ten projects.</li>
+        </ul>
+      </div>
+      <div>
+        <h3>What it costs</h3>
+        <ul>
+          <li>Wants a full window. Cramped below roughly 100 columns.</li>
+          <li>Most of the surface is idle most of the time — you are usually only doing one thing.</li>
+          <li>The most safety-critical control, the microphone, gets the same visual weight as memory statistics.</li>
+        </ul>
+      </div>
+    </div>
+  </article>
+
+  <hr>
+
+  <!-- ============ B ============ -->
+  <article class="study">
+    <div>
+      <div class="study-head">
+        <h2>Signal</h2>
+        <span class="density">expressive · full window</span>
+      </div>
+      <p class="thesis">The pipeline is the interface. You watch your voice move through the system, stage by stage.</p>
+    </div>
+
+    <div class="screen-scroll">
+      <div class="screen">
+        <div class="titlebar">
+          <span class="brand">JARVIS</span>
+          <span class="spacer"></span>
+          <span class="dim">orchestrator <span class="ok">●</span> · 3 sessions · qwen2.5:7b <span class="ok">warm</span></span>
+        </div>
+
+        <div class="panel" style="text-align:center; padding:1.4rem 1rem 1.2rem">
+          <span class="cap">STATE</span>
+          <div class="acc big" style="letter-spacing:.22em">CAPTURING</div>
+          <div class="dim" style="margin-top:.35rem">12.4s · 2 chunks · say “that’s it” to finish</div>
+          <div class="meter" style="justify-content:center; margin-top:.9rem">
+            <i style="height:22%"></i><i style="height:48%"></i><i style="height:81%"></i><i style="height:64%"></i>
+            <i style="height:96%"></i><i style="height:72%"></i><i style="height:38%"></i><i style="height:59%"></i>
+            <i style="height:88%"></i><i style="height:44%"></i><i style="height:26%"></i><i style="height:61%"></i>
+            <i style="height:79%"></i><i style="height:35%"></i><i style="height:18%"></i><i style="height:52%"></i>
+          </div>
+        </div>
+
+        <div class="panel">
+          <span class="cap">PIPELINE</span>
+          <div class="pipe">
+            <span class="node done">wake ✓</span>
+            <span class="dim">→</span>
+            <span class="node on">capture 12.4s</span>
+            <span class="dim">→</span>
+            <span class="node dim">transcribe</span>
+            <span class="dim">→</span>
+            <span class="node dim">classify</span>
+            <span class="dim">→</span>
+            <span class="node dim">route</span>
+            <span class="dim">→</span>
+            <span class="node dim">deliver</span>
+          </div>
+        </div>
+
+        <div class="cols split">
+          <div class="panel">
+            <span class="cap">HEARD SO FAR</span>
+            <div class="dim" style="white-space:normal; line-height:1.5">“tell the api gateway to run its test suite and let me know if anything fails, and the mobile app should pull latest from main…”</div>
+          </div>
+          <div class="panel">
+            <span class="cap">TARGETS</span>
+            <div class="row"><span class="ok">●</span><span class="grow">api-gateway</span><span class="dim">~/work/api</span></div>
+            <div class="row"><span class="ok">●</span><span class="grow">mobile-app</span><span class="dim">~/work/mobile</span></div>
+            <div class="row"><span class="ok">●</span><span class="grow">orchestrator</span><span class="dim">~/Jarvis</span></div>
+          </div>
+        </div>
+
+        <div class="footbar">
+          <span><span class="key">space</span> stop listening</span>
+          <span><span class="key">esc</span> cancel dictation</span>
+          <span><span class="key">tab</span> fleet view</span>
+          <span><span class="key">q</span> quit</span>
+        </div>
+      </div>
+    </div>
+
+    <p class="caption">Idle, the same screen collapses: the state block reads <span style="font-family:var(--mono)">LISTENING</span>, the pipeline greys out, and the transcript panel is replaced by the last routing summary.</p>
+
+    <div class="tradeoff">
+      <div>
+        <h3>What it's good at</h3>
+        <ul>
+          <li>Answers the question you actually have mid-dictation: <em>is it still hearing me?</em></li>
+          <li>The live meter is real feedback — it moves when you speak, so a dead microphone is obvious instantly.</li>
+          <li>Teaches the system's shape. After a week you would know exactly where a failure happened.</li>
+        </ul>
+      </div>
+      <div>
+        <h3>What it costs</h3>
+        <ul>
+          <li>Optimised for the sixty seconds you are talking, not the hours you are not.</li>
+          <li>Fleet management gets demoted to a second view.</li>
+          <li>The most animated design, and animation in a terminal is where taste goes to die if overdone.</li>
+        </ul>
+      </div>
+    </div>
+  </article>
+
+  <hr>
+
+  <!-- ============ C ============ -->
+  <article class="study">
+    <div>
+      <div class="study-head">
+        <h2>Rail</h2>
+        <span class="density">minimal · tmux pane</span>
+      </div>
+      <p class="thesis">Not an app you open. A pane you leave running beside your work.</p>
+    </div>
+
+    <div class="screen-scroll">
+      <div class="screen narrow">
+        <div class="titlebar">
+          <span class="brand">JARVIS</span>
+          <span class="spacer"></span>
+          <span class="ok">◉ listening</span>
+        </div>
+
+        <div class="stack" style="gap:.45rem; padding:0 .2rem">
+          <div class="row"><span class="dim" style="width:6.5rem">orchestrator</span><span class="ok">● active</span><span class="dim">tools ✓</span></div>
+          <div class="row"><span class="dim" style="width:6.5rem">sessions</span><span class="grow">3 reachable</span><span class="err">1 gone</span></div>
+          <div class="row"><span class="dim" style="width:6.5rem">model</span><span class="grow">qwen2.5:7b</span><span class="ok">warm</span></div>
+        </div>
+
+        <div class="panel" style="min-height:7.5rem">
+          <span class="cap">RECENT</span>
+          <div class="row"><span class="dim">41:07</span><span class="grow">wake <span class="ok">✓</span></span></div>
+          <div class="row"><span class="dim">41:31</span><span class="grow">“that’s it” <span class="ok">✓</span></span></div>
+          <div class="row"><span class="dim">41:32</span><span class="grow acc">DISPATCH · 4</span></div>
+          <div class="row"><span class="dim">41:34</span><span class="grow">api-gateway <span class="ok">sent</span></span></div>
+          <div class="row"><span class="dim">41:34</span><span class="grow">mobile-app <span class="ok">sent</span></span></div>
+          <div class="row"><span class="dim">41:34</span><span class="grow warn">“the backend” held</span></div>
+        </div>
+
+        <div class="footbar">
+          <span><span class="key">space</span> wake</span>
+          <span><span class="key">o</span> orch</span>
+          <span><span class="key">enter</span> expand</span>
+          <span><span class="key">q</span> quit</span>
+        </div>
+      </div>
+    </div>
+
+    <div class="tradeoff">
+      <div>
+        <h3>What it's good at</h3>
+        <ul>
+          <li>Lives in a narrow pane forever without stealing space from your actual work.</li>
+          <li>Always visible, which makes it a genuine microphone indicator rather than a screen you check.</li>
+          <li>Smallest thing to build, and the least to maintain as the system changes.</li>
+        </ul>
+      </div>
+      <div>
+        <h3>What it costs</h3>
+        <ul>
+          <li>Setup and reconnect need a modal or an expanded view — there is no room inline.</li>
+          <li>Diagnostics get compressed to the point of being hints rather than answers.</li>
+          <li>Undersells the system. It looks like a status bar, not the thing running your fleet.</li>
+        </ul>
+      </div>
+    </div>
+  </article>
+
+  <hr>
+
+  <article class="study">
+    <div>
+      <div class="study-head">
+        <h2>Adding a team</h2>
+        <span class="density">one flow · one fork</span>
+      </div>
+      <p class="thesis">Two ways in, converging on the same two questions. Nothing else is ever asked.</p>
+    </div>
+
+    <div class="screen-scroll">
+      <div class="screen narrow">
+        <div class="titlebar"><span class="brand">ADD A TEAM</span><span class="spacer"></span><span class="dim">esc to cancel</span></div>
+
+        <div class="panel">
+          <span class="cap">STEP 1 — WHICH</span>
+          <div class="row"><span class="acc">▸</span><span class="grow">Adopt agents already running</span><span class="dim">3 found</span></div>
+          <div class="row"><span class="dim">&nbsp;</span><span class="grow dim">Start a fresh team</span></div>
+        </div>
+
+        <div class="panel">
+          <span class="cap">STEP 2 — WHO RECEIVES INSTRUCTIONS</span>
+          <div class="dim" style="margin-bottom:.5rem">~/work/api · 3 agents found</div>
+          <div class="row"><span class="acc">▸</span><span class="grow">claude-api-lead</span><span class="dim">Opus 5</span></div>
+          <div class="row dim" style="padding-left:1.1rem; white-space:normal">“Opus Lead on api — coordinating auth refactor…”</div>
+          <div class="row" style="margin-top:.3rem"><span class="dim">&nbsp;</span><span class="grow dim">claude-api-eng1</span><span class="dim">Sonnet 5</span></div>
+          <div class="row" style="margin-top:.3rem"><span class="dim">&nbsp;</span><span class="grow dim">claude-api-eng2</span><span class="dim">Sonnet 5</span></div>
+        </div>
+
+        <div class="panel">
+          <span class="cap">STEP 3 — WHAT DO YOU CALL IT</span>
+          <div class="row"><span class="acc">the api project</span><span class="dim">▏</span></div>
+          <div class="row dim" style="margin-top:.3rem">also matches: api, the api one, api gateway</div>
+        </div>
+
+        <div class="footbar"><span><span class="key">↑↓</span> choose</span><span><span class="key">enter</span> next</span><span><span class="key">esc</span> back</span></div>
+      </div>
+    </div>
+
+    <div class="tradeoff">
+      <div>
+        <h3>Adopt what's running</h3>
+        <ul>
+          <li>Live sessions grouped by working directory — the directory <em>is</em> the team.</li>
+          <li>Each agent shown with its model and its own self-written summary, so you choose informedly.</li>
+          <li>Nothing is inferred about roles. The system never learns what a “lead” is.</li>
+        </ul>
+      </div>
+      <div>
+        <h3>Start fresh</h3>
+        <ul>
+          <li>Pick a directory, choose how many agents and which model each runs.</li>
+          <li>Sessions are created, launched, and the trust prompt pre-answered — no terminal work.</li>
+          <li>Same two questions at the end: who receives, what do you call it.</li>
+        </ul>
+      </div>
+    </div>
+  </article>
+
+  <hr>
+
+  <section class="verdict">
+    <h2>Where I'd land</h2>
+    <p><strong>Rail as the default, Console one keystroke away, and Signal's live meter borrowed into both.</strong></p>
+    <p>The three are not really competing — they are the same application at three window sizes, which is exactly what a modern TUI framework handles natively. Build the state layer once and let the layout respond to the space it is given: in a narrow pane you get Rail, full-screen you get Console, and during an active dictation the state block and meter take over regardless of size.</p>
+    <p>The one piece I would take from Signal no matter what is the <strong>live audio meter</strong>. Every other element reports what the system believes; the meter reports what the microphone is actually receiving. When something goes wrong at three in the morning, that is the difference between debugging and guessing.</p>
+    <p class="caption" style="margin-top:.5rem">Framework research is running in parallel — Textual, Ratatui, Bubble Tea and the current field — and will decide how much of this is free versus hand-built.</p>
+  </section>
+
+</div>
