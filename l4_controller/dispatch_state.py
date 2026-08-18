@@ -118,6 +118,31 @@ def mark_dispatch_complete(dictation_ref: str, result_summary: dict) -> None:
     _write(state)
 
 
+def mark_dispatch_failed(dictation_ref: str, reason: str) -> None:
+    """The handoff's OWN pointer delivery failed synchronously -- the
+    router was never even notified this dictation exists (SPEC-
+    orchestration.md SS1.4). Distinct from "abandoned" (a router that WAS
+    notified but never finished or crashed mid-flight, self-healed after
+    DISPATCH_ABANDONED_AFTER_S): this is known immediately, at handoff
+    time, so it must read that way immediately rather than lingering as
+    "forwarded" -- which implies the router is actively working on it --
+    for up to three minutes until abandonment catches up to a fact
+    already known."""
+    state, _ = _read_raw()
+    existing = state["dispatches"].get(dictation_ref, {})
+    state["dispatches"][dictation_ref] = {
+        "dictation_ref": dictation_ref,
+        "forwarded_at": existing.get("forwarded_at"),
+        "l3_note": existing.get("l3_note"),
+        "stage": "failed",
+        "completed_at": None,
+        "failed_at": time.time(),
+        "failure_reason": reason,
+        "result_summary": None,
+    }
+    _write(state)
+
+
 def report_dispatch_stage(dictation_ref: str, stage: str, detail: str = "") -> None:
     """Optional, non-authoritative color the router may push mid-turn for
     ITS OWN dictation. Never required for dispatch_state() to answer

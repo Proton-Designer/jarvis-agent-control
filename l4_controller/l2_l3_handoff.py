@@ -29,11 +29,29 @@ failure isn't that duration -- it's the SILENCE: Ayman has no signal the
 system heard him until routing finishes, which risks him re-triggering
 the wake word and starting a second, overlapping dictation. So
 deliver_transcript speaks a short, generic acknowledgement (via
-say_feedback, so JARVIS_MUTE governs it like everything else) the instant
-it's called -- before writing the file, before the pointer delivery,
-before any orchestrator reasoning has happened. Deliberately generic, not
+say_feedback, so JARVIS_MUTE governs it like everything else) as soon as
+the dictation is durably enqueued (file written, dispatch state marked
+forwarded) -- before the pointer delivery, before any router reasoning
+has happened, but AFTER the enqueue is a confirmed fact rather than an
+assumption (SPEC-orchestration.md SS1.4 -- see the try/except around the
+enqueue in deliver_transcript() below: an enqueue failure is spoken
+explicitly and this ack is never reached). Deliberately generic, not
 "routing N instructions": at this point nothing has parsed the dictation
 yet, so a specific count would be a guess dressed up as a fact.
+
+THE HANDOFF SEAM, under the two-tier architecture (Haiku concierge /
+Sonnet router): whatever calls deliver_transcript() -- directly, or via a
+thin wrapper Haiku's own turn invokes -- gets a budget of roughly "how
+long a file write and a tmux send-keys call take," not "how long the
+router's reasoning takes." That's not a promise this function makes by
+being fast; it's a fact already true of what it does (no model call
+anywhere in this function) plus the enqueue-then-ack ordering above. The
+one thing that must never happen is this function's caller being built
+as fire-and-forget, ignoring the return value, on the theory that "it's
+fast, it won't fail" -- every failure path in this function (preflight,
+enqueue, pointer delivery) already speaks explicitly, so the audible-
+failure guarantee is self-contained here and does not depend on the
+caller checking anything. See handoff_seam_canary.py.
 """
 
 from __future__ import annotations
@@ -43,7 +61,7 @@ import sys
 import time
 from pathlib import Path
 
-from dispatch_state import mark_dispatch_forwarded
+from dispatch_state import mark_dispatch_failed, mark_dispatch_forwarded
 from latency_log import log_event
 from providers import list_sessions
 from say_feedback import speak
@@ -147,13 +165,45 @@ def deliver_transcript(
         log_event("handoff_no_tools", chars=len(text))
         speak("The orchestrator has no tools connected -- check its MCP prompt.")
         return None
+
+    # SPEC-orchestration.md SS1.4: the handoff's fast-path ack must
+    # SYNCHRONOUSLY CONFIRM THE ENQUEUE SUCCEEDED -- not be spoken on the
+    # assumption it will. Under the two-tier architecture this function
+    # (or its equivalent) is what a Haiku-side caller's "~20ms hand off
+    # and return" budget is actually paying for; if that budget were spent
+    # on a fire-and-forget call that never checks whether the write
+    # actually landed, a disk-full or permissions failure here would
+    # previously have propagated as an uncaught exception AFTER "Got it,
+    # working on it" was already spoken -- a truthful-sounding ack
+    # immediately followed by a silent crash, which is worse than never
+    # acking at all. So: attempt the enqueue (write the dictation file,
+    # mark dispatch state as forwarded) FIRST, catch any failure and speak
+    # it explicitly, and only speak the ack once the enqueue is a
+    # confirmed fact, not a hope.
+    try:
+        path = write_dictation(text)
+        # Code-driven "forwarded" marker for the router's dispatch-in-
+        # flight state -- written here, not by the router, because this
+        # is the actual moment of handoff and this call already fires
+        # exactly once per real forward. dictation_ref is this dictation's
+        # own file path (SPEC-orchestration.md SS0.1) -- see
+        # dispatch_state.py for why this must not be an LLM self-report,
+        # and why it's keyed rather than a global singleton (a second
+        # dictation can be handed off before this one's router work
+        # finishes; each must close out only its own record).
+        mark_dispatch_forwarded(str(path))
+    except Exception as e:  # noqa: BLE001
+        log_event("handoff_enqueue_failed", chars=len(text), error=str(e))
+        speak("I couldn't record that dictation -- it wasn't handed off.")
+        return None
+
     speak("Got it, working on it.")
-    path = write_dictation(text)
-    # Pre-inject the live session list rather than making L3 spend a full
-    # model turn calling list_sessions() itself before it can even start
-    # building a routing plan -- measured live (2026-08-17): ~7.7s of a
-    # ~17.9s pointer-to-spoken-plan turn was spent on exactly that round
-    # trip. Captured at send time, right here, milliseconds before
+
+    # Pre-inject the live session list rather than making the router spend
+    # a full model turn calling list_sessions() itself before it can even
+    # start building a routing plan -- measured live (2026-08-17): ~7.7s
+    # of a ~17.9s pointer-to-spoken-plan turn was spent on exactly that
+    # round trip. Captured at send time, right here, milliseconds before
     # delivery -- as fresh as a separate list_sessions() call would have
     # been anyway. CLAUDE.md still permits calling list_sessions() as a
     # fallback if this list looks stale or wrong; this only removes the
@@ -163,12 +213,6 @@ def deliver_transcript(
         f"New dictation at {path} — read it and route the instructions inside. "
         f"Live sessions right now (captured at send time): {_format_session_list(sessions)}"
     )
-    # Code-driven "forwarded" marker for the concierge's dispatch-in-flight
-    # state -- written here, not by L3, because this is the actual moment
-    # of handoff and this call already fires exactly once per real
-    # forward. See dispatch_state.py for why this must not be an
-    # LLM self-report.
-    mark_dispatch_forwarded(str(path))
     result = transport.deliver(orchestrator_target, pointer)
     log_event("pointer_delivered", ok=result.ok, target=orchestrator_target)
     if not result.ok:
@@ -185,4 +229,11 @@ def deliver_transcript(
             speak("I couldn't reach the orchestrator session -- is it running?")
         else:
             speak(f"I couldn't hand that off to the orchestrator: {result.detail}.")
+        # The enqueue (file + mark_dispatch_forwarded above) succeeded,
+        # but the router was never actually notified -- correct the
+        # record to say so immediately rather than leaving it as
+        # "forwarded" (implying active work) for up to
+        # DISPATCH_ABANDONED_AFTER_S until abandonment self-heals it to a
+        # fact this function already knows right now.
+        mark_dispatch_failed(str(path), result.reason or result.detail)
     return result
