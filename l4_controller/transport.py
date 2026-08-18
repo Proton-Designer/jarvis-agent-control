@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import re
 import subprocess
+import threading
 import time
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
@@ -19,6 +20,32 @@ import say_feedback
 from pane_state import PaneState, PaneStatePatterns, classify_pane_ansi
 from slash_guard import check_slash_payload, load_known_commands
 from view_parsers import VIEW_PARSERS
+
+# Per-target-session delivery lock (SPEC-orchestration.md SS0.3). `tmux
+# send-keys` is not atomic against a second concurrent writer to the same
+# pane -- two genuinely concurrent deliver() calls to the same target
+# (a queued instruction racing a /btw side-question, or two team-lead
+# callers) can interleave keystrokes into one pane, which is payload
+# corruption, not an ordering nuance. Module-level, not an attribute on
+# TmuxTransport: this codebase creates more than one TmuxTransport
+# instance (providers.py's shared singleton, l2_l3_handoff.py's own
+# per-call instance, ...), and an instance-level lock dict would only
+# serialize calls that happen to go through the SAME instance -- the
+# actual invariant needed is "no two sends to this tmux session name
+# overlap, no matter which Transport object issued them." Keyed by
+# target (a tmux session name/session_id string), not global: deliveries
+# to different targets must not block each other.
+_target_locks: dict[str, threading.Lock] = {}
+_target_locks_guard = threading.Lock()
+
+
+def _lock_for_target(target: str) -> threading.Lock:
+    with _target_locks_guard:
+        lock = _target_locks.get(target)
+        if lock is None:
+            lock = threading.Lock()
+            _target_locks[target] = lock
+        return lock
 
 VIEW_OPEN_POLL_ATTEMPTS = 6
 VIEW_OPEN_POLL_INTERVAL_S = 0.5
@@ -240,6 +267,17 @@ class TmuxTransport(Transport):
             say_feedback.speak(f"{name} had a view open and I couldn't close it cleanly -- check it manually.")
 
     def deliver(self, target: str, payload: str) -> DeliveryResult:
+        """Thin locking wrapper: the entire delivery (pane-state read,
+        every send-keys call, the stuck-view/readonly-view dances) runs
+        under one per-target lock (SPEC-orchestration.md SS0.3) so two
+        concurrent deliver() calls to the SAME target -- from this or any
+        other Transport instance, see _lock_for_target's docstring -- can
+        never interleave keystrokes into one pane. Calls to different
+        targets are unaffected by each other."""
+        with _lock_for_target(target):
+            return self._deliver_locked(target, payload)
+
+    def _deliver_locked(self, target: str, payload: str) -> DeliveryResult:
         if not self.session_exists(target):
             return DeliveryResult(
                 ok=False, detail=f"no such tmux session: {target}", reason="no_session"
