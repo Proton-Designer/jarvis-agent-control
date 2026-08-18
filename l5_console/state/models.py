@@ -70,9 +70,10 @@ class TeamMember:
 class Team:
     id: str
     aliases: list[str]
-    root: str
+    root: str  # exact, unmodified registry root -- teams.py matches liveness against this byte-for-byte, never display_path
     inbox_reachable: bool
     members: list[TeamMember] = field(default_factory=list)
+    display_path: str = ""  # root with $HOME collapsed to "~" -- cosmetic only, see UnassignedSession.display_path
 
 
 @dataclass
@@ -104,7 +105,8 @@ class RuntimeState:
 class UnassignedSession:
     tmux: str
     claude_session: str | None
-    working_dir: str
+    working_dir: str  # exact, unmodified pane_current_path -- use THIS, never display_path, for anything functional (e.g. passed as `root` when adopting), since teams.py matches liveness against it byte-for-byte
+    display_path: str  # working_dir with $HOME collapsed to "~" -- cosmetic only, safe to truncate further at render time
 
 
 @dataclass

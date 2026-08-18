@@ -62,6 +62,35 @@ def encode_project_path(path: str) -> str:
     return path.replace("/", "-").replace("_", "-")
 
 
+DISPLAY_PATH_MAX_LEN = 40
+
+
+def _display_path(path: str) -> str:
+    """Collapses a $HOME prefix to "~" first (loses no information), then
+    -- if still long -- keeps only the last two path components behind a
+    leading ellipsis. $HOME-collapsing alone doesn't help a path entirely
+    outside it: the actual case that prompted this (found live
+    2026-08-18) was a ~120-char /private/tmp/claude-.../scratchpad/...
+    session path, unreadable at any console width and not under $HOME at
+    all. The tail (the directory name Ayman would actually recognize) is
+    what matters for identification; this is a reasonable default, not a
+    substitute for width-aware truncation, which belongs at render time
+    where the real available width is known."""
+    home = str(Path.home())
+    if path == home:
+        collapsed = "~"
+    elif path.startswith(home + "/"):
+        collapsed = "~" + path[len(home):]
+    else:
+        collapsed = path
+
+    if len(collapsed) <= DISPLAY_PATH_MAX_LEN:
+        return collapsed
+    parts = collapsed.rstrip("/").split("/")
+    tail = "/".join(parts[-2:]) if len(parts) >= 2 else collapsed
+    return f".../{tail}"
+
+
 def load_registry() -> list[dict]:
     if not TEAMS_REGISTRY_PATH.exists():
         return []
@@ -143,13 +172,17 @@ def discover_teams_and_unassigned() -> tuple[list[Team], list[UnassignedSession]
                 id=entry["id"],
                 aliases=list(entry.get("aliases", [])),
                 root=entry["root"],
+                display_path=_display_path(entry["root"]),
                 inbox_reachable=inbox_reachable,
                 members=members,
             )
         )
 
     unassigned = [
-        UnassignedSession(tmux=s["session_id"], claude_session=None, working_dir=s["working_dir"])
+        UnassignedSession(
+            tmux=s["session_id"], claude_session=None,
+            working_dir=s["working_dir"], display_path=_display_path(s["working_dir"]),
+        )
         for s in live_sessions
         if s["session_id"] not in claimed_tmux_names
         # The orchestrator is a singleton with its own OrchestratorState
