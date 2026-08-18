@@ -88,6 +88,22 @@ class JarvisConsole(App):
     def action_reconnect(self) -> None:
         self.push_screen(ReconnectScreen())
 
+    def check_action(self, action: str, parameters: tuple) -> bool | None:
+        # Defense in depth for the setup/reconnect focus bug (see
+        # setup_flow.py's docstring): focusing the right widget on every
+        # step mount fixes every path that currently loses focus, but
+        # focus is a runtime property -- a future step, a widget that
+        # can't take focus, an unmount race, any of those puts a
+        # keystroke back in front of these global bindings with nothing
+        # capturing it as text. A modal should own the keyboard while
+        # it's open, structurally, not by relying on nothing ever
+        # slipping through the per-widget fix. len(screen_stack) > 1
+        # means a SetupScreen/ReconnectScreen is pushed on top of the
+        # base Rail/Console/Signal screen.
+        if action in ("add_team", "reconnect") and len(self.screen_stack) > 1:
+            return False
+        return True
+
     def __init__(self, *args, **kwargs) -> None:
         super().__init__(*args, **kwargs)
         # Cached from the two clocks, read by _apply_layout() to decide
