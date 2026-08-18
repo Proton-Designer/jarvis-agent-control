@@ -28,16 +28,29 @@ proper package.
 from __future__ import annotations
 
 from models import (  # noqa: F401 -- re-exported for consumers
+    EngineState,
     JarvisState,
     LIVENESS_LOST,
     LIVENESS_RUNNING,
     LIVENESS_STOPPED,
-    OrchestratorState,
+    RoleSlot,
     RuntimeState,
     Team,
     TeamMember,
     UnassignedSession,
     WakeDaemonState,
+)
+from engine_roles import (  # noqa: F401 -- re-exported for consumers
+    DEFAULT_EFFORT as ENGINE_DEFAULT_EFFORT,
+    EFFORTS as ENGINE_EFFORTS,
+    MODELS as ENGINE_MODELS,
+    ROLES as ENGINE_ROLES,
+    activate_role,
+    attach_role,
+    create_role_session,
+    list_attachable_sessions,
+    remove_role,
+    start_precondition,
 )
 from poller import Poller
 

@@ -40,20 +40,20 @@ import blocked_state  # noqa: E402
 import dispatch_state as dispatch_state_mod  # noqa: E402
 import say_feedback  # noqa: E402
 
-import orchestrator as orchestrator_mod
+import engine_roles as engine_roles_mod
 import runtime as runtime_mod
 import teams as teams_mod
 import wake as wake_mod
 import wake_signal as wake_signal_mod
 from models import (
-    LIVENESS_LOST,
+    EngineState,
     JarvisState,
-    OrchestratorState,
+    RoleSlot,
     RuntimeState,
     WakeDaemonState,
 )
 
-ORCHESTRATOR_INTERVAL_S = 1.0
+ENGINE_INTERVAL_S = 1.0
 WAKE_INTERVAL_S = 1.0
 TEAMS_INTERVAL_S = 3.0  # effective cadence once per-member activity is added; membership/liveness alone would be ~1s
 RUNTIME_INTERVAL_S = 2.5
@@ -67,15 +67,22 @@ SPEND_INTERVAL_S = 45.0
 BLOCKED_SETTLE_DELAY_S = 5.0
 
 
+def _empty_role_slot() -> RoleSlot:
+    return RoleSlot(
+        attached=False, name=None, model=None, effort=None, tmux=None, working_dir=None,
+        claude_session=None, liveness=None, tools_reachable=False,
+    )
+
+
 def _initial_state() -> JarvisState:
     """Never-polled-yet placeholder -- error is set explicitly rather
     than leaving fields at a misleadingly "normal-looking" default, so a
     consumer that calls get_state() before start() has had a chance to
     complete a first pass sees "not yet polled", not a false "running"."""
     return JarvisState(
-        orchestrator=OrchestratorState(
-            polled_at=0.0, expected_interval=ORCHESTRATOR_INTERVAL_S, error="not yet polled",
-            liveness=LIVENESS_LOST, session_id=None, tools_reachable=False,
+        engine=EngineState(
+            polled_at=0.0, expected_interval=ENGINE_INTERVAL_S, error="not yet polled",
+            concierge=_empty_role_slot(), orchestrator=_empty_role_slot(),
         ),
         teams=[], teams_polled_at=0.0, teams_expected_interval=TEAMS_INTERVAL_S, teams_error="not yet polled",
         wake=WakeDaemonState(
@@ -99,7 +106,7 @@ class Poller:
 
     def start(self) -> None:
         loops = [
-            self._loop_orchestrator,
+            self._loop_engine,
             self._loop_teams,
             self._loop_wake,
             self._loop_runtime,
@@ -118,20 +125,37 @@ class Poller:
 
     # --- individual clocks ---
 
-    def _loop_orchestrator(self) -> None:
+    @staticmethod
+    def _role_slot(liveness: dict) -> RoleSlot:
+        record = liveness["record"] or {}
+        return RoleSlot(
+            attached=liveness["attached"],
+            name=record.get("name"),
+            model=record.get("model"),
+            effort=record.get("effort"),
+            tmux=record.get("tmux"),
+            working_dir=record.get("working_dir"),
+            claude_session=record.get("claude_session"),
+            liveness=liveness["liveness"],
+            tools_reachable=liveness["tools_reachable"],
+        )
+
+    def _loop_engine(self) -> None:
         while not self._stop.is_set():
             try:
-                info = orchestrator_mod.compute_orchestrator_state()
-                new = OrchestratorState(
-                    polled_at=time.time(), expected_interval=ORCHESTRATOR_INTERVAL_S, error=None, **info,
+                state = engine_roles_mod.get_engine_state()
+                new = EngineState(
+                    polled_at=time.time(), expected_interval=ENGINE_INTERVAL_S, error=None,
+                    concierge=self._role_slot(state["concierge"]),
+                    orchestrator=self._role_slot(state["orchestrator"]),
                 )
             except Exception as e:  # noqa: BLE001 -- must never take this thread down
                 with self._lock:
-                    old = self._state.orchestrator
+                    old = self._state.engine
                 new = replace(old, polled_at=time.time(), error=str(e))
             with self._lock:
-                self._state.orchestrator = new
-            self._stop.wait(ORCHESTRATOR_INTERVAL_S)
+                self._state.engine = new
+            self._stop.wait(ENGINE_INTERVAL_S)
 
     def _loop_teams(self) -> None:
         while not self._stop.is_set():

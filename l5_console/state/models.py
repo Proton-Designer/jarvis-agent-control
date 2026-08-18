@@ -38,13 +38,32 @@ LIVENESS_LOST = "lost"
 
 
 @dataclass
-class OrchestratorState:
+class RoleSlot:
+    """One ENGINE role's state (SPEC-engine-roles.md): CONCIERGE or
+    ORCHESTRATOR. `attached` mirrors engine.json's own persisted intent
+    (identity only, no status field there -- see engine_roles.py); every
+    other field below except attached/name/model/effort/tmux/working_dir
+    is computed FRESH on every poll, never stored, so "attached" and
+    "running" can never disagree by construction -- same rule the team
+    registry already established."""
+    attached: bool
+    name: str | None
+    model: str | None  # "haiku" | "sonnet" | "opus"
+    effort: str | None  # "low" | "medium" | "high" | "xhigh" | "max"
+    tmux: str | None
+    working_dir: str | None
+    claude_session: str | None  # the PERSISTED identity, not re-verified live every poll (same discipline as TeamMember.claude_session)
+    liveness: str | None  # LIVENESS_RUNNING | LIVENESS_STOPPED | LIVENESS_LOST -- None only when attached is False
+    tools_reachable: bool  # only meaningful when liveness == LIVENESS_RUNNING
+
+
+@dataclass
+class EngineState:
     polled_at: float
     expected_interval: float  # the real cadence this section is polled at -- consumer's staleness threshold is a multiple of this, not a hardcoded guess
     error: str | None
-    liveness: str  # LIVENESS_RUNNING | LIVENESS_STOPPED | LIVENESS_LOST
-    session_id: str | None
-    tools_reachable: bool  # orchestrator_has_tools() -- see l4_controller/l2_l3_handoff.py
+    concierge: RoleSlot
+    orchestrator: RoleSlot
 
 
 @dataclass
@@ -111,7 +130,7 @@ class UnassignedSession:
 
 @dataclass
 class JarvisState:
-    orchestrator: OrchestratorState
+    engine: EngineState
     teams: list[Team]
     teams_polled_at: float
     teams_expected_interval: float

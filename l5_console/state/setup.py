@@ -44,7 +44,7 @@ def _write_mcp_json(root: str) -> None:
     (Path(root) / ".mcp.json").write_text(json.dumps(_mcp_json_content(), indent=2))
 
 
-def preseed_mcp_trust(root: str) -> None:
+def preseed_mcp_trust(root: str, server_names: set[str] | None = None) -> None:
     """Answers the MCP trust prompt in ~/.claude.json BEFORE launch, so
     the session never sits in the silent no-tools state confirmed live
     during cold-start validation (SPEC-TUI.md SS5.2, SS7). Read-modify-
@@ -52,19 +52,73 @@ def preseed_mcp_trust(root: str) -> None:
     (usage stats, etc.) -- kept as tight a window as practical (fresh
     read immediately before write) but this is not a fully race-free
     operation; acceptable because fresh-team-creation is a rare,
-    deliberate action, not something running continuously."""
+    deliberate action, not something running continuously.
+
+    server_names defaults to {MCP_SERVER_NAME} (today's exact behavior).
+    A role launch (SPEC-engine-roles.md) needs an explicit, different set
+    -- --strict-mcp-config does NOT skip this prompt the way it was
+    assumed to (found live, 2026-08-18, building this feature's own
+    canary): launching inside ~/Jarvis/concierge still raised "2 new MCP
+    servers found" for BOTH the parent ~/Jarvis/.mcp.json's "jarvis-l4"
+    (Claude Code merges a nested directory's config with its parent's)
+    AND the concierge's own ~/Jarvis/concierge/.mcp.json's
+    "jarvis-l4-readonly" -- --strict-mcp-config only restricts which
+    servers the SESSION can actually use, it does not bypass the
+    trust-approval gate for servers merely discovered on disk."""
+    names = server_names if server_names is not None else {MCP_SERVER_NAME}
     data = json.loads(CLAUDE_JSON_PATH.read_text())
     projects = data.setdefault("projects", {})
     entry = projects.setdefault(root, {})
     existing = set(entry.get("enabledMcpjsonServers", []))
-    entry["enabledMcpjsonServers"] = sorted(existing | {MCP_SERVER_NAME})
+    entry["enabledMcpjsonServers"] = sorted(existing | names)
     entry["hasTrustDialogAccepted"] = True
     CLAUDE_JSON_PATH.write_text(json.dumps(data))
 
 
-def create_fresh_member(tmux_name: str, root: str, model: str) -> dict:
+def create_fresh_member(
+    tmux_name: str,
+    root: str,
+    model: str,
+    effort: str | None = None,
+    mcp_config_path: str | None = None,
+    strict_mcp: bool = False,
+    mcp_trust_server_names: set[str] | None = None,
+) -> dict:
     """Launches one brand-new Claude Code session with MCP trust
     pre-seeded so it never hits the confirmed-live silent no-tools gap.
+
+    New, OPTIONAL params (SPEC-engine-roles.md SS2) -- all default to
+    today's exact behavior when omitted, so team_registry_tools.py's
+    existing positional calls (tmux_name, root, model) are completely
+    unaffected:
+
+    effort: passed as `--effort <effort>` on the launch command when
+    given. Never validated here (that's engine_roles.py's job, against
+    ENGINE_EFFORTS) -- this function just passes through what it's told.
+
+    mcp_config_path / strict_mcp / mcp_trust_server_names: when
+    strict_mcp=True, launches with `--mcp-config <mcp_config_path>
+    --strict-mcp-config` INSTEAD OF the default project-.mcp.json write
+    below (one already exists, static, at the role's directory -- this
+    never writes a new one), but STILL preseeds trust
+    (mcp_trust_server_names, required in this mode -- --strict-mcp-config
+    restricts the session's tool surface, it does not bypass the
+    trust-approval prompt for servers Claude Code discovers on disk,
+    found live building this feature's own canary). This is the SS0.2/
+    SS1.6 security boundary: a team member gets the full default toolset
+    PLUS jarvis-l4 (unrestricted, by design -- team leads aren't meant to
+    be sandboxed), while an engine-role session (concierge/orchestrator)
+    must get ONLY the role-scoped jarvis-l4 surface and nothing else --
+    confirmed live (SPEC-orchestration.md SS1.6) that omitting
+    --strict-mcp-config lets a concierge inherit every user-level MCP
+    server (Gmail, Drive, Calendar, ...), which voids the read-only split
+    entirely. mcp_config_path is REQUIRED when strict_mcp=True (raises
+    ValueError otherwise -- a caller passing strict_mcp=True without a
+    path is a programming error, not a runtime condition to degrade
+    gracefully from, since silently falling back to the unrestricted
+    path would be exactly the security hole this parameter exists to
+    prevent).
+
     Returns {"ok", "claude_session", "detail", "root"} -- callers that
     subsequently register this member (create_team) MUST use the
     RETURNED root, not whatever they originally passed in: this function
@@ -107,15 +161,43 @@ def create_fresh_member(tmux_name: str, root: str, model: str) -> dict:
     trust preseed derive from, fixes it for every caller (console and
     router alike) rather than requiring each one to remember to pass an
     already-resolved path."""
+    if strict_mcp and not mcp_config_path:
+        raise ValueError("mcp_config_path is required when strict_mcp=True")
+
     root = str(Path(root).resolve())
     Path(root).mkdir(parents=True, exist_ok=True)
-    _write_mcp_json(root)
-    preseed_mcp_trust(root)
+
+    if strict_mcp:
+        # Role-scoped launch (SPEC-engine-roles.md): the session's ENTIRE
+        # MCP TOOL SURFACE is replaced by mcp_config_path's content,
+        # nothing inherited from user-level config -- but --strict-mcp-
+        # config does NOT skip the trust-approval prompt, found live
+        # (2026-08-18): launching inside ~/Jarvis/concierge still raised
+        # "2 new MCP servers found" for both the parent ~/Jarvis/.mcp.json
+        # (Claude Code merges a nested directory's config with its
+        # parent's) and the role's own .mcp.json. No project-.mcp.json
+        # gets WRITTEN here (one already exists, static, shared across
+        # every generation of this role) but trust still needs preseeding
+        # -- mcp_trust_server_names is required, not defaulted, so a
+        # caller can't silently reintroduce this exact bug by omission.
+        if not mcp_trust_server_names:
+            raise ValueError("mcp_trust_server_names is required when strict_mcp=True")
+        preseed_mcp_trust(root, mcp_trust_server_names)
+        cmd = (
+            f"claude --model {model} --permission-mode acceptEdits "
+            f"--mcp-config {mcp_config_path} --strict-mcp-config"
+        )
+    else:
+        _write_mcp_json(root)
+        preseed_mcp_trust(root)
+        cmd = f"claude --model {model}"
+    if effort:
+        cmd += f" --effort {effort}"
 
     try:
         subprocess.run(["tmux", "new-session", "-d", "-s", tmux_name, "-c", root], check=True, capture_output=True)
         subprocess.run(
-            ["tmux", "send-keys", "-t", tmux_name, "-l", "--", f"claude --model {model}"],
+            ["tmux", "send-keys", "-t", tmux_name, "-l", "--", cmd],
             check=True, capture_output=True,
         )
         subprocess.run(["tmux", "send-keys", "-t", tmux_name, "Enter"], check=True, capture_output=True)
