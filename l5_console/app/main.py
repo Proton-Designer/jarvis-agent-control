@@ -45,6 +45,8 @@ from signal_view import Signal  # noqa: E402
 from wake_state import read_wake_state  # noqa: E402
 from setup_flow import SetupScreen  # noqa: E402
 from reconnect_flow import ReconnectScreen  # noqa: E402
+from quit_warning import QuitWarningScreen  # noqa: E402
+import wake_control  # noqa: E402
 
 sys.path.insert(0, str(Path(__file__).parent.parent / "state"))
 import api as state  # noqa: E402
@@ -81,6 +83,7 @@ class JarvisConsole(App):
         ("a", "add_team", "Add team"),
         ("r", "reconnect", "Reconnect"),
         ("q", "quit", "Quit"),
+        ("space", "panic_stop_wake", "Stop listening"),
     ]
 
     def action_add_team(self) -> None:
@@ -88,6 +91,42 @@ class JarvisConsole(App):
 
     def action_reconnect(self) -> None:
         self.push_screen(ReconnectScreen())
+
+    async def action_panic_stop_wake(self) -> None:
+        # space is a panic key, not a toggle -- it only ever stops,
+        # never starts (the Lead's explicit ruling, 2026-08-18):
+        # accidentally stopping is fully recoverable (press start
+        # again), accidentally starting opens the microphone without
+        # intent, which is the direction this whole project refuses. A
+        # toggle can't make that distinction; a stop-only key can, and
+        # that's what makes it trustworthy as a panic key -- Ayman never
+        # has to know or check current state before pressing it.
+        #
+        # self._wake_running is the same App-level cache _apply_layout()
+        # already trusts for the dictating gate -- not re-derived here.
+        if self._panic_stop_in_progress or not self._wake_running:
+            return
+        self._panic_stop_in_progress = True
+        self.start_wake_poll_burst()
+        try:
+            await wake_control.stop()
+        finally:
+            self._panic_stop_in_progress = False
+
+    async def action_quit(self) -> None:
+        # The Lead's finding: quitting the console does not stop
+        # daemon.py -- they're separate processes by design (the daemon
+        # is meant to survive the console closing under normal
+        # operation, e.g. a LaunchAgent-managed listener). Silently
+        # leaving a live mic behind a closed window is exactly the trust
+        # failure the visible-indicator work exists to prevent, so warn
+        # explicitly rather than exit straight through -- the Lead's own
+        # preference over auto-stopping, since killing an in-progress
+        # dictation because the window closed would be its own surprise.
+        if self._wake_running:
+            self.push_screen(QuitWarningScreen())
+            return
+        self.exit()
 
     def check_action(self, action: str, parameters: tuple) -> bool | None:
         # Defense in depth for the setup/reconnect focus bug (see
@@ -116,6 +155,7 @@ class JarvisConsole(App):
         self._normal_refresh_timer = None
         self._burst_refresh_timer = None
         self._burst_end_timer = None
+        self._panic_stop_in_progress = False
 
     def compose(self) -> ComposeResult:
         yield Rail(id="rail")

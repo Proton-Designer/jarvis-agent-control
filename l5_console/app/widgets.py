@@ -41,7 +41,7 @@ class Footer(PlainStatic):
 
     DEFAULT_CSS = "Footer { height: 1; color: $text-muted; }"
 
-    KEYBINDS = [("a", "add team"), ("r", "reconnect"), ("q", "quit")]
+    KEYBINDS = [("space", "stop listening"), ("a", "add team"), ("r", "reconnect"), ("q", "quit")]
 
     def on_mount(self) -> None:
         text = Text()
