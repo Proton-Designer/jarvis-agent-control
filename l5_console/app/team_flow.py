@@ -26,9 +26,9 @@ from pathlib import Path
 from textual.app import ComposeResult
 from textual.containers import Vertical
 from textual.screen import Screen
-from textual.widgets import Button, ListItem, ListView, Label
+from textual.widgets import Button, ListItem, ListView
 
-from widgets import PlainStatic
+from widgets import PlainStatic, PlainLabel, arm_list
 from format_helpers import liveness_icon, liveness_color, team_liveness, COLOR_ACCENT, COLOR_DIM, COLOR_WARN
 
 sys.path.insert(0, str(Path(__file__).parent.parent / "state"))
@@ -101,9 +101,9 @@ class TeamManageScreen(Screen):
             tl = team_liveness(t)
             lead = next((m for m in t.members if m.is_lead), None)
             lead_note = f"  lead: {lead.tmux or '(not bound)'}" if lead else "  no lead"
-            await listview.append(ListItem(Label(f"{liveness_icon(tl)} {t.id}{lead_note}"), name=t.id))
+            await listview.append(ListItem(PlainLabel(f"{liveness_icon(tl)} {t.id}{lead_note}"), name=t.id))
         await body.mount(Button("Close", id="close", variant="error"))
-        listview.focus()
+        arm_list(listview)
 
     async def _on_team_chosen(self, team_id: str) -> None:
         self.team_id = team_id
@@ -171,9 +171,9 @@ class TeamManageScreen(Screen):
         await body.mount(listview)
         for m in team.members:
             label = (m.tmux or "(not bound)") + ("  (current lead)" if m.is_lead else "")
-            await listview.append(ListItem(Label(label), name=m.claude_session))
+            await listview.append(ListItem(PlainLabel(label), name=m.claude_session))
         await body.mount(Button("Back", id="back_to_detail", variant="error"))
-        listview.focus()
+        arm_list(listview)
 
     async def _on_swap_lead_chosen(self, claude_session: str) -> None:
         result = team_actions.set_lead(self.team_id, claude_session)
@@ -200,9 +200,9 @@ class TeamManageScreen(Screen):
         listview = ListView(id="relocate_list")
         await body.mount(listview)
         for u in current.unassigned:
-            await listview.append(ListItem(Label(f"{u.tmux}  {u.display_path or u.working_dir}"), name=u.tmux))
+            await listview.append(ListItem(PlainLabel(f"{u.tmux}  {u.display_path or u.working_dir}"), name=u.tmux))
         await body.mount(Button("Back", id="back_to_detail", variant="error"))
-        listview.focus()
+        arm_list(listview)
 
     async def _on_relocate_chosen(self, tmux: str) -> None:
         result = await asyncio.to_thread(team_actions.relocate_team_member, self.team_id, tmux)
@@ -232,9 +232,9 @@ class TeamManageScreen(Screen):
         listview = ListView(id="remove_member_list")
         await body.mount(listview)
         for m in removable:
-            await listview.append(ListItem(Label(m.tmux or "(not bound)"), name=m.claude_session))
+            await listview.append(ListItem(PlainLabel(m.tmux or "(not bound)"), name=m.claude_session))
         await body.mount(Button("Back", id="back_to_detail", variant="error"))
-        listview.focus()
+        arm_list(listview)
 
     async def _on_remove_member_chosen(self, claude_session: str) -> None:
         result = team_actions.remove_member(self.team_id, claude_session)

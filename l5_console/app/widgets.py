@@ -20,9 +20,73 @@ project's own governing rules argue against).
 from __future__ import annotations
 
 from rich.text import Text
-from textual.widgets import Static
+from textual.widgets import Label, Static
 
 from format_helpers import COLOR_ACCENT, COLOR_DIM, COLOR_MUTED
+
+
+class PlainLabel(Label):
+    """Label with markup off. Same fix as PlainStatic above, for the
+    widget that goes INSIDE a ListItem -- and it was missed there, which
+    is how the bug this docstring exists for got back in.
+
+    Found live 2026-08-19 by driving the real console. Engine > Swap
+    lists every attachable tmux session and marks the ones already
+    spoken for: `jarvis-orchestrator  [orchestrator]`. On screen both
+    rows rendered BARE -- no flag at all -- so the two sessions that are
+    already the concierge and the orchestrator looked exactly as free as
+    the genuinely unused one. The state layer was right the whole time
+    (list_attachable_sessions returns flag='orchestrator'); Rich ate the
+    text on the way to the screen, parsing `[orchestrator]` as a style
+    tag and rendering the span as nothing.
+
+    Verified, not inferred: rich.markup.render('x  [orchestrator]').plain
+    == 'x  '.
+
+    Also hit setup_flow's lead picker, where `[haiku]` / `[sonnet]`
+    vanished from the candidate rows -- so you chose which agent receives
+    your instructions with the model column invisible.
+
+    Both are the failure this project keeps finding in new clothes:
+    information computed correctly, then dropped in silence, with the
+    result reading as "there was nothing to show." Deliberately a
+    subclass rather than markup=False at 16 call sites -- the convention
+    is what failed last time."""
+
+    def __init__(self, *args, **kwargs) -> None:
+        kwargs.setdefault("markup", False)
+        super().__init__(*args, **kwargs)
+
+
+def arm_list(listview) -> None:
+    """Highlight the first row, THEN focus. Use instead of a bare
+    listview.focus() everywhere in this app.
+
+    Found live 2026-08-19 by driving the real console: open Manage
+    Teams, press Enter on the one and only team, and nothing happens.
+    Press Down first -- which cannot move anywhere in a one-item list --
+    and Enter then works. The Down press was not navigating, it was
+    establishing a highlight that did not exist yet.
+
+    Cause: a ListView built by appending ListItems AFTER mount has
+    index None, and ListView's Enter action selects the HIGHLIGHTED
+    child, so with no highlight there is nothing to select and the
+    keypress is swallowed in silence. focus() gives the widget the
+    keyboard; it does not give it a cursor.
+
+    Every one of this app's 14 list pickers was built that way, so the
+    first Enter was dead in every no-typed-input flow we have -- engine
+    create, attach and swap, add team, the directory walker, model and
+    effort pickers, swap lead, relocate, remove member, reconnect. The
+    flows were correct; they just looked broken on contact, which for a
+    keyboard-only console is the same thing.
+
+    Guarded on children rather than assumed: setting index on an empty
+    ListView is meaningless, and the empty case is already handled by
+    each flow's own empty-state branch before it ever gets here."""
+    if len(listview.children):
+        listview.index = 0
+    listview.focus()
 
 
 class PlainStatic(Static):
@@ -41,7 +105,23 @@ class Footer(PlainStatic):
 
     DEFAULT_CSS = "Footer { height: 1; color: $text-muted; }"
 
-    KEYBINDS = [("space", "stop listening"), ("a", "add team"), ("r", "reconnect"), ("t", "manage teams"), ("q", "quit")]
+    # "tab" is listed even though it is not a BINDINGS entry -- it is
+    # Textual's own focus movement, and it is the ONLY way to reach the
+    # ENGINE panel's Swap/Remove buttons, which have no key of their own.
+    # Driving the console live on 2026-08-19 that was invisible: the
+    # footer advertised five keys, none of which touched the engine, so
+    # the two buttons Ayman most needs read as mouse-only in a console
+    # that is otherwise entirely keyboard-driven. Naming the effect
+    # ("move between buttons"), not the mechanism, same as every other
+    # entry here.
+    KEYBINDS = [
+        ("space", "stop listening"),
+        ("tab", "move between buttons"),
+        ("a", "add team"),
+        ("r", "reconnect"),
+        ("t", "manage teams"),
+        ("q", "quit"),
+    ]
 
     def __init__(self, *args, **kwargs) -> None:
         super().__init__(*args, **kwargs)

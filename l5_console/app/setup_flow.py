@@ -41,9 +41,9 @@ from pathlib import Path
 from textual.app import ComposeResult
 from textual.containers import Vertical
 from textual.screen import Screen
-from textual.widgets import Button, Input, ListItem, ListView, Label
+from textual.widgets import Button, Input, ListItem, ListView
 
-from widgets import PlainStatic
+from widgets import PlainStatic, PlainLabel, arm_list
 
 sys.path.insert(0, str(Path(__file__).parent.parent / "state"))
 import setup as setup_state  # noqa: E402
@@ -117,12 +117,34 @@ class SetupScreen(Screen):
     async def _clear(self) -> None:
         await self._body().remove_children()
 
+    # --- Step titles -------------------------------------------------------
+
+    def _step_title(self, n: int, label: str) -> str:
+        """"STEP 2 OF 6 — FRESH · DIRECTORY".
+
+        Every step used to be hand-labelled, and the labels had drifted
+        out of agreement with the flow: FOUR different screens all said
+        "STEP 1" (which kind, adopt-directory, fresh-directory, browse),
+        then 2 and 3, then the last two gave up and said just "STEP —".
+        Walking it live, the counter went 1, 1, 2, 3, then nothing, so it
+        actively misinformed you about how far in you were -- in the one
+        flow Ayman specified as no-typed-input, where the step header is
+        most of what tells you where you are.
+
+        The count is branch-dependent and that is why a single hardcoded
+        total was never right: adopting runs 4 steps, a fresh team runs
+        6. Derived from self.kind rather than duplicated per screen, so
+        adding a step means changing one number here instead of finding
+        every title that mentions it."""
+        total = 4 if self.kind == "adopt" else 6
+        return f"STEP {n} OF {total} — {label}"
+
     # --- Step 1: which kind (§5.1 step 1) ---------------------------------
 
     async def _show_kind_step(self) -> None:
         await self._clear()
         body = self._body()
-        body.border_title = "STEP 1 — WHICH"
+        body.border_title = "STEP 1 OF 4-6 — WHICH KIND"
         adopt_button = Button("Adopt agents already running", id="kind_adopt")
         await body.mount(adopt_button)
         await body.mount(Button("Start a fresh team", id="kind_fresh"))
@@ -145,7 +167,7 @@ class SetupScreen(Screen):
     async def _show_adopt_group_step(self) -> None:
         await self._clear()
         body = self._body()
-        body.border_title = "STEP 1 — ADOPT · WHICH DIRECTORY"
+        body.border_title = self._step_title(2, "ADOPT · WHICH DIRECTORY")
         current = state.get_state()
         groups: dict[str, list] = {}
         for u in current.unassigned:
@@ -167,9 +189,9 @@ class SetupScreen(Screen):
         self._adopt_groups = groups  # keyed by working_dir, read back in on_list_view_selected
         for working_dir, sessions in groups.items():
             names = ", ".join(s.tmux for s in sessions)
-            await listview.append(ListItem(Label(f"{working_dir}  ({len(sessions)}: {names})"), name=working_dir))
+            await listview.append(ListItem(PlainLabel(f"{working_dir}  ({len(sessions)}: {names})"), name=working_dir))
         await body.mount(Button("Back", id="back_to_kind"))
-        listview.focus()
+        arm_list(listview)
 
     async def _on_adopt_group_chosen(self, working_dir: str) -> None:
         self.root = working_dir
@@ -190,7 +212,7 @@ class SetupScreen(Screen):
         novel case. The naming Input exception does NOT extend here."""
         await self._clear()
         body = self._body()
-        body.border_title = "STEP 1 — FRESH · DIRECTORY"
+        body.border_title = self._step_title(2, "FRESH · DIRECTORY")
 
         current = state.get_state()
         unassigned_dirs = sorted({u.working_dir for u in current.unassigned})
@@ -201,12 +223,12 @@ class SetupScreen(Screen):
             listview = ListView(id="fresh_dir_list")
             await body.mount(listview)
             for d in unassigned_dirs:
-                await listview.append(ListItem(Label(f"● {d}  (has a running session)"), name=d))
+                await listview.append(ListItem(PlainLabel(f"● {d}  (has a running session)"), name=d))
             for r in recent_roots:
-                await listview.append(ListItem(Label(f"  {r}  (used before)"), name=r))
+                await listview.append(ListItem(PlainLabel(f"  {r}  (used before)"), name=r))
             await body.mount(Button("Browse for a different directory...", id="fresh_dir_browse"))
             await body.mount(Button("Back", id="back_to_kind"))
-            listview.focus()
+            arm_list(listview)
         else:
             await body.mount(PlainStatic("No known directories yet -- browse to pick one."))
             browse_button = Button("Browse for a directory...", id="fresh_dir_browse")
@@ -230,12 +252,12 @@ class SetupScreen(Screen):
         self._walker_dir = current_dir
         await self._clear()
         body = self._body()
-        body.border_title = "STEP 1 — FRESH · BROWSE"
+        body.border_title = self._step_title(2, "FRESH · BROWSE")
         await body.mount(PlainStatic(f"Current: {current_dir}"))
         listview = ListView(id="walker_list")
         await body.mount(listview)
         if current_dir.parent != current_dir:
-            await listview.append(ListItem(Label(".. (up one level)"), name="__up__"))
+            await listview.append(ListItem(PlainLabel(".. (up one level)"), name="__up__"))
         try:
             subdirs = sorted(
                 (p for p in current_dir.iterdir() if p.is_dir() and not p.name.startswith(".")),
@@ -244,10 +266,10 @@ class SetupScreen(Screen):
         except (PermissionError, OSError):
             subdirs = []
         for d in subdirs:
-            await listview.append(ListItem(Label(d.name), name=str(d)))
+            await listview.append(ListItem(PlainLabel(d.name), name=str(d)))
         await body.mount(Button(f"Use this directory", id="walker_confirm", variant="success"))
         await body.mount(Button("Back", id="back_to_kind"))
-        listview.focus()
+        arm_list(listview)
 
     async def _on_walker_item_chosen(self, name: str) -> None:
         if name == "__up__":
@@ -258,14 +280,14 @@ class SetupScreen(Screen):
     async def _show_fresh_count_step(self) -> None:
         await self._clear()
         body = self._body()
-        body.border_title = "STEP 2 — FRESH · HOW MANY"
+        body.border_title = self._step_title(3, "FRESH · HOW MANY")
         await body.mount(PlainStatic("How many agents?"))
         listview = ListView(id="fresh_count_list")
         await body.mount(listview)
         for n in FRESH_TEAM_COUNTS:
-            await listview.append(ListItem(Label(str(n)), name=str(n)))
+            await listview.append(ListItem(PlainLabel(str(n)), name=str(n)))
         await body.mount(Button("Back", id="back_to_fresh_directory"))
-        listview.focus()
+        arm_list(listview)
 
     async def _on_fresh_count_chosen(self, count: str) -> None:
         self.fresh_count = int(count)
@@ -274,15 +296,15 @@ class SetupScreen(Screen):
     async def _show_fresh_model_step(self) -> None:
         await self._clear()
         body = self._body()
-        body.border_title = "STEP 3 — FRESH · MODEL"
+        body.border_title = self._step_title(4, "FRESH · MODEL")
         await body.mount(PlainStatic("Model for all agents?"))
         listview = ListView(id="fresh_model_list")
         await body.mount(listview)
         for m in FRESH_TEAM_MODELS:
             label = m.capitalize() + ("  (default)" if m == self.fresh_model else "")
-            await listview.append(ListItem(Label(label), name=m))
+            await listview.append(ListItem(PlainLabel(label), name=m))
         await body.mount(Button("Back", id="back_to_fresh_count"))
-        listview.focus()
+        arm_list(listview)
 
     async def _on_fresh_model_chosen(self, model: str) -> None:
         await self._launch_fresh_members(self.root, self.fresh_count, model)
@@ -339,16 +361,16 @@ class SetupScreen(Screen):
     async def _show_inbox_step(self) -> None:
         await self._clear()
         body = self._body()
-        body.border_title = "STEP — WHO RECEIVES INSTRUCTIONS"
+        body.border_title = self._step_title(3 if self.kind == "adopt" else 5, "WHO RECEIVES INSTRUCTIONS")
         listview = ListView(id="inbox_list")
         await body.mount(listview)
         for c in self.candidates:
             summary = c["summary"] or "(no summary available)"
             await listview.append(
-                ListItem(Label(f"{c['tmux']}  [{c['model']}]  {summary}"), name=c["tmux"])
+                ListItem(PlainLabel(f"{c['tmux']}  [{c['model']}]  {summary}"), name=c["tmux"])
             )
         await body.mount(Button("Back", id="cancel", variant="error"))
-        listview.focus()
+        arm_list(listview)
 
     async def _on_inbox_chosen(self, tmux_name: str) -> None:
         self.inbox_tmux = tmux_name
@@ -363,7 +385,7 @@ class SetupScreen(Screen):
     async def _show_alias_step(self) -> None:
         await self._clear()
         body = self._body()
-        body.border_title = "STEP — WHAT DO YOU CALL IT"
+        body.border_title = self._step_title(4 if self.kind == "adopt" else 6, "WHAT DO YOU CALL IT")
         default_id = _slugify(Path(self.root).name) if self.root else "team"
         await body.mount(PlainStatic("Team id (short, no spaces) -- confirm the default, or edit it:"))
         id_input = Input(value=default_id, id="team_id_input")

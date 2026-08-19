@@ -17,9 +17,9 @@ from pathlib import Path
 from textual.app import ComposeResult
 from textual.containers import Vertical
 from textual.screen import Screen
-from textual.widgets import Button, ListItem, ListView, Label
+from textual.widgets import Button, ListItem, ListView
 
-from widgets import PlainStatic
+from widgets import PlainStatic, PlainLabel, arm_list
 
 sys.path.insert(0, str(Path(__file__).parent.parent / "state"))
 import reconnect as reconnect_state  # noqa: E402
@@ -74,9 +74,9 @@ class ReconnectScreen(Screen):
         await body.mount(listview)
         for t in reconnectable:
             stopped_count = sum(1 for m in t.members if m.liveness == LIVENESS_STOPPED)
-            await listview.append(ListItem(Label(f"{t.id}  ({stopped_count} stopped)"), name=t.id))
+            await listview.append(ListItem(PlainLabel(f"{t.id}  ({stopped_count} stopped)"), name=t.id))
         await body.mount(Button("Close", id="close"))
-        listview.focus()
+        arm_list(listview)
 
     async def on_list_view_selected(self, event: ListView.Selected) -> None:
         if event.list_view.id != "reconnect_team_list":

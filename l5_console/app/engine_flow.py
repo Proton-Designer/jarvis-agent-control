@@ -33,9 +33,9 @@ from pathlib import Path
 from textual.app import ComposeResult
 from textual.containers import Vertical
 from textual.screen import Screen
-from textual.widgets import Button, Input, Label, ListItem, ListView
+from textual.widgets import Button, Input, ListItem, ListView
 
-from widgets import PlainStatic
+from widgets import PlainStatic, PlainLabel, arm_list
 
 sys.path.insert(0, str(Path(__file__).parent.parent / "state"))
 import engine_roles  # noqa: E402
@@ -87,9 +87,9 @@ class CreateRoleScreen(Screen):
         listview = ListView(id="model_list")
         await body.mount(listview)
         for m in engine_roles.MODELS:
-            await listview.append(ListItem(Label(m.capitalize()), name=m))
+            await listview.append(ListItem(PlainLabel(m.capitalize()), name=m))
         await body.mount(Button("Cancel", id="cancel", variant="error"))
-        listview.focus()
+        arm_list(listview)
 
     async def _show_effort_step(self) -> None:
         await self._clear()
@@ -101,9 +101,9 @@ class CreateRoleScreen(Screen):
         await body.mount(listview)
         for e in engine_roles.EFFORTS:
             label = e.capitalize() + ("  (recommended)" if e == default else "")
-            await listview.append(ListItem(Label(label), name=e))
+            await listview.append(ListItem(PlainLabel(label), name=e))
         await body.mount(Button("Back", id="back_to_model", variant="error"))
-        listview.focus()
+        arm_list(listview)
 
     async def _show_name_step(self) -> None:
         await self._clear()
@@ -214,9 +214,9 @@ class AttachRoleScreen(Screen):
         await body.mount(listview)
         for s in sessions:
             flag_note = "" if s["flag"] == "unused" else f"  [{s['flag']}]"
-            await listview.append(ListItem(Label(f"{s['tmux']}{flag_note}"), name=s["tmux"]))
+            await listview.append(ListItem(PlainLabel(f"{s['tmux']}{flag_note}"), name=s["tmux"]))
         await body.mount(Button("Cancel", id="cancel", variant="error"))
-        listview.focus()
+        arm_list(listview)
 
     async def _show_conflict_step(self, tmux: str, other_role: str, detail: str) -> None:
         await self._clear()
