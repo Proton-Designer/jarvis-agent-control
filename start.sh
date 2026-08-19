@@ -61,7 +61,12 @@ if [ "$ENGINE_OK" -ne 0 ]; then
     exit 1
 fi
 
-echo "Ready. To actually dictate, run the daemon yourself (separate, deliberate step):"
+echo "Ready. To actually dictate, run the daemon yourself in its own terminal"
+echo "tab (separate, deliberate step -- this is the part that opens the mic):"
+echo ""
+echo "  jarvis-voice"
+echo ""
+echo "or, without the alias:"
 echo "  cd $HERE && l1_wakeword/.venv/bin/python3 l1_wakeword/daemon.py --live-deliver"
 echo ""
 echo "No --target: the daemon resolves the CONCIERGE role from engine.json"
