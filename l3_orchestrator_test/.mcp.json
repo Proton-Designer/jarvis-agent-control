@@ -4,7 +4,7 @@
       "command": "/Users/aymanmohammed/Desktop/Jarvis/l4_controller/.venv/bin/python3",
       "args": ["/Users/aymanmohammed/Desktop/Jarvis/l4_controller/server.py"],
       "env": {
-        "JARVIS_MUTE": "1"
+        "JARVIS_MUTE": "0"
       }
     }
   }

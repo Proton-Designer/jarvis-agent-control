@@ -144,5 +144,23 @@ def run() -> int:
     return 0
 
 
+_SKIP_NOTE = """SKIPPED -- the local model layer is disconnected.
+
+{what} exercises qwen2.5 through Ollama, and that model is neither pulled
+nor wired into the live path any more (disconnected 2026-08-18 at Ayman's
+instruction; voice now goes L1 -> Haiku concierge -> Sonnet orchestrator).
+So this file has nothing real to assert against.
+
+Skipping rather than failing, on purpose: the failure would be TRUE but it
+would not be a regression, and a sweep carrying permanent reds teaches you
+to skim past red. If the local layer is ever reconnected -- `ollama pull`
+the model -- this canary starts running again by itself. It is not
+disabled, only dormant."""
+
+
 if __name__ == "__main__":
+    from ollama_client import model_available
+    if not model_available():
+        print(_SKIP_NOTE.format(what=Path(__file__).name))
+        sys.exit(0)
     sys.exit(run())

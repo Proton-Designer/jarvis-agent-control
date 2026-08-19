@@ -1,6 +1,8 @@
 #!/bin/bash
 # Single startup command for what needs to be up before you run the
-# daemon: the orchestrator, and Ollama (used by the L2.5 concierge).
+# daemon: the two ENGINE roles (concierge + orchestrator), as recorded
+# in ~/Jarvis/engine.json.
+#
 # Deliberately does NOT start the daemon itself (l1_wakeword/daemon.py)
 # -- that's a separate, deliberate step you run when you're actually
 # ready to dictate, per the standing "no unattended microphone capture"
@@ -9,43 +11,60 @@
 # Idempotent: safe to run again if things are already up -- reports
 # current state either way instead of erroring on "already running."
 #
+# No longer starts Ollama: the local model was disconnected from the
+# wiring on 2026-08-18 and nothing in the live path calls it any more.
+# No longer starts `claude-orchestrator` either -- that session predates
+# the ENGINE split and is not what voice talks to. Voice goes to the
+# CONCIERGE role; the concierge hands off to the ORCHESTRATOR role.
+#
 # Lives in the source repo (versioned, has history), not ~/Jarvis --
 # ~/Jarvis holds personal, unversioned state (CLAUDE.md, knowledge/,
 # skills/), and this is code, so it belongs with the rest of the code.
 # ~/Jarvis/README.md points here.
 set -uo pipefail
 
-echo "Checking Ollama..."
-if pgrep -f "ollama serve" > /dev/null 2>&1 || pgrep -x "ollama" > /dev/null 2>&1; then
-    echo "  Ollama is running."
-else
-    echo "  Ollama is NOT running -- starting it (ollama serve, backgrounded)."
-    nohup ollama serve > /tmp/ollama-serve.log 2>&1 &
-    disown
-    sleep 1
-    if pgrep -x "ollama" > /dev/null 2>&1; then
-        echo "  Started. (Note: models still load cold on first use -- see"
-        echo "  ~/Jarvis/README.md's cold-start note. This doesn't warm them, it"
-        echo "  just makes sure the service is reachable when the concierge needs it.)"
-    else
-        echo "  FAILED to start. Check /tmp/ollama-serve.log, or start manually:"
-        echo "  ollama serve"
-    fi
-fi
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+echo "Checking the ENGINE roles (from ~/Jarvis/engine.json)..."
+"$HERE/l5_console/app/.venv/bin/python3" - <<'PY'
+import sys
+sys.path.insert(0, "/Users/aymanmohammed/Desktop/Jarvis/l5_console/state")
+import engine_roles
+
+ok = True
+for role in ("concierge", "orchestrator"):
+    rec = engine_roles.get_role_record(role)
+    if not rec:
+        print(f"  {role:<13} NOT ATTACHED -- open the console (./run_console.sh) and attach one.")
+        ok = False
+        continue
+    live = engine_roles.role_liveness(role)
+    if not live.get("running"):
+        print(f"  {role:<13} attached to {rec['tmux']!r} but NOT RUNNING (liveness={live.get('liveness')})")
+        print(f"                open the console and re-create or re-attach it.")
+        ok = False
+    elif not live.get("tools_reachable"):
+        print(f"  {role:<13} running in {rec['tmux']!r} but its MCP tools are NOT REACHABLE.")
+        print(f"                usually the trust prompt -- attach and answer it (option 1, not 2).")
+        ok = False
+    else:
+        print(f"  {role:<13} up: {rec['tmux']}  ({rec.get('model')}, effort {rec.get('effort')})")
+
+sys.exit(0 if ok else 1)
+PY
+ENGINE_OK=$?
 
 echo ""
-echo "Checking the orchestrator..."
-if tmux has-session -t claude-orchestrator 2>/dev/null; then
-    echo "  claude-orchestrator is already up."
-else
-    echo "  Not running -- starting it."
-    tmux new-session -d -s claude-orchestrator -c "$HOME/Jarvis"
-    tmux send-keys -t claude-orchestrator 'claude' Enter
-    echo "  Started. On first launch in this directory, Claude Code will ask to"
-    echo "  trust the jarvis-l4 MCP server -- see ~/Jarvis/README.md's note on"
-    echo "  this before answering it (choose option 1, not option 2)."
+if [ "$ENGINE_OK" -ne 0 ]; then
+    echo "Not ready. Fix the roles above first:"
+    echo "  ./run_console.sh      (ENGINE section -- create, attach, or swap)"
+    exit 1
 fi
 
-echo ""
 echo "Ready. To actually dictate, run the daemon yourself (separate, deliberate step):"
-echo "  cd ~/Desktop/Jarvis && l1_wakeword/.venv/bin/python l1_wakeword/daemon.py --live-deliver --target claude-orchestrator"
+echo "  cd $HERE && l1_wakeword/.venv/bin/python3 l1_wakeword/daemon.py --live-deliver"
+echo ""
+echo "No --target: the daemon resolves the CONCIERGE role from engine.json"
+echo "itself. Passing --target overrides that and sends straight to a raw"
+echo "tmux session, bypassing the concierge -- only do that to test the"
+echo "transport in isolation."

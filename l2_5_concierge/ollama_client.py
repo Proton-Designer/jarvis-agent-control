@@ -44,6 +44,38 @@ from latency_log import log_event  # noqa: E402
 
 OLLAMA_URL = "http://localhost:11434/api/generate"
 MODEL = "qwen2.5:7b-instruct-q4_K_M"
+
+_OLLAMA_TAGS_URL = "http://localhost:11434/api/tags"
+
+
+def model_available() -> bool:
+    """Is MODEL actually pulled and reachable right now?
+
+    Added 2026-08-19. The local model was disconnected from the live
+    wiring on 2026-08-18 (nothing in daemon.py's path calls it any more)
+    and the weights were subsequently removed from disk -- `ollama list`
+    is empty. The two canaries that exercise it (classify_canary,
+    chat_gate_canary) then started failing on every sweep: classify with
+    a raw HTTP 404, chat_gate with "expected spoke, got silent."
+
+    Both failures are TRUE -- the model really is gone -- but they are
+    not regressions, and that is the problem. A sweep with two permanent
+    reds trains you to skim past red, which is how the next REAL red gets
+    missed. This lets those canaries skip loudly and specifically instead,
+    naming the disconnection as the reason, so a genuine failure in either
+    file still shows up as the only red on the board.
+
+    Deliberately checks for THIS model, not merely "is Ollama up": if the
+    local layer is ever reconnected, the canaries must start running
+    again on their own rather than staying quietly skipped forever."""
+    import json
+    import urllib.request
+    try:
+        with urllib.request.urlopen(_OLLAMA_TAGS_URL, timeout=2) as r:
+            names = {m.get("name", "") for m in json.loads(r.read()).get("models", [])}
+    except Exception:
+        return False
+    return MODEL in names
 # Re-sent on every call (not just once at startup) -- keeps the model
 # resident between turns without a separate keep-warm daemon/thread.
 #
