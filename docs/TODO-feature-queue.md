@@ -73,6 +73,37 @@ is three interruptions.
 
 Hard rule that survives unchanged: **refusals are never queued.**
 
+### Design decision: batch at the return channel, not inside `speak()`
+
+`speak()` has **twelve** callers today — the wake daemon, the transport,
+the instant ack, the cancel window, the poller's blocked escalation,
+`jarvis_say`, and more. They fall into two groups that must not be
+treated alike:
+
+- **Immediate**: refusals, the instant ack, cancel-window confirmations.
+  Delaying any of these breaks the exact property it exists for. A
+  delayed refusal is equivalent to a lost instruction —
+  `say_feedback.py`'s own docstring already says so.
+- **Batchable**: return traffic from agents — completions, blocked
+  escalations. These are what turn three finishing agents into three
+  interruptions.
+
+So batching goes **at the return channel** (`jarvis_say` and the
+poller's escalation), not inside `speak()`. Putting it in `speak()` would
+mean every one of those twelve callers inherits a delay it never asked
+for, and the immediate group would have to opt out one by one — a
+convention, and conventions are what keep failing here.
+
+`jarvis_say` already carries typed kinds (`completion`,
+`blocked_question`, `error`) with unknown kinds refused rather than
+downgraded. **The type is the batching key**, which is what that typing
+was for. `error` stays immediate with the refusals; `completion` and
+`blocked_question` batch.
+
+Flush triggers: end of the current dictation, or a settle delay when
+nothing is in flight. Never mid-dictation — a completion must not
+interrupt Ayman while he is still talking.
+
 ## 4. Pending-speech panel
 
 `SPEC-orchestration.md` Phase 3. Queued speech needs its own surface —
