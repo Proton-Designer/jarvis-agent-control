@@ -68,7 +68,24 @@ CONTEXT_PROMPT = (
 # A structured-description turn is more than a one-line acknowledgement
 # but still bounded (reads a handful of files, writes three lines) --
 # generous relative to a normal dispatch, nowhere near "no budget at all".
-CONTEXT_TURN_START_TIMEOUT_S = 10.0  # how long to wait for the turn to actually START (see _wait_for_reply_settled)
+# 30s, not the original 10s. Raised 2026-08-20 after team_actions_canary
+# failed TWICE in one afternoon with "the agent didn't finish responding
+# in time", both times while several other Claude sessions were starting
+# concurrently, and both times passing on an immediate unloaded re-run.
+#
+# 10s was measured on an idle machine, and this is the wait for a turn to
+# merely BEGIN -- on a box already launching sessions, a cold model can
+# take longer than that to emit its first token. So the old value encoded
+# "how fast it starts when nothing else is happening", which is precisely
+# the condition that does not hold when Ayman is running a real fleet.
+#
+# The asymmetry says raise it: waiting longer costs latency only on a
+# path that is already failing, while being too tight reports a healthy
+# agent as unresponsive -- and a canary that cries wolf trains you to
+# re-run reds instead of reading them, which is how a real failure gets
+# waved through. The FINISH timeout below is untouched; nothing suggested
+# 90s was tight.
+CONTEXT_TURN_START_TIMEOUT_S = 30.0  # how long to wait for the turn to actually START (see _wait_for_reply_settled)
 CONTEXT_TURN_START_POLL_INTERVAL_S = 0.3  # short: a genuinely fast BUSY window must not be missed between polls
 CONTEXT_SETTLE_TIMEOUT_S = 90.0  # how long to wait for it to FINISH, once started
 CONTEXT_SETTLE_POLL_INTERVAL_S = 1.0
@@ -308,7 +325,10 @@ def capture_context(team_id: str, force_agent: bool = False) -> dict:
     if not _wait_for_reply_settled(target_tmux):
         return {"ok": False, "detail": "the agent didn't finish responding in time"}
 
-    pane_text = _transport.capture_pane_plain(target_tmux)
+    # WITH scrollback: the reply's first line (SUMMARY) scrolls off a
+    # short pane before we read it, and the parser needs all three
+    # fields. See TmuxTransport.capture_pane_plain's docstring.
+    pane_text = _transport.capture_pane_plain(target_tmux, history_lines=200)
     parsed = _parse_context_response(pane_text)
     if parsed is None:
         return {"ok": False, "detail": "couldn't parse a structured response -- the agent didn't follow the format"}

@@ -258,12 +258,32 @@ class TmuxTransport(Transport):
         )
         return result.stdout.decode(errors="replace")
 
-    def capture_pane_plain(self, target: str) -> str:
-        result = subprocess.run(
-            [self.tmux_bin, "capture-pane", "-p", "-t", target],
-            check=True,
-            capture_output=True,
-        )
+    def capture_pane_plain(self, target: str, history_lines: int = 0) -> str:
+        """Visible pane by default. history_lines > 0 also pulls that many
+        lines of scrollback (tmux -S).
+
+        The default stays 0 deliberately: every state CLASSIFIER here wants
+        the visible screen and nothing else, because "what is on screen
+        right now" is the actual question and scrollback would drag in
+        long-dead prompts.
+
+        The parameter exists for the opposite job -- reading a REPLY.
+        Found 2026-08-20, twice, as an intermittent team_actions_canary
+        failure ("couldn't parse a structured response"): capture-pane
+        with no -S returns only what currently fits the pane, and the
+        context-capture reply is three lines whose FIRST is SUMMARY. A
+        reply long enough to scroll pushes SUMMARY off the top, the parser
+        requires all three fields, and it returns None -- reported as "the
+        agent didn't follow the format" when the agent had followed it
+        perfectly and we simply read too late and too narrow.
+
+        Intermittent because it depends on pane height versus reply length,
+        so it fails more the more the agent has to say -- i.e. more often
+        on real projects than on the small ones we test with."""
+        cmd = [self.tmux_bin, "capture-pane", "-p", "-t", target]
+        if history_lines > 0:
+            cmd += ["-S", f"-{history_lines}"]
+        result = subprocess.run(cmd, check=True, capture_output=True)
         return result.stdout.decode(errors="replace")
 
     def _custom_commands_for(self, target: str) -> set[str]:
