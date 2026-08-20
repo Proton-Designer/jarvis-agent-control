@@ -277,6 +277,7 @@ def discover_teams_and_unassigned() -> tuple[list[Team], list[UnassignedSession]
                 has_lead=has_lead,
                 lead_reachable=lead_reachable,
                 members=members,
+                visible=entry.get("visible", True),
                 **context_fields,
             )
         )

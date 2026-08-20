@@ -47,6 +47,7 @@ from widgets import PlainStatic, PlainLabel, arm_list
 
 sys.path.insert(0, str(Path(__file__).parent.parent / "state"))
 import setup as setup_state  # noqa: E402
+import team_actions  # noqa: E402
 import teams as teams_state  # noqa: E402
 import api as state  # noqa: E402
 
@@ -195,6 +196,15 @@ class SetupScreen(Screen):
 
     async def _on_adopt_group_chosen(self, working_dir: str) -> None:
         self.root = working_dir
+        # Same gate as the fresh path. Nothing is launched on this path,
+        # so the cost of finding out late is smaller -- but it is not
+        # zero: adopt_candidate_info() below is an intrusive ~1s /status
+        # round-trip PER candidate, and paying that for a team that
+        # cannot be created is pure waste against live sessions.
+        avail = team_actions.check_root_available(self.root)
+        if not avail["ok"]:
+            await self._show_conflict_step(avail["detail"], "back_to_kind")
+            return
         sessions = self._adopt_groups[working_dir]
         await self._show_loading("Reading each candidate's status and self-written summary...")
         # adopt_candidate_info() is an intrusive ~1s /status round-trip
@@ -236,6 +246,38 @@ class SetupScreen(Screen):
             await body.mount(Button("Back", id="back_to_kind"))
             browse_button.focus()
 
+    async def _show_conflict_step(self, detail: str, back_id: str) -> None:
+        """Refuse a directory that is already a team, at the moment it is
+        PICKED, before anything is launched.
+
+        Built 2026-08-20 from Engineer 2's audit. team_actions has had
+        check_root_available / check_team_id_available /
+        check_alias_available since SPEC-teams.md SS1.2 was written, all
+        correct -- and this module never imported them, so they were dead
+        code. The only enforcement was create_team()'s ValueError, which
+        fires at the LAST step of the wizard.
+
+        On the fresh path that ordering is expensive, not just untidy:
+        _launch_fresh_members() has already spawned real tmux sessions
+        and real Claude processes by then, so a rejected team leaves them
+        orphaned and running, registered to nothing. Side effects before
+        validation -- the same shape as every other bug this project
+        keeps finding.
+
+        Rendered VERBATIM from the check's own detail, which already
+        names the conflicting team, rather than a generic "that won't
+        work": knowing WHICH team owns the directory is the whole
+        difference between a dead end and a next step."""
+        await self._clear()
+        body = self._body()
+        body.border_title = "ALREADY REGISTERED"
+        await body.mount(PlainStatic(detail))
+        await body.mount(PlainStatic(""))
+        await body.mount(PlainStatic("Nothing was created. Pick a different directory, or manage the existing team with [t]."))
+        back = Button("Back", id=back_id, variant="error")
+        await body.mount(back)
+        back.focus()
+
     async def _on_fresh_directory_chosen(self, root: str) -> None:
         # Resolved at the moment of capture (SPEC-teams.md §1.1) --
         # tiers 1/2 are already resolved (the kernel/registry report
@@ -243,6 +285,12 @@ class SetupScreen(Screen):
         # call site correct independent of that guarantee holding
         # upstream.
         self.root = str(Path(root).resolve())
+        # BEFORE the count/model steps and long before any session is
+        # launched -- see _show_conflict_step().
+        avail = team_actions.check_root_available(self.root)
+        if not avail["ok"]:
+            await self._show_conflict_step(avail["detail"], "back_to_fresh_dir")
+            return
         await self._show_fresh_count_step()
 
     async def _show_directory_walker_step(self, current_dir: Path) -> None:
@@ -413,6 +461,22 @@ class SetupScreen(Screen):
         # in either flow asks for it today, and SPEC-teams.md SS6 is
         # explicit that a real None is correct here, not a value to
         # invent.
+        # Checked HERE, before create_team(), so a name clash is a
+        # correctable mistake inside the flow rather than a thrown
+        # ValueError at the end of it. On the fresh path the sessions are
+        # already live by this point -- the root gate earlier is what
+        # prevents launching into a conflict, and this is what stops a
+        # late name clash from stranding them.
+        id_check = team_actions.check_team_id_available(team_id)
+        if not id_check["ok"]:
+            await body.mount(PlainStatic(f"⚠ {id_check['detail']} -- pick another id."))
+            return
+        for a in aliases:
+            alias_check = team_actions.check_alias_available(a)
+            if not alias_check["ok"]:
+                await body.mount(PlainStatic(f"⚠ {alias_check['detail']} -- pick another alias."))
+                return
+
         members = [{"tmux": c["tmux"], "claude_session": c["claude_session"], "model": c.get("model")} for c in self.candidates]
         try:
             setup_state.create_team(team_id, aliases, self.root, self.inbox_tmux, members)
@@ -452,6 +516,10 @@ class SetupScreen(Screen):
             await self._show_inbox_step()
         elif bid == "finish_submit":
             await self._on_alias_submit()
+        elif bid == "back_to_fresh_dir":
+            await self._show_fresh_directory_step()
+        elif bid == "back_to_kind":
+            await self._show_kind_step()
         elif bid == "cancel":
             self.app.pop_screen()
 

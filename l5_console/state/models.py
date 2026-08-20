@@ -139,6 +139,16 @@ class Team:
     context_tech_stack: list[str] = field(default_factory=list)
     context_captured_at: float | None = None
     context_source: str | None = None  # "agent" | "claude_md" | None
+    # SPEC-gaps-and-build-plan.md SS1.6, Ayman's requirement 2026-08-20:
+    # project agents are visible (their terminal window open) by default;
+    # concierge/orchestrator stay invisible always -- this field exists
+    # only on Team, never on RoleSlot, so there is no field to
+    # accidentally wire an Engine role's window-opening through. Default
+    # True mirrors teams.json entries written before this field existed
+    # (teams.py reads `entry.get("visible", True)`), so an old registry
+    # entry silently becomes "visible" rather than silently becoming
+    # background -- matching the spec's own "visible by default."
+    visible: bool = True
 
 
 @dataclass

@@ -135,6 +135,13 @@ class TeamManageScreen(Screen):
         await body.mount(Button("Relocate a Member", id="relocate"))
         await body.mount(Button("Remove a Member", id="remove_member"))
         await body.mount(Button("Refresh Context", id="refresh_context"))
+        # SPEC-gaps-and-build-plan.md §1.6: the label names the EFFECT of
+        # pressing it (what you'll get), not the current state -- same
+        # convention as every other hint in this app -- so a team that's
+        # currently visible offers "Make Background", never a bare toggle
+        # whose direction you'd have to infer.
+        visibility_label = "Make Background (no window)" if team.visible else "Make Visible (open a window)"
+        await body.mount(Button(visibility_label, id="toggle_visible"))
         await body.mount(Button("Remove Team", id="remove_team", variant="error"))
         await body.mount(Button("Back", id="back_to_list", variant="error"))
         swap_button.focus()

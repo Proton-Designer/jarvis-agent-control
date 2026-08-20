@@ -18,6 +18,7 @@ from providers import adoption_info, claude_session_id  # noqa: E402
 
 from reconnect import wait_for_ready  # noqa: E402
 from teams import CLAUDE_PROJECTS_DIR, load_registry, save_registry  # noqa: E402
+import terminal_window  # noqa: E402
 
 CLAUDE_JSON_PATH = Path.home() / ".claude.json"
 # Matches the .mcp.json content used everywhere else in this project
@@ -250,7 +251,10 @@ def _read_ai_title(claude_session: str) -> str | None:
     return None
 
 
-def create_team(team_id: str, aliases: list[str], root: str, inbox_tmux: str, members: list[dict]) -> None:
+def create_team(
+    team_id: str, aliases: list[str], root: str, inbox_tmux: str, members: list[dict],
+    visible: bool = True,
+) -> None:
     """members: [{"tmux", "claude_session"}, ...]. Appends to the
     registry -- never overwrites an existing team with the same id
     silently.
@@ -271,7 +275,16 @@ def create_team(team_id: str, aliases: list[str], root: str, inbox_tmux: str, me
     resolved HERE to that member's claude_session and stored as the
     team's `lead` -- SS2's "key it on claude_session, not tmux name"
     happens internally so team_registry_tools.py's call shape never has
-    to change. Empty string means no lead, same as before."""
+    to change. Empty string means no lead, same as before.
+
+    `visible` (SPEC-gaps-and-build-plan.md SS1.6): defaults True, matching
+    Ayman's "project agents are visible by default." On success, opens a
+    terminal window for the team's representative session (the lead if
+    one was named, else the first member) -- best-effort, deliberately
+    never raises: a window failing to open must not fail team creation,
+    which already did the real work (real sessions exist, the registry
+    write already succeeded). Not called at all when visible=False, so a
+    background team never touches terminal_window."""
     registry = load_registry()
     if any(t["id"] == team_id for t in registry):
         raise ValueError(f"a team with id {team_id!r} is already registered")
@@ -303,5 +316,11 @@ def create_team(team_id: str, aliases: list[str], root: str, inbox_tmux: str, me
         "root": resolved_root,
         "lead": lead_claude_session,
         "members": members,
+        "visible": visible,
     })
     save_registry(registry)
+
+    if visible:
+        representative = inbox_tmux or members[0].get("tmux")
+        if representative:
+            terminal_window.open_window_for_session(representative)

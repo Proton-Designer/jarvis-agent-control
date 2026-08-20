@@ -22,6 +22,8 @@ sys.path.insert(0, str(Path(__file__).parent.parent.parent / "l4_controller"))
 from providers import claude_session_id, list_sessions as _list_live_sessions  # noqa: E402
 
 import team_context  # noqa: E402
+import terminal_window  # noqa: E402
+from models import LIVENESS_RUNNING  # noqa: E402
 from teams import _lead_claude_session, load_registry, save_registry  # noqa: E402
 
 
@@ -173,3 +175,69 @@ def remove_member(team_id: str, claude_session: str) -> dict:
     entry["members"] = [m for m in members if m["claude_session"] != claude_session]
     save_registry(registry)
     return {"ok": True, "detail": "member removed (session was not touched)"}
+
+
+# --- SPEC-gaps-and-build-plan.md SS1.6: visible terminal windows -------
+
+def set_team_visible(team_id: str, visible: bool) -> dict:
+    """Toggle a team's window preference. Never touches engine roles --
+    there is no equivalent field on RoleSlot/engine.json, structurally,
+    so there is nothing here that could ever open a window for the
+    concierge or orchestrator.
+
+    Flipping to visible=True opens a window immediately, best-effort
+    (same as create_team()'s own call) -- the whole point of toggling on
+    is wanting to see it NOW, not at the next reconnect. Flipping to
+    visible=False does NOT close any window that's already open (this
+    module has no reliable cross-app way to find and close one
+    specifically, and closing a window the user is actively looking at
+    out from under them would be its own surprise) -- it only stops
+    future opens (creation, revival) from reopening one."""
+    registry = load_registry()
+    entry = next((t for t in registry if t["id"] == team_id), None)
+    if entry is None:
+        return {"ok": False, "detail": f"no team registered with id {team_id!r}"}
+
+    entry["visible"] = visible
+    save_registry(registry)
+
+    if visible:
+        lead_session = _lead_claude_session(entry)
+        members = entry.get("members", [])
+        lead_member = next((m for m in members if m["claude_session"] == lead_session), None)
+        representative = (lead_member or (members[0] if members else None))
+        tmux = representative.get("tmux") if representative else None
+        if tmux:
+            terminal_window.open_window_for_session(tmux)
+
+    return {"ok": True, "detail": f"{team_id!r} is now {'visible' if visible else 'background'}"}
+
+
+def ensure_window_for_team(team) -> dict:
+    """The single seam for revival (SPEC-gaps-and-build-plan.md SS1.6):
+    revive-everything calls this once per team right after reconnecting
+    it, rather than either engineer writing window-opening logic twice.
+    Takes a LIVE `models.Team` (post-discover_teams_and_unassigned(), with
+    real liveness) rather than a raw registry entry, because picking a
+    representative session needs to know who's actually running right
+    now, not just who's on paper.
+
+    Idempotent by construction, safe to call redundantly (every revival,
+    every poll if a caller wanted to): no-ops when team.visible is False,
+    when there's no running member yet to attach to, and
+    open_window_for_session() itself no-ops via has_attached_client() when
+    a window is already open -- never stacks a duplicate.
+
+    Prefers the lead's session (the one Ayman actually watches, since
+    it's the one that receives instructions); falls back to the first
+    RUNNING member when there's no lead or the lead isn't currently up,
+    rather than opening nothing for a live team."""
+    if not team.visible:
+        return {"ok": True, "opened": False, "detail": "team is set to background -- no window"}
+
+    lead = next((m for m in team.members if m.is_lead and m.liveness == LIVENESS_RUNNING), None)
+    running = lead or next((m for m in team.members if m.liveness == LIVENESS_RUNNING and m.tmux), None)
+    if running is None or not running.tmux:
+        return {"ok": True, "opened": False, "detail": "no running member to attach a window to yet"}
+
+    return terminal_window.open_window_for_session(running.tmux)
