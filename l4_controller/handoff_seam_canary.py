@@ -138,8 +138,10 @@ def run() -> int:
     )
     check("returns the failed DeliveryResult (not None -- the enqueue DID happen)", result is not None and not result.ok)
     check(
-        "spoke the ack (enqueue really did succeed) AND an explicit delivery failure",
-        any("Got it" in s for s in SPOKEN) and any("couldn't reach the orchestrator session" in s for s in SPOKEN),
+        "spoke an explicit delivery failure (the duplicate ack was removed 2026-08-20 -- "
+        "the instant ack already proves he was heard, and saying it twice just spent "
+        "three seconds of his attention)",
+        any("couldn't reach the orchestrator session" in s for s in SPOKEN),
         detail=f"spoke: {SPOKEN}",
     )
     ref = _latest_dictation_ref()
@@ -157,7 +159,18 @@ def run() -> int:
     SPOKEN.clear()
     result = h.deliver_transcript("do something real", FakeTransport(ok=True), orchestrator_target="claude-test-target")
     check("returns an ok DeliveryResult", result is not None and result.ok)
-    check("spoke the ack, no failure language", any("Got it" in s for s in SPOKEN) and not any("couldn't" in s for s in SPOKEN), detail=f"spoke: {SPOKEN}")
+    # Says NOTHING on the success path, and that is the change. The
+    # duplicate ack lived here and was removed 2026-08-20: Ayman heard
+    # "Okay, one sec." from the instant ack and then "Got it, working on
+    # it." three seconds later -- two different phrases saying the same
+    # nothing, followed by silence while the real answer was still
+    # coming. Saying it twice does not prove he was heard any harder.
+    #
+    # Asserted as an absence rather than deleted, so a future change that
+    # reintroduces a success announcement here fails loudly instead of
+    # quietly making the wait feel longer again.
+    check("says NOTHING on success -- the instant ack already proved he was heard",
+          SPOKEN == [], detail=f"spoke: {SPOKEN}")
     ref = _latest_dictation_ref()
     record = ds.dispatch_state(ref) if ref else None
     check(

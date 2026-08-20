@@ -265,7 +265,21 @@ def deliver_transcript(
         speak("I couldn't record that dictation -- it wasn't handed off.")
         return None
 
-    speak("Got it, working on it.")
+    # REMOVED 2026-08-20, not moved: this used to speak "Got it, working
+    # on it." right here, and Ayman heard it as a SECOND reassurance
+    # three seconds after the instant ack's "Okay, one sec." -- two
+    # different phrases saying the same nothing, followed by silence
+    # while the real answer was still coming.
+    #
+    # The instant ack (instant_ack.py, spoken by the daemon the moment
+    # the dictation closes) already covers the only job this line had:
+    # proving he was heard. Saying it twice does not prove it harder; it
+    # just spends three seconds of his attention and makes the wait feel
+    # longer than it is.
+    #
+    # Nothing is lost by removing it. Every real outcome downstream --
+    # the plan summary, a refusal, an error, the router's answer -- still
+    # speaks for itself. What is gone is only the duplicate receipt.
 
     # Pre-inject the live session list rather than making the router spend
     # a full model turn calling list_sessions() itself before it can even

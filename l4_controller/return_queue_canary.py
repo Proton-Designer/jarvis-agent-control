@@ -125,14 +125,40 @@ def run() -> int:
           ready is False and why == "collecting", f"{ready} {why!r}")
     ready2, _ = rq.ready_to_flush(now=time.time() + rq.SETTLE_S + 1)
     check("...and IS flushed once the settle delay has passed", ready2 is True)
-    with mock.patch("dispatch_state.any_forwarded", return_value=True):
-        ready3, why3 = rq.ready_to_flush(now=time.time() + rq.SETTLE_S + 1)
-    check("a dictation in flight holds the batch -- never interrupt Ayman mid-sentence",
-          ready3 is False and "dictation" in why3, f"{ready3} {why3!r}")
-    with mock.patch("dispatch_state.any_forwarded", side_effect=OSError("unreadable")):
-        ready4, _ = rq.ready_to_flush(now=time.time() + rq.SETTLE_S + 1)
-    check("an UNREADABLE dispatch state fails toward SPEAKING, not toward silence",
-          ready4 is True)
+    # The gate is the wake daemon's OWN state, not dispatch_state. That
+    # was the original gate and it swallowed a real reply: the concierge
+    # answered Ayman and any_forwarded() stayed True forever, because a
+    # conversational answer has no dispatch to complete. "He is still
+    # talking" became "never speak again".
+    import json  # noqa: E402
+    from jarvis_paths import jarvis_home  # noqa: E402
+    wake_path = jarvis_home() / "wake_state.json"
+    wake_path.parent.mkdir(parents=True, exist_ok=True)
+
+    wake_path.write_text(json.dumps({"state": "CAPTURING"}))
+    ready3, why3 = rq.ready_to_flush(now=time.time() + rq.SETTLE_S + 1)
+    check("mid-sentence holds the batch -- never interrupt him while he is talking",
+          ready3 is False and "talking" in why3, f"{ready3} {why3!r}")
+
+    wake_path.write_text(json.dumps({"state": "IDLE"}))
+    ready4, _ = rq.ready_to_flush(now=time.time() + rq.SETTLE_S + 1)
+    check("...and once he stops, it speaks", ready4 is True)
+
+    wake_path.unlink(missing_ok=True)
+    ready5, _ = rq.ready_to_flush(now=time.time() + rq.SETTLE_S + 1)
+    check("no daemon at all fails toward SPEAKING -- nothing to interrupt",
+          ready5 is True)
+
+    # THE BACKSTOP, and it is the assertion that matters most here: the
+    # bug was not that one gate was wrong, it was that a stuck gate could
+    # hold a message forever with every layer reporting success. Nothing
+    # may outrank this.
+    wake_path.write_text(json.dumps({"state": "CAPTURING"}))
+    ready6, _ = rq.ready_to_flush(now=time.time() + rq.MAX_HOLD_S + 1)
+    check("past MAX_HOLD_S it speaks even mid-sentence -- no gate may hold a "
+          "message indefinitely, because that is how a reply disappears silently",
+          ready6 is True)
+    wake_path.unlink(missing_ok=True)
     rq._write([])
     check("an empty queue is never 'ready' (nothing to say is not a reason to speak)",
           rq.ready_to_flush()[0] is False)

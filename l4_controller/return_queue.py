@@ -29,8 +29,8 @@ typing was for. `error` is not batchable and never enters this queue.
 FLUSH POLICY
 ------------
 Collected, then spoken when BOTH hold:
-  - no dispatch is in flight (dispatch_state.any_forwarded() is False),
-    so a completion never interrupts Ayman mid-dictation; and
+  - he is not mid-sentence (the wake daemon's own state is not
+    CAPTURING), so a completion never interrupts him; and
   - SETTLE_S has passed since the last arrival, so a burst of three
     agents finishing together becomes one utterance rather than three.
 
@@ -75,6 +75,24 @@ QUEUE_PATH = jarvis_home() / "return_queue.json"
 # utterance; short enough that a single completion doesn't feel delayed.
 SETTLE_S = 2.5
 _TICK_S = 0.5
+
+# HARD BACKSTOP. Nothing may be held longer than this, for any reason.
+#
+# Added 2026-08-20 after the queue swallowed a real reply. The concierge
+# answered Ayman's "hello, how are you doing" with "Good. Ready for
+# whatever you need." -- and it sat unspoken, because the flush gate
+# asked dispatch_state.any_forwarded() and that stayed True forever. A
+# conversational answer has no dispatch lifecycle to complete, so the
+# condition that was supposed to mean "he is still talking" became
+# "never speak again".
+#
+# The gate itself is fixed below, but the gate was not the real problem.
+# ANY hold condition that can get stuck turns this queue into a place
+# messages go to disappear, silently, with every layer reporting
+# success. So the backstop is unconditional: past this age it speaks,
+# whatever the gate thinks. Being interrupted is recoverable; never
+# hearing the answer is not.
+MAX_HOLD_S = 12.0
 
 # Speech order. Lower speaks first. Mirrors say_feedback's priority
 # meaning so the two orderings can never disagree about what outranks
@@ -266,23 +284,32 @@ def ready_to_flush(now: float | None = None) -> tuple[bool, str]:
     """(ready, why_not). Returned as a reason rather than a bare bool so
     the console can say WHY something is waiting -- "will speak when you
     stop talking" is actionable where "3 pending" is not."""
-    import dispatch_state
-
     now = now if now is not None else time.time()
     items = pending()
     if not items:
         return False, "nothing queued"
-    try:
-        if dispatch_state.any_forwarded():
-            return False, "waiting until the current dictation finishes"
-    except Exception as e:
-        # Fail toward SPEAKING. An unreadable dispatch state must not be
-        # able to hold a blocked-question escalation forever -- silence
-        # is the failure this channel exists to prevent, and a slightly
-        # early interruption is recoverable where indefinite silence is
-        # not.
-        log_event("return_queue_dispatch_state_unreadable", error=str(e))
+
+    # Backstop first, so no gate below can override it.
+    oldest = min(i.get("queued_at", 0) for i in items)
+    if now - oldest >= MAX_HOLD_S:
         return True, ""
+
+    # "Is he MID-SENTENCE right now", read from the wake daemon's own
+    # state file -- not dispatch_state.any_forwarded(), which was the
+    # original gate and was wrong. any_forwarded() means "a dispatch was
+    # forwarded and has not been marked complete", which is a different
+    # question and stays True indefinitely for a conversational reply
+    # that has no dispatch to complete. It read as "he is still talking"
+    # forever, and swallowed a real answer.
+    try:
+        with (jarvis_home() / "wake_state.json").open() as f:
+            if json.load(f).get("state") == "CAPTURING":
+                return False, "waiting until you stop talking"
+    except (FileNotFoundError, json.JSONDecodeError, OSError):
+        # No daemon running, or unreadable: nothing is being captured, so
+        # there is nothing to interrupt. Fail toward SPEAKING -- silence
+        # is the failure this channel exists to prevent.
+        pass
     newest = max(i.get("queued_at", 0) for i in items)
     if now - newest < SETTLE_S:
         return False, "collecting"
