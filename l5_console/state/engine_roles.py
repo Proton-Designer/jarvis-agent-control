@@ -273,8 +273,11 @@ def _log_cwd_mismatch(role: str, tmux: str, expected_cwd: str, found_cwd: str) -
     log_event("engine_role_cwd_mismatch", role=role, tmux=tmux, expected_cwd=expected_cwd, found_cwd=found_cwd)
 
 
-# --- TODO-feature-queue.md item 5: engine-role permission-prompt -----
-# detection + narrow auto-approve. The 2026-08-20 incident: the
+# --- Engine-role permission-prompt detection + narrow auto-approve ---
+# An urgent fix from a real incident, 2026-08-20, not one of
+# TODO-feature-queue.md's numbered items (that list's own #5 is a
+# different thing -- answering a BLOCKED-QUESTION on a team member by
+# voice, already built separately). The 2026-08-20 incident: the
 # concierge sat on `Read(~/.jarvis/dictations/...)` -- the file EVERY
 # dictation arrives in -- forever, with nobody watching. The Lead's
 # immediate fix (--dangerously-skip-permissions on both roles) makes

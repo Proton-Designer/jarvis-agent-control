@@ -55,6 +55,9 @@ def _session():
     s = d.DictationSession.__new__(d.DictationSession)
     s._chunker = _FakeChunker()
     s._hold_active = False
+    # Non-empty by default: most checks here are about the window BETWEEN
+    # words, which only applies once something has been said.
+    s.chunks_transcribed = ["something already said"]
     return s
 
 
@@ -105,6 +108,36 @@ def run() -> int:
     s3.clear_hold()
     check("speech resuming SPENDS the hold -- one pause, not a mode the dictation stays in",
           s3.silence_limit_s == 2.7, str(s3.silence_limit_s))
+
+    print()
+    print("the OPENING window -- before he has said anything at all")
+    fresh = _session()
+    fresh.chunks_transcribed = []
+    check("with nothing said yet, the window is 10s, not 2.7s",
+          fresh.silence_limit_s == 10.0, str(fresh.silence_limit_s))
+    fresh._chunker.silence_duration_s = 3.0
+    check("...so pausing 3s to collect his thoughts does NOT close it -- "
+          "the exact failure from his first live test",
+          fresh.silence_exceeds_safety_net() is False)
+    fresh._chunker.silence_duration_s = 11.0
+    check("...but 11s of total silence still ends it -- an open mic must not "
+          "wait forever for someone who walked away",
+          fresh.silence_exceeds_safety_net() is True)
+
+    spoke = _session()
+    spoke.chunks_transcribed = ["hello"]
+    check("the moment he HAS spoken, the window drops to 2.7s",
+          spoke.silence_limit_s == 2.7, str(spoke.silence_limit_s))
+    spoke._chunker.silence_duration_s = 3.0
+    check("...so a 3s gap mid-dictation ends it, as before",
+          spoke.silence_exceeds_safety_net() is True)
+
+    held_fresh = _session()
+    held_fresh.chunks_transcribed = []
+    held_fresh.note_hold_phrase()
+    check("an explicit hold outranks the opening grace (50s, not 10s) -- "
+          "he asked for time, which beats an inferred allowance",
+          held_fresh.silence_limit_s == 50.0, str(held_fresh.silence_limit_s))
 
     print()
     print("hold phrases are NOT stripped from the transcript")

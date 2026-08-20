@@ -123,6 +123,27 @@ HOLD_PHRASE_VARIANTS = {
 }
 SILENCE_HOLD_S = 50.0
 
+# The window BEFORE the first word, which is a different problem from the
+# window between words. Ayman's addition, 2026-08-20.
+#
+# 2.7s is right once he is talking -- it is a pause between phrases. It is
+# wrong immediately after "hey Jarvis", where he has not started yet and
+# may still be deciding what to ask. Measured against his own first live
+# test: he said "hey Jarvis", paused to collect his thoughts, and the
+# dictation closed underneath him with an empty transcript before he had
+# said anything at all.
+#
+# So the opening silence gets its own, longer allowance. It costs nothing
+# in the ordinary case (he starts speaking well inside it, and the moment
+# he does the window drops to 2.7s), and it removes the one situation
+# where the system gives up on him before he has spoken.
+#
+# Deliberately shorter than SILENCE_HOLD_S: "hey Jarvis" then total
+# silence should still end on its own reasonably soon -- an open
+# microphone waiting 50s for someone who walked away is the behaviour the
+# short window exists to prevent.
+SILENCE_OPENING_GRACE_S = 10.0
+
 sys.path.insert(0, str(Path(__file__).parent.parent))
 from jarvis_paths import jarvis_home  # noqa: E402
 
@@ -488,7 +509,20 @@ class DictationSession:
 
     @property
     def silence_limit_s(self) -> float:
-        return SILENCE_HOLD_S if self._hold_active else SILENCE_SAFETY_NET_S
+        """Which silence window applies right now.
+
+        Precedence, and each level has a distinct reason:
+          hold    -- he asked for time explicitly ("hold up"), so it wins
+                     over everything.
+          opening -- he has said nothing yet, so 2.7s would be judging a
+                     pause that is not a pause between phrases at all.
+          default -- he is mid-dictation; 2.7s is a real gap in speech.
+        """
+        if self._hold_active:
+            return SILENCE_HOLD_S
+        if not self.chunks_transcribed:
+            return SILENCE_OPENING_GRACE_S
+        return SILENCE_SAFETY_NET_S
 
     def clear_hold(self) -> None:
         """Consumed when speech resumes, so the hold is genuinely

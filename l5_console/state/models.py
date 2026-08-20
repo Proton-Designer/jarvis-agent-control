@@ -70,8 +70,9 @@ class RoleSlot:
     # default) behaves as "no mismatch observed."
     cwd_mismatch: bool = False
     found_cwd: str | None = None  # only meaningful when cwd_mismatch is True -- the session's REAL live working_dir, never shown as a raw path in the ENGINE panel (plain language only, per the Lead's ruling); Stream's diagnostic feed is where the actual path belongs
-    # TODO-feature-queue.md item 5, the 2026-08-20 stuck-concierge
-    # incident: role_liveness() now captures+classifies the pane (read
+    # The 2026-08-20 stuck-concierge incident (an urgent fix, not part
+    # of TODO-feature-queue.md's numbered list): role_liveness() now
+    # captures+classifies the pane (read
     # only, no keystroke) for a RUNNING role, same cheap-check cadence as
     # everything else here. prompt_pending is True only when the pane is
     # genuinely PaneState.PERMISSION_PROMPT right now; prompt_preview is

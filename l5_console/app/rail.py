@@ -29,7 +29,7 @@ from staleness import is_stale
 from stream import StreamReader
 from format_helpers import (
     liveness_icon, liveness_color, team_liveness, compact_model_name, role_status_phrase, role_status_icon,
-    is_blocked, is_identity_stale, pending_speech_header,
+    is_blocked, is_identity_stale, pending_speech_header, is_prompt_pending,
     COLOR_OK, COLOR_WARN, COLOR_ERR, COLOR_ACCENT, COLOR_DIM, COLOR_INK,
 )
 from meter import Meter
@@ -101,6 +101,14 @@ class RailEngine(PlainStatic):
                     f"{role_status_icon(slot)} {role_status_phrase(slot)}",
                     style=COLOR_OK if live else (COLOR_WARN if slot.cwd_mismatch else COLOR_DIM),
                 )
+                # Most prominent thing this role's line can show
+                # (the 2026-08-20 stuck-concierge incident) -- same predicate
+                # Console uses, so the two densities can't disagree
+                # about which roles are stuck. Rail has no room for the
+                # preview text, just the fact -- same "count/fact only,
+                # detail lives in Console" split as pending-speech.
+                if is_prompt_pending(slot):
+                    text.append("  ⚠ STUCK ON PROMPT", style=f"bold {COLOR_ERR}")
         if stale:
             text.append(_staleness_suffix(), style=COLOR_WARN)
         self.update(text)

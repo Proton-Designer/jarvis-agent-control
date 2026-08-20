@@ -165,7 +165,7 @@ class Poller:
                     concierge=self._role_slot(state["concierge"]),
                     orchestrator=self._role_slot(state["orchestrator"]),
                 )
-                # TODO-feature-queue.md item 5: the auto-resolve half.
+                # The 2026-08-20 stuck-concierge incident: the auto-resolve half.
                 # Runs AFTER the read-only state above, same "detection
                 # in the cheap/read path, action in the poller" split
                 # _maybe_escalate_blocked() already uses for blocked

@@ -34,7 +34,7 @@ from stream import StreamReader
 from format_helpers import (
     liveness_icon, liveness_color, team_liveness, compact_model_name, build_hint_line, role_status_phrase, role_status_icon,
     is_blocked, blocked_for, is_identity_stale, identity_staleness_note, model_effort_suffix,
-    pending_speech_header, pending_speech_kind_glyph,
+    pending_speech_header, pending_speech_kind_glyph, is_prompt_pending, prompt_preview_text,
     COLOR_OK, COLOR_WARN, COLOR_ERR, COLOR_ACCENT, COLOR_DIM, COLOR_INK,
 )
 from meter import Meter
@@ -337,6 +337,23 @@ class EnginePanel(Widget):
                 text.append("  ⚠ no tools", style=COLOR_WARN)
             if note:
                 text.append(note, style=COLOR_WARN)
+            # The 2026-08-20 stuck-concierge incident (an urgent fix, not
+            # one of TODO-feature-queue.md's numbered items): a role
+            # sitting on a permission prompt should be
+            # the MOST PROMINENT thing in this panel -- same "most
+            # prominent thing on screen" framing SPEC-blockers.md SS6
+            # gives blocked team members, same shape as bc602ea's render
+            # (own line, bold ERR, verbatim untrusted preview text). This
+            # is checked and rendered independently of the status line
+            # above, never folded into role_status_icon/phrase, which
+            # stay about ordinary liveness -- an auto-approve attempt
+            # (poller.py's engine loop) usually resolves this within one
+            # tick, so seeing it rendered at all means either the attempt
+            # is still in flight or it was escalated and needs a look.
+            if is_prompt_pending(slot):
+                text.append("\n")
+                text.append("⚠ stuck on a prompt: ", style=f"bold {COLOR_ERR}")
+                text.append(_truncate(prompt_preview_text(slot), 60), style=COLOR_ERR)
             w["info"].update(text)
 
             w["create"].display = False

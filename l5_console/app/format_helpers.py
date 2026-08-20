@@ -203,7 +203,7 @@ def is_prompt_pending(slot) -> bool:
     """One predicate, shared by every surface (same reasoning as
     is_blocked()) -- Console's full ENGINE panel and Rail's compact line
     can never disagree about whether a role is stuck on a permission
-    prompt (TODO-feature-queue.md item 5, the 2026-08-20 stuck-concierge
+    prompt (an urgent fix from the 2026-08-20 stuck-concierge
     incident)."""
     return bool(getattr(slot, "prompt_pending", False))
 
