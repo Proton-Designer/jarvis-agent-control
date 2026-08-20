@@ -52,6 +52,16 @@ VIEW_OPEN_POLL_INTERVAL_S = 0.5
 DISMISS_VERIFY_POLL_ATTEMPTS = 6
 DISMISS_VERIFY_POLL_INTERVAL_S = 0.5
 
+# docs/TODO-feature-queue.md #5 / SPEC-blockers.md SS5: how long to wait
+# for a BLOCKED_QUESTION pane to actually leave that state after the
+# answer keystroke is sent, before reporting the delivery as unconfirmed
+# rather than assuming it landed. Same shape as DISMISS_VERIFY_POLL_*
+# above, separate constants because this is a semantically different
+# wait (an answer being processed, not a view closing) even though the
+# numbers happen to match today.
+ANSWER_VERIFY_POLL_ATTEMPTS = 6
+ANSWER_VERIFY_POLL_INTERVAL_S = 0.5
+
 # A pane already stuck in PERSISTENT_VIEW before this delivery attempt
 # even started (self-heal, added 2026-08-18 -- see README's Contributing
 # section for the incident that shaped its constraints). Waited out first
@@ -479,6 +489,86 @@ class TmuxTransport(Transport):
             "pane left in an uncertain state, needs manual attention",
             reason="dismiss_failed",
             view_content=view_content,
+        )
+
+    def answer_blocked_question(self, target: str, option_index: int) -> DeliveryResult:
+        """docs/TODO-feature-queue.md #5 / SPEC-blockers.md SS5: answers a
+        real, currently-open AskUserQuestion picker by selecting
+        `option_index` (1-based, matching the picker's own numbering) --
+        a SEPARATE, narrow path from deliver(), never a relaxation of its
+        READY-only gate.
+
+        Verified live (2026-08-20, real pickers, throwaway tmux sessions):
+        a single literal digit keystroke, with NO Enter, immediately and
+        correctly submits that option. This is also why deliver()'s own
+        gate is right to refuse BLOCKED_QUESTION for an ordinary payload:
+        a payload that happens to start with a digit matching a real
+        option number would silently answer the question with whatever
+        digit came first, then type the REST of the payload into
+        whatever the pane shows next -- the exact keystrokes-as-UI-input
+        hazard already documented for PERSISTENT_VIEW/PERMISSION_PROMPT
+        (the /config incident), found again here rather than assumed
+        away. Also verified live: selecting the picker's own "N. Type
+        something." entry and pressing Enter DECLINES the question
+        instead of opening a text field -- so this method never attempts
+        free text, only a pre-validated numbered option (see
+        blocked_answer.py's _match_option(), which is what decides
+        option_index before this is ever called).
+
+        Runs under the SAME per-target lock as deliver() (module-level
+        _lock_for_target, not per-instance) -- a concurrent normal
+        delivery attempt and an answer attempt to the same target must
+        never interleave keystrokes any more than two normal deliveries
+        would.
+
+        Refuses -- never sends a keystroke on a guess -- unless the pane
+        is POSITIVELY, FRESHLY reconfirmed as BLOCKED_QUESTION at the
+        moment of the call, not trusted from whatever state a caller
+        last observed: the question may have resolved itself (Ayman
+        answered from the console, the session moved on) in the time
+        between detection and this call."""
+        with _lock_for_target(target):
+            return self._answer_blocked_question_locked(target, option_index)
+
+    def _answer_blocked_question_locked(self, target: str, option_index: int) -> DeliveryResult:
+        if not self.session_exists(target):
+            return DeliveryResult(ok=False, detail=f"no such tmux session: {target}", reason="no_session")
+        if option_index < 1:
+            return DeliveryResult(ok=False, detail=f"invalid option index: {option_index}", reason="invalid_option")
+
+        ansi_text = self.capture_pane(target)
+        state = classify_pane_ansi(ansi_text, self.patterns)
+        if state != PaneState.BLOCKED_QUESTION:
+            return DeliveryResult(
+                ok=False,
+                detail=f"refused: {target} is not currently showing a question (pane state is {state.value})",
+                reason=state.value,
+            )
+
+        try:
+            subprocess.run(
+                [self.tmux_bin, "send-keys", "-t", target, "-l", "--", str(option_index)],
+                check=True,
+                capture_output=True,
+            )
+        except subprocess.CalledProcessError as e:
+            return DeliveryResult(
+                ok=False,
+                detail=f"tmux send-keys failed: {e.stderr.decode(errors='replace')}",
+                reason="tmux_error",
+            )
+
+        for _ in range(ANSWER_VERIFY_POLL_ATTEMPTS):
+            time.sleep(ANSWER_VERIFY_POLL_INTERVAL_S)
+            ansi_text = self.capture_pane(target)
+            if classify_pane_ansi(ansi_text, self.patterns) != PaneState.BLOCKED_QUESTION:
+                return DeliveryResult(ok=True, detail=f"answered {target}'s question with option {option_index}")
+
+        return DeliveryResult(
+            ok=False,
+            detail=f"sent option {option_index} to {target} but it's still showing a question after "
+            f"{ANSWER_VERIFY_POLL_ATTEMPTS * ANSWER_VERIFY_POLL_INTERVAL_S:.1f}s -- may not have landed, check manually",
+            reason="answer_not_confirmed",
         )
 
     def _handle_busy_tolerant_view(self, target: str, command: str, leading_token: str) -> DeliveryResult:

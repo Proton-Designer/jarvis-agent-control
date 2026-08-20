@@ -19,8 +19,14 @@ the same reasoning applies one level up, to which tools even exist for a
 given caller to try.
 
 Tools registered here:
-  list_sessions() / session_activity() / spend()   -- tools_read.py
-  report_dispatch_stage() / confirm_plan() / deliver_batch() -- tools_write.py
+  list_sessions() / session_activity() / spend() / pending_questions() -- tools_read.py
+  report_dispatch_stage() / confirm_plan() / deliver_batch() /
+    answer_blocked_session() -- tools_write.py. The last is Sonnet-only
+    (docs/TODO-feature-queue.md #5): it delivers a keystroke to a real
+    pane, same write-authority reasoning as deliver_batch -- Haiku gets
+    pending_questions() (read-only) to recognize an utterance MIGHT be
+    answering something, then hands off via handoff_to_router() like any
+    other utterance; it never answers directly itself.
   list_teams() / register_team_by_adoption() / register_team_fresh() --
     team_registry_tools.py (SPEC-orchestration.md SS1.3). All three are
     Sonnet-only, including the read-shaped list_teams(): it calls
@@ -55,6 +61,7 @@ app = MCPServer(name="jarvis-l4-controller")
 list_sessions = app.tool()(tools_read.list_sessions)
 session_activity = app.tool()(tools_read.session_activity)
 spend = app.tool()(tools_read.spend)
+pending_questions = app.tool()(tools_read.pending_questions)
 
 # jarvis_say is on BOTH surfaces deliberately -- speaking is not
 # authority. See tools_voice.py's docstring: this module never imports
@@ -65,6 +72,7 @@ jarvis_say = app.tool()(tools_voice.jarvis_say)
 report_dispatch_stage = app.tool()(tools_write.report_dispatch_stage)
 confirm_plan = app.tool()(tools_write.confirm_plan)
 deliver_batch = app.tool()(tools_write.deliver_batch)
+answer_blocked_session = app.tool()(tools_write.answer_blocked_session)
 
 list_teams = app.tool()(team_registry_tools.list_teams)
 register_team_by_adoption = app.tool()(team_registry_tools.register_team_by_adoption)

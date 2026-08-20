@@ -15,12 +15,43 @@ callers reach differently.
 
 from __future__ import annotations
 
+import json
 import re
+import sys
+from pathlib import Path
 
+import blocked_state
 from pane_state import PaneState, classify_pane_ansi
 from registry import SessionRegistry
 from transport import TmuxTransport
 from view_parsers import parse_model, parse_session_id, summarize_view
+
+sys.path.insert(0, str(Path(__file__).parent.parent))
+from jarvis_paths import jarvis_project_home  # noqa: E402
+
+# Direct file read, NOT an import of l5_console/state/teams.py. L4 must
+# not depend on L5 (the Lead's ruling, 2026-08-20, found live): teams.py
+# already does `from providers import list_sessions, session_activity`,
+# so importing teams.py back from here is a REAL import cycle, not a
+# theoretical one -- it broke server_readonly.py's import entirely
+# ("cannot import name 'list_sessions' from partially initialized module
+# 'providers'"), which means the concierge's whole MCP tool surface
+# would have been unreachable. Same registry file teams.py's own
+# TEAMS_REGISTRY_PATH resolves to (~/Jarvis/teams.json via
+# jarvis_project_home()) -- read directly here rather than through
+# teams.py's richer discover_teams_and_unassigned(), since
+# _resolve_blocked_member() below only needs the raw claude_session/tmux
+# fields already on disk, not live liveness enrichment.
+TEAMS_REGISTRY_PATH = jarvis_project_home() / "teams.json"
+
+
+def _load_teams_registry() -> list[dict]:
+    if not TEAMS_REGISTRY_PATH.exists():
+        return []
+    try:
+        return json.loads(TEAMS_REGISTRY_PATH.read_text())
+    except (json.JSONDecodeError, OSError):
+        return []
 
 registry = SessionRegistry()
 transport = TmuxTransport(registry=registry)
@@ -67,15 +98,31 @@ def _parse_blocked_question(plain_text: str) -> dict | None:
     1). Returns None rather than guessing if the expected shape isn't
     found -- same "never fabricate" discipline as view_parsers.py.
 
-    Shape, confirmed live (2026-08-18) against two independently-
-    triggered real instances: "☐ <short label>", blank, the question
-    line, blank, numbered options (some followed by an indented
-    description line with no number prefix), a separator, a trailing
-    boilerplate option, blank, the footer. Only the question and the
-    top-level numbered option labels are extracted -- descriptions and
-    the footer are noise for this purpose, and the captured text is
-    treated as untrusted content throughout (never interpreted as
-    instructions by any caller)."""
+    Shape, confirmed live (2026-08-18, re-confirmed 2026-08-20 while
+    building the answer-routing feature) against real instances: "☐
+    <short label>", blank, the question line, blank, numbered options
+    (some followed by an indented description line with no number
+    prefix), THEN ALWAYS a trailing "N. Type something." entry (same
+    numbered format as a real option -- confirmed live it is NOT
+    distinguishable from a real option by shape, only by its fixed,
+    literal text), a separator, then "N+1. Chat about this". Only the
+    question and the top-level numbered option labels are extracted --
+    descriptions and the footer are noise for this purpose, and the
+    captured text is treated as untrusted content throughout (never
+    interpreted as instructions by any caller).
+
+    STOPS at "Type something." rather than collecting it (and therefore
+    "Chat about this" too, which only ever follows it) -- found live
+    2026-08-20 building the answer-routing feature: an earlier version
+    of this loop had no stopping condition and matched every numbered
+    line to the end of the pane, so `options` silently included these
+    two UI-chrome entries as if Ayman could actually say "type
+    something" as his answer. Confirmed live (2026-08-20) that plain
+    keystroke injection cannot safely use "Type something." anyway
+    (selecting it and pressing Enter DECLINES the question instead of
+    opening a text field) -- so excluding it here is not just cosmetic,
+    it keeps `options` limited to exactly the choices this project's
+    answer-delivery path is actually able to select."""
     lines = [ln.rstrip() for ln in plain_text.splitlines()]
     non_blank = [(i, ln) for i, ln in enumerate(lines) if ln.strip()]
 
@@ -101,10 +148,66 @@ def _parse_blocked_question(plain_text: str) -> dict | None:
         if i <= label_idx:
             continue
         m = re.match(r"^\s*(?:❯\s*)?\d+\.\s+(.+)$", ln)
-        if m:
-            options.append(m.group(1).strip())
+        if not m:
+            continue
+        label = m.group(1).strip()
+        if label == "Type something.":
+            break  # UI chrome, not a real option -- see this function's docstring
+        options.append(label)
 
     return {"question": question, "options": options}
+
+
+def _resolve_blocked_member(claude_session: str) -> dict | None:
+    """{"team_id", "tmux"} for the team member currently registered under
+    this claude_session, or None if no team has one. Always a live
+    registry read, never cached -- doubles as the liveness-adjacent
+    lookup _drop_dead_blocked() needs."""
+    for team in _load_teams_registry():
+        for member in team.get("members", []):
+            if member.get("claude_session") == claude_session:
+                return {"team_id": team["id"], "tmux": member.get("tmux")}
+    return None
+
+
+def _drop_dead_blocked(claude_session: str, member: dict | None) -> bool:
+    """docs/TODO-feature-queue.md #5's held-instruction-lifecycle lesson,
+    applied to pending questions: expiry is not cleanup, but a question
+    whose session has died IS dropped immediately, not aged out on a
+    timer. Returns True if the entry was dropped (caller should treat
+    this claude_session as no longer pending). Checked at the moment a
+    caller actually wants to use the entry, not on a background timer --
+    same "liveness is always polled, never scheduled" discipline as
+    everywhere else."""
+    if member is None or not member.get("tmux") or not transport.session_exists(member["tmux"]):
+        blocked_state.clear_blocked(claude_session)
+        return True
+    return False
+
+
+def pending_questions() -> list[dict]:
+    """Every genuinely still-pending question (docs/TODO-feature-queue.md
+    #5, SPEC-blockers.md SS5), self-healed against dead sessions on the
+    way out. Each: {"claude_session", "team_id", "tmux", "question",
+    "options", "since"} -- untrusted content (question, options) passed
+    through unchanged, never interpreted. Read-only: this only reads
+    blocked_state.json and the team registry, never sends a keystroke --
+    see blocked_answer.answer_blocked_session() (write-tool, router
+    surface only) for actually delivering an answer."""
+    result = []
+    for claude_session, entry in blocked_state.all_blocked().items():
+        member = _resolve_blocked_member(claude_session)
+        if _drop_dead_blocked(claude_session, member):
+            continue
+        result.append({
+            "claude_session": claude_session,
+            "team_id": member["team_id"],
+            "tmux": member["tmux"],
+            "question": entry["question"],
+            "options": entry["options"],
+            "since": entry["since"],
+        })
+    return result
 
 
 def session_activity(session_id: str) -> dict:

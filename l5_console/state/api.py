@@ -33,6 +33,8 @@ from models import (  # noqa: F401 -- re-exported for consumers
     LIVENESS_LOST,
     LIVENESS_RUNNING,
     LIVENESS_STOPPED,
+    PendingSpeechItem,
+    PendingSpeechState,
     RoleSlot,
     RuntimeState,
     Team,

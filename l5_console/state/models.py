@@ -185,6 +185,34 @@ class UnassignedSession:
 
 
 @dataclass
+class PendingSpeechItem:
+    """One item in the return-channel queue (SPEC-orchestration.md SS2.3,
+    l4_controller/return_queue.py's contract -- l5_console/state/poller.py
+    maps that module's plain dicts to this 1:1, nothing invented). Mirrors
+    return_queue.pending()'s shape exactly: kind is "completion" or
+    "blocked_question" -- NEVER "error", refusals are never queued (the
+    one priority-tier rule that survives unchanged, per the spec)."""
+    kind: str
+    text: str  # what will be spoken, verbatim -- untrusted content, same discipline as TeamMember.blocked_question
+    team: str | None
+    queued_at: float
+
+
+@dataclass
+class PendingSpeechState:
+    """SPEC-orchestration.md Phase 3: "the pending-utterance queue does
+    NOT belong in Stream... queued speech is actionable. It needs its own
+    surface." Same per-section staleness/error shape as every other
+    cheap, ~1s-cadence section (WakeDaemonState is the closest analog) --
+    return_queue.pending() is documented as "safe to call from the poller
+    every tick; cheap, no I/O beyond one small file read.\""""
+    polled_at: float
+    expected_interval: float
+    error: str | None
+    items: list[PendingSpeechItem] = field(default_factory=list)
+
+
+@dataclass
 class JarvisState:
     engine: EngineState
     teams: list[Team]
@@ -193,4 +221,5 @@ class JarvisState:
     teams_error: str | None
     wake: WakeDaemonState
     runtime: RuntimeState
+    pending_speech: PendingSpeechState
     unassigned: list[UnassignedSession] = field(default_factory=list)

@@ -34,6 +34,7 @@ from stream import StreamReader
 from format_helpers import (
     liveness_icon, liveness_color, team_liveness, compact_model_name, build_hint_line, role_status_phrase, role_status_icon,
     is_blocked, blocked_for, is_identity_stale, identity_staleness_note, model_effort_suffix,
+    pending_speech_header, pending_speech_kind_glyph,
     COLOR_OK, COLOR_WARN, COLOR_ERR, COLOR_ACCENT, COLOR_DIM, COLOR_INK,
 )
 from meter import Meter
@@ -614,6 +615,56 @@ class TeamsPanel(PlainStatic):
         self.update(grid)
 
 
+class PendingSpeechPanel(PlainStatic):
+    """SPEC-orchestration.md Phase 3 (TODO-feature-queue.md item 4):
+    queued return-channel speech needs its OWN surface, explicitly not
+    Stream -- stream.py is documented ambient/best-effort ("degrading to
+    nothing new is acceptable"), and this is actionable. Glancing at the
+    screen mid-processing must never make the batch afterward a surprise.
+
+    INVISIBLE UNTIL NON-EMPTY -- .display toggled to False, not an empty
+    bordered box left sitting on screen. This is the one panel in the
+    app whose correct steady-state is to take zero space; a panel that's
+    always drawn (even "empty") competes for attention with the one
+    genuinely per-team empty-state Ayman is meant to act on (TeamsPanel's
+    "no teams yet"), and pending speech has nothing to say about itself
+    when there's nothing pending -- there's no action to hint at."""
+
+    BORDER_TITLE = "ABOUT TO SAY"
+    DEFAULT_CSS = "PendingSpeechPanel { height: auto; border: solid $panel; padding: 1; margin-bottom: 1; border-title-color: $text-muted; }"
+
+    def update_state(self, pending) -> None:
+        if pending.error:
+            # A failed check must stay visible as a failure, not vanish
+            # and look identical to "nothing queued" -- the same
+            # error-vs-empty distinction models.py's own docstring
+            # requires of every section.
+            self.display = True
+            self.update(Text(f"⚠ pending speech -- error: {pending.error}", style=COLOR_ERR))
+            return
+        if not pending.items:
+            self.display = False
+            return
+        self.display = True
+        text = Text()
+        text.append(pending_speech_header(len(pending.items)), style=f"bold {COLOR_WARN}")
+        note = _staleness_note(pending.polled_at, pending.expected_interval)
+        if note:
+            text.append(note, style=COLOR_WARN)
+        for item in pending.items:
+            text.append("\n  ")
+            glyph = pending_speech_kind_glyph(item.kind)
+            text.append(f"{glyph} ", style=COLOR_WARN if item.kind == "blocked_question" else COLOR_OK)
+            if item.team:
+                text.append(f"{item.team}: ", style=f"bold {COLOR_ACCENT}")
+            # Verbatim, truncated, untrusted content -- same discipline
+            # as the blocked-question line in TeamsPanel: this is speech
+            # ABOUT TO HAPPEN, not instructions, and PlainStatic already
+            # makes literal "[..]" text safe from Rich markup eating it.
+            text.append(_truncate(item.text.replace("\n", " "), 68), style=COLOR_INK)
+        self.update(text)
+
+
 class StreamPanel(Widget):
     """Live log of wake scores, state transitions, routing (§3) -- see
     stream.py's own docstring for what's actually in the feed today and
@@ -661,6 +712,7 @@ class Console(Widget):
                 yield EnginePanel(id="console_engine")
                 yield RuntimePanel(id="console_runtime")
             with Vertical(id="console_right"):
+                yield PendingSpeechPanel(id="console_pending_speech")
                 yield StreamPanel(id="console_stream")
                 yield TeamsPanel(id="console_teams")
         yield Footer(id="console_footer")
@@ -678,6 +730,7 @@ class Console(Widget):
         self.query_one("#console_teams", TeamsPanel).update_state(
             state.teams, state.teams_error, state.unassigned, state.teams_polled_at, state.teams_expected_interval
         )
+        self.query_one("#console_pending_speech", PendingSpeechPanel).update_state(state.pending_speech)
         self.query_one("#console_stream", StreamPanel).poll_stream()
 
     def update_meter(self, wake_state) -> None:

@@ -140,22 +140,28 @@ def run() -> int:
     # process already imported both server and server_readonly above for
     # check 1, so checking sys.modules here would prove nothing about
     # what a real, isolated Haiku process actually loads.
-    # Checks for tools_write.py itself and dispatch_state.py -- the
-    # actual mutation capability (mark_dispatch_complete et al lives only
-    # in dispatch_state.py, imported only by tools_write.py). Deliberately
-    # does NOT check for transport/slash_guard/say_feedback/cancel_listener:
-    # those are legitimately, safely pulled in by the READ path too
-    # (providers.spend()/session_activity() go through transport.py for a
-    # /cost capture; transport.py's stuck-view self-heal speaks an
-    # announcement via say_feedback, which in turn imports cancel_listener
-    # for its unrelated speak_with_cancel_window function -- none of that
-    # grants the ability to send an arbitrary payload to an arbitrary
-    # target, which is the one capability this file guards).
+    # Checks for tools_write.py itself, dispatch_state.py (mutation
+    # capability: mark_dispatch_complete et al, imported only by
+    # tools_write.py), and blocked_answer.py (2026-08-20, docs/
+    # TODO-feature-queue.md #5 -- answer_blocked_session()'s real
+    # keystroke-delivery capability lives there, imported only by
+    # tools_write.py; pending_questions(), the read-only half, was
+    # deliberately placed in providers.py instead, specifically so this
+    # exact check stays true -- see blocked_answer.py's own docstring).
+    # Deliberately does NOT check for transport/slash_guard/say_feedback/
+    # cancel_listener: those are legitimately, safely pulled in by the
+    # READ path too (providers.spend()/session_activity() go through
+    # transport.py for a /cost capture; transport.py's stuck-view
+    # self-heal speaks an announcement via say_feedback, which in turn
+    # imports cancel_listener for its unrelated speak_with_cancel_window
+    # function -- none of that grants the ability to send an arbitrary
+    # payload to an arbitrary target, which is the one capability this
+    # file guards).
     proc = subprocess.run(
         [sys.executable, "-c", (
             "import sys; sys.path.insert(0, '.'); "
             "import server_readonly; "
-            "leaked = [m for m in sys.modules if m in ('tools_write', 'dispatch_state')]; "
+            "leaked = [m for m in sys.modules if m in ('tools_write', 'dispatch_state', 'blocked_answer')]; "
             "print(','.join(leaked))"
         )],
         cwd=str(Path(__file__).parent),
@@ -164,7 +170,7 @@ def run() -> int:
     )
     leaked = [m for m in proc.stdout.strip().split(",") if m]
     check(
-        "tools_write.py and dispatch_state.py never enter a Haiku-only process's import graph",
+        "tools_write.py, dispatch_state.py, and blocked_answer.py never enter a Haiku-only process's import graph",
         proc.returncode == 0 and not leaked,
         detail=f"stderr={proc.stderr.strip()!r} leaked={leaked}",
     )

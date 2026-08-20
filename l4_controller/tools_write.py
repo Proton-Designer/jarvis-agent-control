@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import time
 
+from blocked_answer import answer_blocked_session as _answer_blocked_session
 from cancel_listener import cancel_socket_available
 from dispatch_state import mark_dispatch_complete, report_dispatch_stage as _report_dispatch_stage
 from latency_log import log_event
@@ -214,3 +215,38 @@ def deliver_batch(instructions: list[dict], dictation_ref: str, retry_busy_once:
         speak(f"All {len(instructions)} instructions sent." if instructions else "Nothing to send.")
 
     return {"results": results, "failures": failures}
+
+
+def answer_blocked_session(answer: str, target: str = "") -> dict:
+    """docs/TODO-feature-queue.md #5 / SPEC-blockers.md SS5: routes an
+    answer Ayman ACTUALLY SPOKE back to the specific session that asked
+    a question and is still waiting. This is stage 2 (escalation
+    routing) only -- it never invents an answer itself; `answer` must be
+    what Ayman said, verbatim, same discipline as handoff_to_router()'s
+    transcript.
+
+    Call pending_questions() first if you're not sure whether an
+    utterance is answering something -- with nothing pending, this call
+    always refuses (there's nothing TO answer), so ordinary DISPATCH
+    handling is always the safe default when uncertain (the spec's own
+    ruling: an ANSWER misread as DISPATCH is loud and recoverable; a
+    DISPATCH misread as ANSWER would be silent).
+
+    target: optional team id/alias/tmux hint, when Ayman named who he's
+    answering ("tell gateway to use staging"). Leave empty to auto-
+    resolve -- but ONLY when exactly one session is pending; with zero or
+    two-or-more pending this refuses rather than guessing (SS5.4: hold
+    and ask, never deliver an answer to the wrong question).
+
+    Returns {"ok", "detail", "team_id"}. ALWAYS refuses (never guesses)
+    when `answer` doesn't unambiguously match one of that question's own
+    captured option labels -- delivery uses transport.answer_blocked_question(),
+    a single validated keystroke into a freshly-reconfirmed
+    BLOCKED_QUESTION pane, never free text (verified live: this UI
+    doesn't support safe free-text injection via keystrokes at all).
+
+    Speaks nothing itself -- announce the outcome (ok or not) via
+    jarvis_say() yourself; say_feedback.py/return_queue.py are the
+    Lead's territory for the batching work in flight right now, and this
+    tool's whole job is routing the answer, not narrating it."""
+    return _answer_blocked_session(answer, target or None)

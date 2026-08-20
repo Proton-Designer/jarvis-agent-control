@@ -29,7 +29,7 @@ from staleness import is_stale
 from stream import StreamReader
 from format_helpers import (
     liveness_icon, liveness_color, team_liveness, compact_model_name, role_status_phrase, role_status_icon,
-    is_blocked, is_identity_stale,
+    is_blocked, is_identity_stale, pending_speech_header,
     COLOR_OK, COLOR_WARN, COLOR_ERR, COLOR_ACCENT, COLOR_DIM, COLOR_INK,
 )
 from meter import Meter
@@ -178,6 +178,28 @@ class RailRuntime(PlainStatic):
         self.update(text)
 
 
+class RailPendingSpeech(PlainStatic):
+    """Rail density of PendingSpeechPanel (SPEC-orchestration.md Phase 3,
+    TODO-feature-queue.md item 4) -- Rail has no room for the item list,
+    so a count and the same "why" Console shows, not the items
+    themselves. Same is-it-empty-then-render-nothing discipline as
+    RailUnassigned right below it: an empty update("") still occupies a
+    line in Rail's plain-line layout, matching that established
+    precedent exactly rather than inventing a second mechanism."""
+
+    def update_state(self, pending) -> None:
+        if pending.error:
+            self.update(Text(f"⚠ pending: error -- {pending.error}", style=COLOR_ERR))
+            return
+        if not pending.items:
+            self.update("")
+            return
+        text = Text(f"🔈 {pending_speech_header(len(pending.items))}", style=f"bold {COLOR_WARN}")
+        if is_stale(pending.polled_at, pending.expected_interval):
+            text.append(_staleness_suffix(), style=COLOR_WARN)
+        self.update(text)
+
+
 class RailUnassigned(PlainStatic):
     def update_state(self, unassigned: list) -> None:
         if not unassigned:
@@ -225,6 +247,7 @@ class Rail(Widget):
             yield RailWake(id="rail_wake")
             yield Meter(id="rail_meter", width=16)
             yield RailEngine(id="rail_engine")
+            yield RailPendingSpeech(id="rail_pending_speech")
             yield RailTeams(id="rail_teams")
             yield RailRuntime(id="rail_runtime")
             yield RailUnassigned(id="rail_unassigned")
@@ -247,6 +270,7 @@ class Rail(Widget):
         )
         self.query_one("#rail_footer", Footer).update_wake_state(self._wake_running)
         self.query_one("#rail_engine", RailEngine).update_state(state.engine)
+        self.query_one("#rail_pending_speech", RailPendingSpeech).update_state(state.pending_speech)
         self.query_one("#rail_teams", RailTeams).update_state(
             state.teams, state.teams_error, state.teams_polled_at, state.teams_expected_interval
         )

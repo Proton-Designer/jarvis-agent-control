@@ -159,6 +159,27 @@ def is_identity_stale(member) -> bool:
     return bool(identity_staleness_note(member))
 
 
+def pending_speech_header(count: int) -> str:
+    """"3 waiting -- will speak when you stop talking" (SPEC-orchestration.md
+    SS2.3's flush policy, in plain language). Shared so Console's full
+    panel and Rail's count line can't drift on wording -- same reasoning
+    as every other function here. WHY it is waiting, not just that it is
+    (the Lead's explicit requirement, TODO-feature-queue.md item 4):
+    a bare "3 waiting" tells Ayman nothing actionable; this tells him the
+    batch is the policy working as designed, and exactly when it resolves
+    -- the moment he stops talking -- so it is never a surprise
+    afterward."""
+    return f"{count} waiting -- will speak when you stop talking"
+
+
+def pending_speech_kind_glyph(kind: str) -> str:
+    """"❓" for a blocked-question escalation (the higher-priority tier,
+    SPEC-orchestration.md SS2.3), "✓" for anything else (completions,
+    today's only other real kind -- "error" is never queued, per the one
+    priority rule that survives unchanged)."""
+    return "❓" if kind == "blocked_question" else "✓"
+
+
 def model_effort_suffix(member) -> str:
     """"sonnet · high" / "opus" / "" -- model and effort folded together
     (TODO-feature-queue.md item 2, SPEC-teams.md SS5's "model folds into

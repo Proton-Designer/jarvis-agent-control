@@ -38,6 +38,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent.parent / "l4_controller"))
 import blocked_state  # noqa: E402
 import dispatch_state as dispatch_state_mod  # noqa: E402
+import return_queue as return_queue_mod  # noqa: E402
 import say_feedback  # noqa: E402
 
 import engine_roles as engine_roles_mod
@@ -48,6 +49,8 @@ import wake_signal as wake_signal_mod
 from models import (
     EngineState,
     JarvisState,
+    PendingSpeechItem,
+    PendingSpeechState,
     RoleSlot,
     RuntimeState,
     WakeDaemonState,
@@ -58,6 +61,11 @@ WAKE_INTERVAL_S = 1.0
 TEAMS_INTERVAL_S = 3.0  # effective cadence once per-member activity is added; membership/liveness alone would be ~1s
 RUNTIME_INTERVAL_S = 2.5
 SPEND_INTERVAL_S = 45.0
+# SPEC-orchestration.md SS2.3 / return_queue.py's own docstring: "safe to
+# call from the poller every tick; cheap, no I/O beyond one small file
+# read" -- same cadence as WAKE/ENGINE, the other cheap checks, not a
+# slower one like TEAMS_INTERVAL_S's per-member tier.
+PENDING_SPEECH_INTERVAL_S = 1.0
 
 # SPEC-blockers.md SS5.3: "a session that blocks and unblocks itself
 # within seconds is not worth reporting." No spec-mandated number --
@@ -93,6 +101,9 @@ def _initial_state() -> JarvisState:
             models_resident=[], memory_free_pct=None,
             spend_polled_at=0.0, spend_expected_interval=SPEND_INTERVAL_S, spend_error="not yet polled", spend=None,
         ),
+        pending_speech=PendingSpeechState(
+            polled_at=0.0, expected_interval=PENDING_SPEECH_INTERVAL_S, error="not yet polled", items=[],
+        ),
         unassigned=[],
     )
 
@@ -111,6 +122,7 @@ class Poller:
             self._loop_wake,
             self._loop_runtime,
             self._loop_spend,
+            self._loop_pending_speech,
         ]
         self._threads = [threading.Thread(target=loop, daemon=True) for loop in loops]
         for t in self._threads:
@@ -295,6 +307,25 @@ class Poller:
                     memory_free_pct=mem if mem_err is None else old.memory_free_pct,
                 )
             self._stop.wait(RUNTIME_INTERVAL_S)
+
+    def _loop_pending_speech(self) -> None:
+        while not self._stop.is_set():
+            try:
+                raw = return_queue_mod.pending()
+                items = [
+                    PendingSpeechItem(kind=r["kind"], text=r["text"], team=r.get("team"), queued_at=r["queued_at"])
+                    for r in raw
+                ]
+                new = PendingSpeechState(
+                    polled_at=time.time(), expected_interval=PENDING_SPEECH_INTERVAL_S, error=None, items=items,
+                )
+            except Exception as e:  # noqa: BLE001 -- must never take this thread down
+                with self._lock:
+                    old = self._state.pending_speech
+                new = replace(old, polled_at=time.time(), error=str(e))
+            with self._lock:
+                self._state.pending_speech = new
+            self._stop.wait(PENDING_SPEECH_INTERVAL_S)
 
     def _loop_spend(self) -> None:
         while not self._stop.is_set():
