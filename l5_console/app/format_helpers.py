@@ -7,6 +7,8 @@ reasoning as l2_5_concierge/session_match.py's own extraction.
 """
 from __future__ import annotations
 
+import time
+
 import sys
 from pathlib import Path
 
@@ -75,6 +77,33 @@ def compact_model_name(model: str | None) -> str:
 
 def liveness_color(liveness: str) -> str:
     return {LIVENESS_RUNNING: COLOR_OK, LIVENESS_STOPPED: COLOR_DIM, LIVENESS_LOST: COLOR_ERR}.get(liveness, COLOR_DIM)
+
+
+def blocked_for(member) -> str:
+    """How long a member has been blocked, e.g. "blocked 4m". Empty
+    string when it isn't blocked.
+
+    Duration is part of the signal, not decoration: a session blocked
+    twenty seconds ago may resolve itself, one blocked twenty minutes ago
+    has been burning wall-clock with nobody watching. That difference is
+    what tells Ayman whether to walk over to it."""
+    if not getattr(member, "blocked_question", None):
+        return ""
+    since = getattr(member, "blocked_since", None)
+    if not since:
+        return "blocked"
+    secs = max(0, int(time.time() - since))
+    if secs < 60:
+        return f"blocked {secs}s"
+    if secs < 3600:
+        return f"blocked {secs // 60}m"
+    return f"blocked {secs // 3600}h{(secs % 3600) // 60:02d}m"
+
+
+def is_blocked(member) -> bool:
+    """One predicate, shared by every surface, so Rail and Console can
+    never disagree about whether a member is blocked."""
+    return bool(getattr(member, "blocked_question", None))
 
 
 def role_status_icon(slot) -> str:

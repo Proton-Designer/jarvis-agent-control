@@ -29,6 +29,7 @@ from staleness import is_stale
 from stream import StreamReader
 from format_helpers import (
     liveness_icon, liveness_color, team_liveness, compact_model_name, role_status_phrase, role_status_icon,
+    is_blocked,
     COLOR_OK, COLOR_WARN, COLOR_ERR, COLOR_ACCENT, COLOR_DIM, COLOR_INK,
 )
 from meter import Meter
@@ -121,9 +122,23 @@ class RailTeams(PlainStatic):
         text.append(f"  {live} live", style=COLOR_OK if live else COLOR_DIM)
         if is_stale(polled_at, expected_interval):
             text.append(_staleness_suffix(), style=COLOR_WARN)
+        # Blocked count FIRST, before the per-team lines, and only when
+        # non-zero. Rail is the narrow density -- it cannot show the
+        # question text -- but it must never be the density where a
+        # blocked agent looks like a running one. SPEC-blockers.md SS6:
+        # work has stopped and something is required. A count plus a
+        # pointer at the fuller view is the most this width can honestly
+        # carry, and it is strictly better than silence.
+        blocked_members = [m for t in teams for m in t.members if is_blocked(m)]
+        if blocked_members:
+            text.append(f"  {len(blocked_members)} blocked", style=f"bold {COLOR_ERR}")
+
         for t in teams:
             text.append(f"\n  {liveness_icon(team_liveness(t))} {t.id}", style=liveness_color(team_liveness(t)))
             text.append(f" ({len(t.members)})", style=COLOR_DIM)
+            n = sum(1 for m in t.members if is_blocked(m))
+            if n:
+                text.append(f"  ⚠ {n} blocked", style=f"bold {COLOR_ERR}")
         self.update(text)
 
 

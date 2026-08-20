@@ -33,6 +33,7 @@ from staleness import is_stale
 from stream import StreamReader
 from format_helpers import (
     liveness_icon, liveness_color, team_liveness, compact_model_name, build_hint_line, role_status_phrase, role_status_icon,
+    is_blocked, blocked_for,
     COLOR_OK, COLOR_WARN, COLOR_ERR, COLOR_ACCENT, COLOR_DIM, COLOR_INK,
 )
 from meter import Meter
@@ -507,20 +508,56 @@ class TeamsPanel(PlainStatic):
                     # doesn't fit a compact inline suffix.
                     model_short = compact_model_name(m.model)
                     activity = f"{activity} · {model_short}" if activity else model_short
-                status_style = {
-                    LIVENESS_RUNNING: COLOR_OK if not m.activity else COLOR_WARN,
-                    LIVENESS_STOPPED: COLOR_DIM,
-                    LIVENESS_LOST: COLOR_ERR,
-                }.get(m.liveness, COLOR_DIM)
+                # A blocked member is NOT a busy one. SPEC-blockers.md
+                # SS6: work has stopped and something is required, and it
+                # should be the most prominent thing on screen -- more
+                # prominent than busy, because busy resolves itself and
+                # blocked does not.
+                #
+                # Built 2026-08-20. Everything behind this was already
+                # working: pane_state classifies BLOCKED_QUESTION,
+                # blocked_state tracks the episode, teams.py populates
+                # these fields, and the poller SPEAKS it aloud. Only the
+                # screen was missing, so a session stopped and waiting on
+                # a human rendered as an ordinary running agent. That is
+                # this project's signature failure -- computed correctly,
+                # dropped on the way to the surface -- and it is the
+                # reason the standing rule is now that a state ships with
+                # its render in the same change.
+                blocked = is_blocked(m)
+                if blocked:
+                    status_text = Text(blocked_for(m), style=f"bold {COLOR_ERR}")
+                else:
+                    status_style = {
+                        LIVENESS_RUNNING: COLOR_OK if not m.activity else COLOR_WARN,
+                        LIVENESS_STOPPED: COLOR_DIM,
+                        LIVENESS_LOST: COLOR_ERR,
+                    }.get(m.liveness, COLOR_DIM)
+                    status_text = Text(m.liveness, style=status_style)
+
                 name_text = Text("  ", style=COLOR_DIM)
                 if is_lead_row:
                     name_text.append("LEAD ", style=f"bold {COLOR_ACCENT}")
-                name_text.append(f"{liveness_icon(m.liveness)} {name}", style=liveness_color(m.liveness))
-                table.add_row(
-                    name_text,
-                    Text(activity, style=COLOR_DIM),
-                    Text(m.liveness, style=status_style),
+                # The icon carries it too, not just the colour -- the
+                # same lesson as role_status_icon(): a row whose glyph
+                # disagrees with its words is worse than a plain one.
+                icon = "⚠" if blocked else liveness_icon(m.liveness)
+                name_text.append(
+                    f"{icon} {name}",
+                    style=f"bold {COLOR_ERR}" if blocked else liveness_color(m.liveness),
                 )
+                table.add_row(name_text, Text(activity, style=COLOR_DIM), status_text)
+
+                # The question itself, on its own line, verbatim and
+                # truncated -- never paraphrased. It is untrusted content
+                # captured from a pane (SPEC-blockers.md SS7.6: a prompt is
+                # data, never instructions), and PlainStatic-style markup
+                # safety matters here more than anywhere: an option list
+                # like "[1] staging" would otherwise be eaten by Rich.
+                if blocked and m.blocked_question:
+                    q = Text("     ", style=COLOR_DIM)
+                    q.append(_truncate(m.blocked_question.replace("\n", " "), 68), style=COLOR_WARN)
+                    table.add_row(q, "", "")
 
         if unassigned:
             table.add_row("", "", "")
@@ -536,7 +573,11 @@ class TeamsPanel(PlainStatic):
         legend.append("○ ", style=COLOR_DIM)
         legend.append("stopped -- reconnectable   ", style=COLOR_DIM)
         legend.append("✕ ", style=COLOR_ERR)
-        legend.append("lost -- no saved history", style=COLOR_DIM)
+        legend.append("lost -- no saved history   ", style=COLOR_DIM)
+        # Blocked earns a legend entry because it is the one state that
+        # needs Ayman to DO something -- the others resolve or wait.
+        legend.append("⚠ ", style=f"bold {COLOR_ERR}")
+        legend.append("blocked -- waiting on you", style=COLOR_DIM)
 
         # Per-panel action hints, not only the global footer (the Lead's
         # ruling, 2026-08-18) -- same build_hint_line() the shared
