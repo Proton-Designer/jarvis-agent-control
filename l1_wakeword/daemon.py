@@ -80,7 +80,48 @@ RECOVERABLE_THRESHOLD = 0.3
 # Measured, not assumed: 20 diverse synthetic "ordinary conversation"
 # sentences (no wake-word-like phrasing) scored a max of 0.002 against this
 # model -- zero false positives anywhere near 0.3 for the cancel window.
-SILENCE_SAFETY_NET_S = 50.0
+# 2.7s, not the 50s this used to be. Ayman's decision, 2026-08-20, and
+# it changes what the primary end-of-dictation signal IS.
+#
+# The stop phrase ("that's it") was designed as the reliable way to end a
+# dictation, and 50s existed purely as a net so a thinking pause could
+# never cut him off. That is correct for "tell the gateway team to run
+# the integration tests -- that's it". It is badly wrong for saying
+# hello: a two-word greeting followed by a two-second pause left him
+# waiting FIFTY SECONDS for a reply, which is not a quirk, it is the
+# feature failing on its easiest case.
+#
+# So silence is now the ordinary way a dictation ends, and the stop
+# phrase becomes the way to end one INSTANTLY rather than the only way
+# to end one at all.
+#
+# The thinking pause it used to protect is now protected explicitly
+# instead of implicitly -- see HOLD_PHRASE_VARIANTS. Saying "hold up"
+# buys back the full 50s, on demand, for exactly the turn that needs it.
+# That is strictly better than a blanket 50s: it costs a moment of
+# speech when you actually need to think, and costs nothing the rest of
+# the time.
+SILENCE_SAFETY_NET_S = 2.7
+
+# Saying any of these buys back SILENCE_HOLD_S of quiet, once.
+#
+# Matched only at the END of a chunk that closed on silence -- the same
+# discipline as STOP_PHRASE_VARIANTS, and for the same reason: "wait for
+# the deploy to finish" must not trigger a hold just because it contains
+# the word.
+#
+# FAILURE DIRECTION, deliberately asymmetric: "tell it to wait" DOES end
+# with "wait" and will extend when it shouldn't. That costs a pause, and
+# he can always say "that's it" to end immediately. The opposite error --
+# failing to extend when he genuinely is thinking -- cuts him off
+# mid-thought and sends half an instruction to an agent. So this fails
+# toward waiting, every time.
+HOLD_PHRASE_VARIANTS = {
+    "hold up", "hold on", "wait", "wait a sec", "wait a second",
+    "let me think", "one sec", "one second", "give me a second",
+    "hang on", "just a sec", "just a second",
+}
+SILENCE_HOLD_S = 50.0
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 from jarvis_paths import jarvis_home  # noqa: E402
@@ -130,6 +171,23 @@ def _normalize_for_stop_match(text: str) -> str:
     text = re.sub(r"[^\w\s']", "", text)
     text = re.sub(r"\s+", " ", text).strip()
     return text
+
+
+def match_hold_phrase(text: str) -> bool:
+    """Does `text` END with a hold phrase? Callers must only ask this of
+    a chunk that closed on SILENCE, same as match_stop_phrase.
+
+    Deliberately does NOT strip the phrase from the transcript the way
+    match_stop_phrase does. "that's it" is pure punctuation and removing
+    it is safe; a hold phrase is not -- "tell it to wait" would become
+    "tell it to", which corrupts a real instruction into a meaningless
+    one. A stray "hold up" left in the text is noise the router can
+    ignore; a truncated instruction is not recoverable."""
+    normalized = _normalize_for_stop_match(text)
+    return any(
+        normalized == v or normalized.endswith(" " + v)
+        for v in HOLD_PHRASE_VARIANTS
+    )
 
 
 def match_stop_phrase(text: str) -> tuple[bool, str]:
@@ -399,9 +457,24 @@ class DictationSession:
         self.chunk_log: list[dict] = []  # one record per Whisper call -- see _transcribe_and_append
         self._chunker = StreamingChunker(vad)
         self._total_samples_fed = 0
+        self._hold_active = False
+
+    def note_hold_phrase(self) -> None:
+        """Arms the long window for the NEXT silence only."""
+        self._hold_active = True
+
+    @property
+    def silence_limit_s(self) -> float:
+        return SILENCE_HOLD_S if self._hold_active else SILENCE_SAFETY_NET_S
+
+    def clear_hold(self) -> None:
+        """Consumed when speech resumes, so the hold is genuinely
+        TEMPORARY -- one thinking pause, not a mode the dictation stays
+        in. Saying "hold up" again buys another."""
+        self._hold_active = False
 
     def silence_exceeds_safety_net(self) -> bool:
-        return self._chunker.silence_duration_s >= SILENCE_SAFETY_NET_S
+        return self._chunker.silence_duration_s >= self.silence_limit_s
 
     @property
     def last_cut_reason(self) -> str | None:
@@ -738,12 +811,19 @@ def simulate(dictation_wav: str, whisper: WhisperDaemon, live_deliver: bool = Fa
                     session = None
                 else:
                     print(f"[{t:.2f}s] chunk transcribed: {partial!r}")
+                    # Speech arrived, so any previous hold is spent -- the
+                    # extension covers ONE thinking pause, not the rest of
+                    # the dictation.
+                    session.clear_hold()
+                    if session.last_cut_reason == "silence" and match_hold_phrase(partial):
+                        session.note_hold_phrase()
+                        print(f"[{t:.2f}s] hold phrase heard -> silence window extended to {SILENCE_HOLD_S}s for this pause")
                     if session.last_cut_reason == "silence" and stop_phrase_near_miss(partial):
                         print(f"[{t:.2f}s] *** possible stop-phrase near-miss (not matched): {partial!r} ***")
                         session.mark_stop_phrase_near_miss()
             elif session.silence_exceeds_safety_net():
                 stop_wall_time = time.time()
-                print(f"[{t:.2f}s] {SILENCE_SAFETY_NET_S}s silence safety net -> finalize (no stop phrase heard)")
+                print(f"[{t:.2f}s] {session.silence_limit_s}s silence -> finalize (no stop phrase heard)")
                 session.flush_final(tmp_wav)  # no stop phrase to strip -- transcribe everything buffered
                 text = session.full_transcript()
                 _report_and_deliver(text, session.chunk_log, live_deliver, orchestrator_target, stop_wall_time, wake_score=session.wake_score)
@@ -959,6 +1039,12 @@ class LiveController:
                 matched, remainder = (
                     match_stop_phrase(partial) if self.session.last_cut_reason == "silence" else (False, partial)
                 )
+                # Speech arrived: spend any armed hold before deciding
+                # whether this chunk arms a new one.
+                self.session.clear_hold()
+                if self.session.last_cut_reason == "silence" and match_hold_phrase(partial):
+                    self.session.note_hold_phrase()
+                    print(f"[{time.strftime('%H:%M:%S')}] hold phrase heard in {partial!r} -> silence window extended to {SILENCE_HOLD_S}s for this pause")
                 if matched:
                     stop_wall_time = time.time()
                     print(f"[{time.strftime('%H:%M:%S')}] stop phrase matched in chunk transcript {partial!r} -> finalize (remainder={remainder!r})")
@@ -974,7 +1060,7 @@ class LiveController:
                         self.session.mark_stop_phrase_near_miss()
             elif self.session.silence_exceeds_safety_net():
                 stop_wall_time = time.time()
-                print(f"[{time.strftime('%H:%M:%S')}] {SILENCE_SAFETY_NET_S}s silence safety net -> finalize")
+                print(f"[{time.strftime('%H:%M:%S')}] {self.session.silence_limit_s}s silence -> finalize")
                 self.session.flush_final(self.tmp_wav)
                 text = self.session.full_transcript()
                 _report_and_deliver(text, self.session.chunk_log, self.live_deliver, self.orchestrator_target, stop_wall_time, wake_score=self.session.wake_score)
