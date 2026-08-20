@@ -235,15 +235,60 @@ def _has_history(working_dir: str, claude_session: str | None) -> bool:
     return jsonl_path.exists()
 
 
+# role_liveness() is polled at 1Hz (poller.ENGINE_INTERVAL_S) -- printing
+# a cwd-mismatch line on every single call would spam stderr once a
+# second for as long as a stale record sits unresolved. Logged ONCE per
+# distinct (role, tmux, found cwd) combination instead. Deliberately an
+# in-memory set, never persisted -- same "never store observed state"
+# discipline as the rest of this module; a restarted console just logs
+# it again once, which is fine, and the set naturally stops growing once
+# every distinct mismatch actually seen has been logged.
+_LOGGED_CWD_MISMATCHES: set[tuple[str, str, str]] = set()
+
+
+def _log_cwd_mismatch(role: str, tmux: str, expected_cwd: str, found_cwd: str) -> None:
+    key = (role, tmux, found_cwd)
+    if key in _LOGGED_CWD_MISMATCHES:
+        return
+    _LOGGED_CWD_MISMATCHES.add(key)
+    print(
+        f"engine_roles: {role} tmux {tmux!r} is LIVE but at cwd {found_cwd!r}, "
+        f"not the recorded {expected_cwd!r} -- reporting as not-running per the "
+        f"attach/activate contract, but a real session WAS found under this name",
+        file=sys.stderr,
+    )
+
+
 def role_liveness(role: str) -> dict:
     """{"attached": bool, "running": bool, "liveness": str|None, "record":
-    dict|None, "tools_reachable": bool}. Liveness is ALWAYS computed
-    fresh here (cheap tmux-name+cwd match, mirrors
-    teams.member_liveness() exactly) -- never trusted from the stored
-    record, which has no status field to trust in the first place."""
+    dict|None, "tools_reachable": bool, "cwd_mismatch": bool, "found_cwd":
+    str|None}. Liveness is ALWAYS computed fresh here (cheap
+    tmux-name+cwd match, mirrors teams.member_liveness() exactly) --
+    never trusted from the stored record, which has no status field to
+    trust in the first place.
+
+    cwd_mismatch/found_cwd (added 2026-08-20, this project's signature
+    failure mode): the attach/activate CONTRACT is unchanged -- a tmux
+    name match with a working_dir mismatch still reports STOPPED/LOST,
+    never RUNNING, exactly as before. What changes is that case is no
+    longer indistinguishable from "genuinely nothing is running under
+    this name". cwd_mismatch is True, and found_cwd is the live
+    session's ACTUAL working_dir, whenever a live tmux session WAS found
+    under record["tmux"] but at a cwd other than record["working_dir"]
+    -- a live session reported as dead with no signal anything was found
+    at all, made observable instead of silently falling through. This is
+    exactly what the 2026-08-20 cwd restructure produces for any record
+    that predates it: working_dir still says the old per-role
+    subdirectory while a freshly relaunched real session's actual cwd is
+    now the shared JARVIS_HOME. Both fields are False/None whenever
+    there's no live session under record["tmux"] at all -- there is
+    nothing to have mismatched against."""
     record = get_role_record(role)
     if record is None:
-        return {"attached": False, "running": False, "liveness": None, "record": None, "tools_reachable": False}
+        return {
+            "attached": False, "running": False, "liveness": None, "record": None,
+            "tools_reachable": False, "cwd_mismatch": False, "found_cwd": None,
+        }
 
     live_by_name = {s["session_id"]: s for s in _list_live_sessions()}
     live = live_by_name.get(record["tmux"])
@@ -254,10 +299,20 @@ def role_liveness(role: str) -> dict:
             "liveness": LIVENESS_RUNNING,
             "record": record,
             "tools_reachable": _role_tools_reachable(role),
+            "cwd_mismatch": False,
+            "found_cwd": None,
         }
 
+    cwd_mismatch = live is not None and live["working_dir"] != record["working_dir"]
+    found_cwd = live["working_dir"] if cwd_mismatch else None
+    if cwd_mismatch:
+        _log_cwd_mismatch(role, record["tmux"], record["working_dir"], found_cwd)
+
     liveness = LIVENESS_STOPPED if _has_history(record["working_dir"], record["claude_session"]) else LIVENESS_LOST
-    return {"attached": True, "running": False, "liveness": liveness, "record": record, "tools_reachable": False}
+    return {
+        "attached": True, "running": False, "liveness": liveness, "record": record,
+        "tools_reachable": False, "cwd_mismatch": cwd_mismatch, "found_cwd": found_cwd,
+    }
 
 
 def get_engine_state() -> dict:
