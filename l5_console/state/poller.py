@@ -138,6 +138,8 @@ class Poller:
             claude_session=record.get("claude_session"),
             liveness=liveness["liveness"],
             tools_reachable=liveness["tools_reachable"],
+            cwd_mismatch=liveness.get("cwd_mismatch", False),
+            found_cwd=liveness.get("found_cwd"),
         )
 
     def _loop_engine(self) -> None:

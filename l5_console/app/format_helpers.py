@@ -77,6 +77,68 @@ def liveness_color(liveness: str) -> str:
     return {LIVENESS_RUNNING: COLOR_OK, LIVENESS_STOPPED: COLOR_DIM, LIVENESS_LOST: COLOR_ERR}.get(liveness, COLOR_DIM)
 
 
+def role_status_icon(slot) -> str:
+    """The glyph beside role_status_phrase(). Its own function, and NOT
+    liveness_icon(slot.liveness), because the two disagree in exactly one
+    case.
+
+    Found 2026-08-20 by looking at the rendered row rather than at the
+    values behind it: a cwd-mismatched role rendered "✕ found running
+    elsewhere", and ✕ is defined in the panel's own legend as "lost -- no
+    saved history". One row asserting both that a session is running
+    somewhere AND that it has no saved history. The phrase was right; the
+    glyph next to it was the lie, and no test compared them because the
+    phrase assertion passed.
+
+    Why liveness really is LOST here, and correctly so: _has_history()
+    looks for the transcript under the record's OWN working_dir, which in
+    a mismatch is the stale one -- so it searches the directory we
+    already know is wrong, finds nothing, and reports LOST. That verdict
+    is right for the attach/activate contract, because a stale record
+    genuinely cannot be Activated; it has to be re-attached first. What
+    was wrong was borrowing LOST's icon, whose established meaning is a
+    claim about history rather than about resumability.
+
+    So the mismatch gets its own marker, matching the warning colour the
+    phrase and Stream's formatter already use, instead of overloading a
+    glyph whose meaning is already spoken for."""
+    if getattr(slot, "cwd_mismatch", False):
+        return "⚠"
+    return liveness_icon(slot.liveness)
+
+
+def role_status_phrase(slot) -> str:
+    """Plain-language ENGINE-row status word for one RoleSlot -- shared
+    by Rail (compact) and Console (fuller) so the two densities can't
+    render two different messages for the same underlying state, same
+    reasoning as every other function in this module.
+
+    A cwd_mismatch slot MUST NOT render identically to a genuinely-
+    stopped one (SPEC-engine-roles.md, 2026-08-20): that silence -- a
+    live session found under this role's tmux name, reported as plain
+    "inactive" with no hint anything was found at all -- is the exact
+    failure this project keeps re-discovering in new clothes (the CHAT
+    verdict, the swallowed [orchestrator] flag, the dropped instant ack,
+    per the Lead). liveness itself is UNCHANGED by a mismatch (still
+    STOPPED/LOST, never RUNNING -- the attach/activate contract); this
+    function is what makes that case visibly different on screen without
+    touching that contract.
+
+    Deliberately no path in the returned phrase -- found_cwd is real
+    diagnostic content, but the Lead's ruling was "legible... in plain
+    language, not a path dump": the raw cwd belongs in Stream's
+    diagnostic feed (stream.py's engine_role_cwd_mismatch formatter),
+    not on the at-a-glance ENGINE row.
+
+    PURE: a RoleSlot in, a phrase out -- no widget access, so a canary
+    can assert on this directly without mounting a Textual app."""
+    if slot.liveness == LIVENESS_RUNNING:
+        return "active"
+    if slot.cwd_mismatch:
+        return "found running elsewhere"
+    return "inactive"
+
+
 def team_liveness(team) -> str:
     """Derived from members, never stored -- per the Lead's ruling: a
     team-level liveness field that could disagree with its own members

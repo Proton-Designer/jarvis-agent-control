@@ -54,6 +54,7 @@ extension (SLOW -- two real Claude Code launches):
 """
 from __future__ import annotations
 
+import json
 import os
 import re
 import subprocess
@@ -65,10 +66,20 @@ from pathlib import Path
 os.environ["JARVIS_TEST_RUN"] = f"engine-roles-canary-{uuid.uuid4().hex[:8]}"
 
 sys.path.insert(0, str(Path(__file__).parent))
+sys.path.insert(0, str(Path(__file__).parent.parent / "app"))
+sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
 import engine_roles as er  # noqa: E402
+import format_helpers as fh  # noqa: E402
+from jarvis_paths import jarvis_home  # noqa: E402
+from models import RoleSlot, LIVENESS_RUNNING, LIVENESS_STOPPED, LIVENESS_LOST  # noqa: E402
 from reconnect import wait_for_ready  # noqa: E402
 from teams import CLAUDE_PROJECTS_DIR, encode_project_path  # noqa: E402
+
+assert "test_runs" in str(jarvis_home()), (
+    f"jarvis_home() is NOT test-isolated ({jarvis_home()}) -- refusing to "
+    "run against what may be the real latency_log.jsonl"
+)
 
 assert "test_runs" in str(er.ENGINE_REGISTRY_PATH), (
     f"ENGINE_REGISTRY_PATH is NOT test-isolated ({er.ENGINE_REGISTRY_PATH}) -- "
@@ -288,6 +299,151 @@ def run() -> int:
             )
         finally:
             er._list_live_sessions = _real_list_live_sessions
+
+        # --- 2d. The mismatch reaches the SURFACE, not just the dict ----
+        # The Lead's finding, 2026-08-20: role_liveness() computing
+        # cwd_mismatch correctly is not the fix by itself -- the console
+        # is a full-screen Textual app whose alt-screen swallows stderr,
+        # and Stream reads latency_log.jsonl, not stderr, so a
+        # stderr-only signal never reaches Ayman at all. Two surfaces
+        # checked here: (a) the render -- a mismatched RoleSlot must
+        # produce a VISIBLY DIFFERENT phrase than a genuinely-stopped
+        # one, asserted directly against the pure
+        # format_helpers.role_status_phrase() (no Textual app mounted);
+        # (b) the log -- _log_cwd_mismatch() actually wrote a real
+        # engine_role_cwd_mismatch event to the (test-isolated)
+        # latency_log.jsonl during 2c above, which is what makes Stream
+        # show it live.
+        print("\n2d. the mismatch reaches the surface: a distinct render (not just a dict), and a real latency_log event")
+        running_slot = RoleSlot(
+            attached=True, name="X", model="haiku", effort="low", tmux="t", working_dir="/x",
+            claude_session="u", liveness=LIVENESS_RUNNING, tools_reachable=True,
+        )
+        mismatched_slot = RoleSlot(
+            attached=True, name="X", model="haiku", effort="low", tmux="t", working_dir="/old",
+            claude_session="u", liveness=LIVENESS_STOPPED, tools_reachable=False,
+            cwd_mismatch=True, found_cwd="/new",
+        )
+        stopped_slot = RoleSlot(
+            attached=True, name="X", model="haiku", effort="low", tmux="t", working_dir="/old",
+            claude_session="u", liveness=LIVENESS_STOPPED, tools_reachable=False,
+        )
+        check(
+            "render: RUNNING phrase differs from both stopped and mismatched",
+            fh.role_status_phrase(running_slot) not in (fh.role_status_phrase(stopped_slot), fh.role_status_phrase(mismatched_slot)),
+            detail=f"running={fh.role_status_phrase(running_slot)!r}",
+        )
+        check(
+            "render: a cwd-mismatched slot's phrase is VISIBLY DIFFERENT from a genuinely-stopped slot's -- never the same 'inactive'",
+            fh.role_status_phrase(mismatched_slot) != fh.role_status_phrase(stopped_slot),
+            detail=f"mismatched={fh.role_status_phrase(mismatched_slot)!r} stopped={fh.role_status_phrase(stopped_slot)!r}",
+        )
+        check(
+            "render: the mismatched phrase never leaks the raw found_cwd path (plain language only, per the Lead's ruling)",
+            "/new" not in fh.role_status_phrase(mismatched_slot),
+            detail=fh.role_status_phrase(mismatched_slot),
+        )
+
+        # The ICON, not just the phrase. Added 2026-08-20 after the Lead
+        # looked at the actual rendered row and found it contradicting
+        # itself: the mismatched row read "✕ found running elsewhere",
+        # and ✕ is the panel legend's "lost -- no saved history". One row
+        # claiming a session is running somewhere AND has no history.
+        #
+        # Every phrase check above passed while that was true, because
+        # the phrases were correct -- it was the glyph beside them that
+        # lied. That is the whole lesson: asserting on the half you
+        # thought about leaves the other half free to say anything.
+        lost_slot = RoleSlot(
+            attached=True, name="X", model="haiku", effort="low", tmux="t", working_dir="/old",
+            claude_session="u", liveness=LIVENESS_LOST, tools_reachable=False,
+        )
+        check(
+            "render: the mismatched slot's ICON is not the genuinely-lost icon -- the row must not claim 'no saved history' about a session it just found alive",
+            fh.role_status_icon(mismatched_slot) != fh.role_status_icon(lost_slot),
+            detail=f"mismatched={fh.role_status_icon(mismatched_slot)!r} lost={fh.role_status_icon(lost_slot)!r}",
+        )
+        check(
+            "render: a genuinely-lost slot still gets the ordinary liveness icon -- the fix must not change what LOST looks like",
+            fh.role_status_icon(lost_slot) == fh.liveness_icon(LIVENESS_LOST),
+            detail=f"{fh.role_status_icon(lost_slot)!r} vs {fh.liveness_icon(LIVENESS_LOST)!r}",
+        )
+        check(
+            "render: icon and phrase agree -- a slot whose phrase says 'elsewhere' never carries an icon meaning 'no history'",
+            ("elsewhere" in fh.role_status_phrase(mismatched_slot)) and fh.role_status_icon(mismatched_slot) != "\u2715",
+            detail=f"{fh.role_status_icon(mismatched_slot)!r} {fh.role_status_phrase(mismatched_slot)!r}",
+        )
+
+        latency_log_path = jarvis_home() / "latency_log.jsonl"
+        logged_mismatch = False
+        if latency_log_path.exists():
+            for line in latency_log_path.read_text().splitlines():
+                try:
+                    entry = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if (
+                    entry.get("event") == "engine_role_cwd_mismatch"
+                    and entry.get("role") == "concierge"
+                    and entry.get("tmux") == "fake-tmux-cwd-check"
+                    and entry.get("found_cwd") == "/actually/here"
+                ):
+                    logged_mismatch = True
+                    break
+        check(
+            "log: _log_cwd_mismatch() wrote a real engine_role_cwd_mismatch event to latency_log.jsonl (what Stream actually reads) -- not stderr-only",
+            logged_mismatch,
+            detail=f"checked {latency_log_path}",
+        )
+
+        # --- 2e. activate_role() gives the RIGHT next step on a mismatch,
+        #         never a doomed relaunch or the actively-wrong "must be
+        #         recreated" -----------------------------------------
+        # Found while verifying the icon fix: role_status_icon()'s own
+        # docstring argues liveness correctly reads LOST/STOPPED here
+        # (the stale record genuinely can't be resumed as-is) -- but
+        # activate_role()'s LOST branch was still saying "must be
+        # recreated, not activated," which is FALSE for a cwd-mismatched
+        # role and actively dangerous: pressing Create spins up a
+        # brand-new tmux name/uuid and overwrites the attached record,
+        # orphaning the still-live session under its old name with
+        # nothing tracking it any more. The correct next step is
+        # re-attach (resolves the real uuid+cwd via a live /status call),
+        # not recreate -- so activate_role() now says that instead, and
+        # says it BEFORE attempting a tmux relaunch that -- for a
+        # cwd-mismatched STOPPED case -- would be doomed anyway (`tmux
+        # new-session -s <name>` fails outright when a session by that
+        # name is already alive, which it is here by definition).
+        print("\n2e. activate_role() on a cwd-mismatched role says 're-attach', never 'must be recreated', and never touches real tmux")
+        er._save({"concierge": None, "orchestrator": None, "name_history": {"concierge": [], "orchestrator": []}})
+        er.attach_role(
+            "concierge", tmux="fake-tmux-activate-check", working_dir="/old/subdir/expected",
+            claude_session="fake-uuid-activate-check", model="haiku", effort="low",
+        )
+        _real_list_live_sessions_2 = er._list_live_sessions
+        try:
+            er._list_live_sessions = lambda: [{"session_id": "fake-tmux-activate-check", "working_dir": "/actually/here"}]
+            activate_result = er.activate_role("concierge")
+            check(
+                "activate_role() refuses (never silently succeeds) on a cwd-mismatched role",
+                activate_result["ok"] is False,
+                detail=str(activate_result),
+            )
+            check(
+                "activate_role()'s message tells Ayman to re-attach, and never says 'must be recreated'",
+                "re-attach" in activate_result["detail"].lower() and "must be recreated" not in activate_result["detail"],
+                detail=activate_result["detail"],
+            )
+            no_real_session = subprocess.run(
+                ["tmux", "has-session", "-t", "fake-tmux-activate-check"], capture_output=True,
+            ).returncode != 0
+            check(
+                "activate_role() never even attempted a real tmux relaunch for the mismatched role -- the early return fired, not a doomed subprocess call",
+                no_real_session,
+            )
+        finally:
+            er._list_live_sessions = _real_list_live_sessions_2
+            subprocess.run(["tmux", "kill-session", "-t", "fake-tmux-activate-check"], capture_output=True)
 
         # --- 3 & 4. LIVE: create, verify the ACTUAL spawned command line,
         #            kill, activate (--resume), verify again -------------

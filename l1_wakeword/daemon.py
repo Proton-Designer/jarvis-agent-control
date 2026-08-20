@@ -311,6 +311,33 @@ def default_deliver(text: str, orchestrator_target: str | None = None, live_deli
             # Never let the courtesy layer break the dispatch it precedes.
             log_event("instant_ack_failed", error=str(e))
 
+    # Dry runs stop HERE, before the concierge is ever resolved. My bug,
+    # found 2026-08-20 by instant_ack_canary: this early-return used to
+    # sit BELOW the lookup, so a live_deliver=False smoke test still
+    # resolved the concierge role and, finding none, SPOKE -- "No
+    # concierge is attached, so I couldn't send that anywhere" -- at
+    # PRIORITY_HIGH. The canary's very first property is that a dry run
+    # produces no speech at all, and it was violated by a path that only
+    # runs when there is nothing to say it about.
+    #
+    # It stayed hidden because it needs BOTH conditions at once: a dry
+    # run AND no attached concierge. On this machine a concierge was
+    # always attached, so the branch never fired; it took the engine
+    # registry becoming properly test-isolated for the empty case to
+    # exist at all.
+    #
+    # The HIGH priority is what made it worse than a stray line: it
+    # jumps the speech queue, so on a real dictation that error would
+    # overtake the instant ack and be the first thing Ayman hears --
+    # inverting the one ordering guarantee this whole layer exists to
+    # provide.
+    #
+    # Resolving a target we have already decided not to use was never
+    # meaningful work; doing it before the gate was the mistake.
+    if not live_deliver:
+        print(f"(live_deliver=False: NOT forwarding -- would send: {text!r})")
+        return {"label": "FORWARDED", "forwarded": False, "delivery": None, "retain": True}
+
     if orchestrator_target is None:
         sys.path.insert(0, str(Path(__file__).parent.parent / "l5_console" / "state"))
         try:
@@ -348,10 +375,6 @@ def default_deliver(text: str, orchestrator_target: str | None = None, live_deli
     sys.path.insert(0, str(Path(__file__).parent.parent / "l4_controller"))
     from l2_l3_handoff import deliver_transcript  # noqa: E402
     from transport import TmuxTransport  # noqa: E402
-
-    if not live_deliver:
-        print(f"(live_deliver=False: NOT forwarding to {target!r} -- would send: {text!r})")
-        return {"label": "FORWARDED", "forwarded": False, "delivery": None, "retain": True}
 
     delivery = deliver_transcript(text, TmuxTransport(), orchestrator_target=target)
     # "forwarded" means actually delivered, never merely attempted --

@@ -60,6 +60,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 from jarvis_paths import jarvis_project_home  # noqa: E402
 
 sys.path.insert(0, str(Path(__file__).parent.parent.parent / "l4_controller"))
+from latency_log import log_event  # noqa: E402
 from providers import list_sessions as _list_live_sessions  # noqa: E402
 
 from models import LIVENESS_LOST, LIVENESS_RUNNING, LIVENESS_STOPPED  # noqa: E402
@@ -235,18 +236,27 @@ def _has_history(working_dir: str, claude_session: str | None) -> bool:
     return jsonl_path.exists()
 
 
-# role_liveness() is polled at 1Hz (poller.ENGINE_INTERVAL_S) -- printing
-# a cwd-mismatch line on every single call would spam stderr once a
-# second for as long as a stale record sits unresolved. Logged ONCE per
-# distinct (role, tmux, found cwd) combination instead. Deliberately an
-# in-memory set, never persisted -- same "never store observed state"
-# discipline as the rest of this module; a restarted console just logs
-# it again once, which is fine, and the set naturally stops growing once
-# every distinct mismatch actually seen has been logged.
+# role_liveness() is polled at 1Hz (poller.ENGINE_INTERVAL_S) -- logging
+# a cwd-mismatch line on every single call would spam once a second for
+# as long as a stale record sits unresolved. Logged ONCE per distinct
+# (role, tmux, found cwd) combination instead. Deliberately an in-memory
+# set, never persisted -- same "never store observed state" discipline
+# as the rest of this module; a restarted console just logs it again
+# once, which is fine, and the set naturally stops growing once every
+# distinct mismatch actually seen has been logged.
 _LOGGED_CWD_MISMATCHES: set[tuple[str, str, str]] = set()
 
 
 def _log_cwd_mismatch(role: str, tmux: str, expected_cwd: str, found_cwd: str) -> None:
+    """BOTH sys.stderr (for anyone tailing a terminal/log directly, e.g.
+    a canary or a headless run) AND latency_log.log_event() (2026-08-20
+    -- the Lead's finding: the console is a Textual full-screen app, its
+    alt-screen swallows stderr entirely, and Stream reads
+    LATENCY_LOG_PATH, not stderr, so a stderr-only signal never reaches
+    Ayman at all -- the exact "computed correctly, dropped on the way to
+    the surface" failure this project keeps re-discovering). Both calls
+    share the ONE dedup guard below -- log_event() must not fire once a
+    second any more than the print did."""
     key = (role, tmux, found_cwd)
     if key in _LOGGED_CWD_MISMATCHES:
         return
@@ -257,6 +267,7 @@ def _log_cwd_mismatch(role: str, tmux: str, expected_cwd: str, found_cwd: str) -
         f"attach/activate contract, but a real session WAS found under this name",
         file=sys.stderr,
     )
+    log_event("engine_role_cwd_mismatch", role=role, tmux=tmux, expected_cwd=expected_cwd, found_cwd=found_cwd)
 
 
 def role_liveness(role: str) -> dict:
@@ -648,7 +659,17 @@ def activate_role(role: str) -> dict:
     which was never verified to work and is not this function's call to
     make. A record wanting the new shared cwd gets it by being
     re-attached or recreated, both of which already go through the
-    JARVIS_HOME-using paths above."""
+    JARVIS_HOME-using paths above.
+
+    cwd_mismatch (2026-08-20) refuses BEFORE either the LOST message or
+    a real tmux relaunch attempt, regardless of which one liveness
+    landed on: LOST's usual "must be recreated, not activated" is false
+    and dangerous here (recreating orphans the still-live session under
+    its old tmux name, untracked), and a real relaunch attempt would be
+    doomed anyway for the STOPPED case (`tmux new-session -s <name>`
+    fails outright against an already-live session of that name). Says
+    "re-attach it instead" -- the actually-correct next step -- either
+    way."""
     if role not in ROLES:
         return {"ok": False, "detail": f"unknown role {role!r}"}
     record = get_role_record(role)
@@ -658,6 +679,32 @@ def activate_role(role: str) -> dict:
     liveness = role_liveness(role)
     if liveness["liveness"] == LIVENESS_RUNNING:
         return {"ok": True, "detail": f"The {role.capitalize()} is already running."}
+
+    # cwd_mismatch, checked BEFORE the LOST branch below and regardless
+    # of whether liveness landed on STOPPED or LOST: a live tmux session
+    # WAS found under record["tmux"] (role_status_icon()'s own docstring
+    # explains why liveness itself still correctly reads LOST/STOPPED
+    # from the stale record's own working_dir -- that verdict is right
+    # for "can THIS record be resumed," it just isn't the whole truth).
+    # Two concrete reasons this needs its own early return rather than
+    # falling into the branches below:
+    #   - LOST's message says "must be recreated, not activated" -- false
+    #     here, and dangerous: recreating spins up a brand-new tmux name/
+    #     uuid and overwrites the attached record, ORPHANING the still-
+    #     live session under its old name with nothing tracking it
+    #     anymore. Re-attaching (which resolves the real uuid+cwd via a
+    #     live /status call) is the correct next step, not recreating.
+    #   - STOPPED would otherwise fall through to a real tmux relaunch
+    #     attempt below, which is DOOMED here specifically: `tmux
+    #     new-session -s <name>` fails outright when a session by that
+    #     name is already alive (which it is, by definition of
+    #     cwd_mismatch) -- a real but cryptic tmux error, when a clear
+    #     explanation is available up front instead.
+    if liveness["cwd_mismatch"]:
+        return {
+            "ok": False,
+            "detail": f"The {role.capitalize()}'s session is already running, just not where its record expects -- re-attach it instead of activating.",
+        }
     if liveness["liveness"] == LIVENESS_LOST:
         return {
             "ok": False,

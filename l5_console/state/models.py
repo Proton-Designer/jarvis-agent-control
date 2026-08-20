@@ -55,6 +55,21 @@ class RoleSlot:
     claude_session: str | None  # the PERSISTED identity, not re-verified live every poll (same discipline as TeamMember.claude_session)
     liveness: str | None  # LIVENESS_RUNNING | LIVENESS_STOPPED | LIVENESS_LOST -- None only when attached is False
     tools_reachable: bool  # only meaningful when liveness == LIVENESS_RUNNING
+    # Added 2026-08-20 (SPEC-engine-roles.md, the cwd-mismatch gap): a
+    # live tmux session WAS found under `tmux`, but at a cwd other than
+    # `working_dir`. The liveness CONTRACT is unchanged by this -- such a
+    # slot still reports liveness STOPPED/LOST, never RUNNING -- so a
+    # consumer that only reads `liveness` behaves exactly as before.
+    # These two fields exist so a consumer that DOES want to render the
+    # difference (EnginePanel/RailEngine, via
+    # format_helpers.role_status_phrase()) can, instead of a live session
+    # rendering identically to a genuinely-dead one -- the failure this
+    # field pair exists to make impossible to miss on screen. Both
+    # default False/None so any construction site that predates this
+    # (there is none left in this codebase, but a future one is safe by
+    # default) behaves as "no mismatch observed."
+    cwd_mismatch: bool = False
+    found_cwd: str | None = None  # only meaningful when cwd_mismatch is True -- the session's REAL live working_dir, never shown as a raw path in the ENGINE panel (plain language only, per the Lead's ruling); Stream's diagnostic feed is where the actual path belongs
 
 
 @dataclass

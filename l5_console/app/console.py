@@ -32,7 +32,7 @@ from widgets import PlainStatic, Footer
 from staleness import is_stale
 from stream import StreamReader
 from format_helpers import (
-    liveness_icon, liveness_color, team_liveness, compact_model_name, build_hint_line,
+    liveness_icon, liveness_color, team_liveness, compact_model_name, build_hint_line, role_status_phrase, role_status_icon,
     COLOR_OK, COLOR_WARN, COLOR_ERR, COLOR_ACCENT, COLOR_DIM, COLOR_INK,
 )
 from meter import Meter
@@ -323,9 +323,14 @@ class EnginePanel(Widget):
             text = Text()
             text.append(f"{slot.name}\n", style=f"bold {COLOR_INK}")
             text.append(f"{compact_model_name(slot.model)} · {slot.effort}\n", style=COLOR_DIM)
-            status_word = "active" if live else "inactive"
-            status_color = COLOR_OK if live else COLOR_DIM
-            text.append(f"{liveness_icon(slot.liveness)} {status_word}", style=status_color)
+            # cwd_mismatch renders in COLOR_WARN with its own phrase --
+            # never identical to a genuinely-stopped "inactive" row (see
+            # format_helpers.role_status_phrase()'s docstring). No raw
+            # path shown here by design; Ayman needs to know Activate
+            # won't do what he expects, not the found_cwd value itself.
+            status_word = role_status_phrase(slot)
+            status_color = COLOR_OK if live else (COLOR_WARN if slot.cwd_mismatch else COLOR_DIM)
+            text.append(f"{role_status_icon(slot)} {status_word}", style=status_color)
             if live and not slot.tools_reachable:
                 text.append("  ⚠ no tools", style=COLOR_WARN)
             if note:

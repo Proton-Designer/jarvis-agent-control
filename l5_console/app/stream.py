@@ -57,6 +57,19 @@ _EVENT_FORMATTERS = {
         + ("" if e.get("retained", True) else " [discarded]")
     ),
     "handoff_no_tools": lambda e: "⚠ orchestrator has no tools -- dispatch blocked",
+    # 2026-08-20: a live session found under an engine role's own tmux
+    # name, but at a cwd that doesn't match the recorded one --
+    # role_liveness() still reports it as not-running (the attach/
+    # activate contract, unchanged), but that must never be silent: a
+    # live session reported as dead with no trace anywhere is exactly
+    # the failure this line exists to close off. Full paths shown here
+    # (Stream is the diagnostic feed, not the at-a-glance ENGINE panel,
+    # which shows plain language instead -- see format_helpers.role_status_phrase()).
+    "engine_role_cwd_mismatch": lambda e: (
+        f"⚠ {str(e.get('role', '')).capitalize()} tmux {e.get('tmux')} is alive at "
+        f"{e.get('found_cwd')}, not the recorded {e.get('expected_cwd')} -- Activate won't "
+        f"resume this until it's re-attached"
+    ),
     "pointer_delivered": lambda e: (
         f"delivered to {e.get('target')}" if e.get("ok") else f"⚠ delivery FAILED to {e.get('target')}"
     ),

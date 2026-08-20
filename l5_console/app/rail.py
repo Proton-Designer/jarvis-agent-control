@@ -28,7 +28,7 @@ from widgets import PlainStatic, Footer
 from staleness import is_stale
 from stream import StreamReader
 from format_helpers import (
-    liveness_icon, liveness_color, team_liveness, compact_model_name,
+    liveness_icon, liveness_color, team_liveness, compact_model_name, role_status_phrase, role_status_icon,
     COLOR_OK, COLOR_WARN, COLOR_ERR, COLOR_ACCENT, COLOR_DIM, COLOR_INK,
 )
 from meter import Meter
@@ -92,9 +92,13 @@ class RailEngine(PlainStatic):
                 live = slot.liveness == LIVENESS_RUNNING
                 text.append(f"{slot.name} ", style=COLOR_INK)
                 text.append(f"({compact_model_name(slot.model)}·{slot.effort}) ", style=COLOR_DIM)
+                # cwd_mismatch renders in COLOR_WARN, never COLOR_DIM --
+                # a live-but-mismatched slot must never look like a
+                # plain, unremarkable "inactive" row (see
+                # format_helpers.role_status_phrase()'s docstring).
                 text.append(
-                    f"{liveness_icon(slot.liveness)} {'active' if live else 'inactive'}",
-                    style=COLOR_OK if live else COLOR_DIM,
+                    f"{role_status_icon(slot)} {role_status_phrase(slot)}",
+                    style=COLOR_OK if live else (COLOR_WARN if slot.cwd_mismatch else COLOR_DIM),
                 )
         if stale:
             text.append(_staleness_suffix(), style=COLOR_WARN)
