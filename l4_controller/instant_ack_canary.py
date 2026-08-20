@@ -131,6 +131,37 @@ def main() -> int:
             )
         )
 
+        # --- NO orchestrator_target, NO concierge attached: the coverage
+        # hole the Lead flagged from Engineer 1's audit (2026-08-20). Every
+        # check above passes an explicit orchestrator_target=, which skips
+        # the concierge-lookup branch in default_deliver() entirely -- that
+        # branch (engine_roles.get_role_record("concierge") -> None ->
+        # "No concierge is attached...") had ZERO canary coverage, which is
+        # exactly how a HIGH-priority failure jumping the queue ahead of the
+        # ack shipped undetected. Ruling stands: the ack fires before the
+        # preflight on purpose (receipt only, never an outcome, and moving
+        # it after the lookup reintroduces the silence this layer exists to
+        # remove) -- so the correct, asserted behavior is ack FIRST, THEN
+        # the failure, never the reverse and never the failure alone. ---
+        offset = len(log_path.read_text().splitlines())
+        daemon.default_deliver("tell gateway to run its tests", live_deliver=True)  # no orchestrator_target
+        time.sleep(0.3)
+        texts = read_new_say_log_texts(log_path, offset)
+        results.append(
+            CheckResult(
+                name="no orchestrator_target + no concierge attached: ack is STILL spoken first",
+                passed=bool(texts) and texts[0] == "Okay -- gateway.",
+                detail=f"got: {texts}",
+            )
+        )
+        results.append(
+            CheckResult(
+                name="no orchestrator_target + no concierge attached: the failure follows the ack, never precedes it",
+                passed=len(texts) >= 2 and "concierge" in texts[1].lower() and "attached" in texts[1].lower(),
+                detail=f"got: {texts}",
+            )
+        )
+
         # --- Never asserts an outcome ---
         outcome_words = ("sending", "sent", "delivered", "dispatching", "routing")
         ack_text = texts[0] if texts else ""

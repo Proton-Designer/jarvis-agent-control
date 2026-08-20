@@ -1,36 +1,35 @@
 #!/usr/bin/env python3
-"""Canary for terminal_window.py + the visible/background team feature
-(SPEC-gaps-and-build-plan.md SS1.6). Live-drives a real scratch tmux
-session and a real terminal window -- this WILL visibly flash a window
-open and closed when run interactively.
+"""Canary for the visible/background team feature
+(SPEC-gaps-and-build-plan.md SS1.6) -- the reuse/background-team logic,
+plus (opt-in only) the one live property that cannot be proven without a
+real window: closing it does not kill the agent.
 
-ISOLATED VIA JARVIS_TEST_RUN, same discipline as every other canary in
-this directory -- see team_actions_canary.py's docstring for the full
-incident this pattern exists to prevent. This canary's own tmux session
-is a scratch one this file creates and kills directly (never a real
-Claude Code launch), so it needs no isolation beyond not touching
-~/Jarvis/teams.json, which JARVIS_TEST_RUN + jarvis_project_home() already
-guarantees structurally.
+DEFAULT RUN OPENS NO WINDOW. Everything below the "hermetic" marker uses
+a nonexistent tmux session name and a real scratch registry entry, never
+an actual `open`/`osascript` call -- has_attached_client() on a session
+that was never created is trivially False, and ensure_window_for_team()/
+set_team_visible(False) never reach terminal_window's open path at all
+when visible=False, which is most of what this feature needs proven day
+to day. terminal_window_canary.py (the Lead's) covers the injection
+guards, also without opening anything.
 
-Proves the two safety properties the whole feature rests on, plus the
-background-team no-op:
-  - A window attached to a session, then killed (closed), leaves the
-    tmux session -- and the process inside it -- alive and unaffected.
-    "A window is a view, not the process."
-  - Killing the SESSION itself (not just the window) does end it -- the
-    other direction, so the first assertion isn't vacuously true of
-    something that can never be killed at all.
-  - A background team (visible=False) opens no window -- ensure_window_for_team()
-    and set_team_visible(..., False) never call terminal_window at all.
-  - Reuse: calling open_window_for_session() a second time while a client
-    is still attached does not stack a second window (has_attached_client()
-    short-circuits it) -- checked by client count, not by counting OS
-    windows (no reliable app-agnostic way to do that, and it isn't the
-    property that matters -- see terminal_window.py's own docstring).
+LIVE MODE (`--live`), OPT-IN ONLY: opens exactly ONE real terminal
+window, verifies the close-does-not-kill property against it, and closes
+it back down -- all in one tight sequence with a `finally` that cleans up
+even if an assertion fails midway, never leaving a window attached to a
+session that gets killed out from under it. Added after a real incident,
+2026-08-20: an earlier draft of this file opened a window, then failed an
+assertion, then proceeded to kill the tmux session anyway in a later
+step -- leaving a real Ghostty window attached to nothing on Ayman's
+actual desktop, which he had to notice and close by hand. Never again:
+open, verify, kill-and-verify, done, in that order, with nothing deferred
+past the `finally`.
 
-Run (opens and closes one real terminal window):
-
+Run (hermetic, safe for a normal sweep):
     python3 l5_console/state/visible_windows_canary.py
+
+Run (opens and closes exactly one real window):
+    python3 l5_console/state/visible_windows_canary.py --live
 """
 from __future__ import annotations
 
@@ -56,8 +55,8 @@ assert "test_runs" in str(TEAMS_REGISTRY_PATH), (
     f"TEAMS_REGISTRY_PATH is NOT test-isolated ({TEAMS_REGISTRY_PATH}) -- refusing to run"
 )
 
-SESSION = f"jarvis-vwcanary-{uuid.uuid4().hex[:8]}"
 RESULTS: list[tuple[str, bool, str]] = []
+NONEXISTENT_SESSION = f"jarvis-vwcanary-nonexistent-{uuid.uuid4().hex[:8]}"
 
 
 def check(name: str, passed: bool, detail: str = "") -> None:
@@ -69,114 +68,102 @@ def _has_session(name: str) -> bool:
     return subprocess.run(["tmux", "has-session", "-t", name], capture_output=True).returncode == 0
 
 
-def _pane_pid(name: str) -> str | None:
-    result = subprocess.run(
-        ["tmux", "list-panes", "-t", name, "-F", "#{pane_pid}"],
-        capture_output=True, text=True,
+def run_hermetic() -> None:
+    print("hermetic checks (no window opened)")
+    check("has_attached_client() is False for a session that was never created", not tw.has_attached_client(NONEXISTENT_SESSION))
+
+    registry_entry_bg = {
+        "id": "vwcanary-bg", "aliases": ["vwcanary-bg"], "root": "/tmp/vwcanary-bg",
+        "lead": "bg-session", "members": [{"tmux": NONEXISTENT_SESSION, "claude_session": "bg-session"}],
+        "visible": False,
+    }
+    save_registry([registry_entry_bg])
+    bg_team = Team(
+        id="vwcanary-bg", aliases=["vwcanary-bg"], root="/tmp/vwcanary-bg",
+        has_lead=True, lead_reachable=True, visible=False,
+        members=[TeamMember(tmux=NONEXISTENT_SESSION, claude_session="bg-session", liveness=LIVENESS_RUNNING, activity=None, is_lead=True)],
     )
-    line = result.stdout.strip()
-    return line or None
+    ensure_result = ta.ensure_window_for_team(bg_team)
+    check("ensure_window_for_team() no-ops for a background team (never reaches terminal_window)", ensure_result["opened"] is False, detail=str(ensure_result))
+
+    toggle_result = ta.set_team_visible("vwcanary-bg", False)
+    check("set_team_visible(False) never reaches terminal_window either", toggle_result["ok"] and toggle_result.get("opened") is not True)
+
+    visible_team = Team(
+        id="vwcanary-bg", aliases=["vwcanary-bg"], root="/tmp/vwcanary-bg",
+        has_lead=False, lead_reachable=False, visible=True,
+        members=[TeamMember(tmux=None, claude_session="bg-session", liveness="stopped", activity=None, is_lead=False)],
+    )
+    ensure_no_runner = ta.ensure_window_for_team(visible_team)
+    check("ensure_window_for_team() no-ops when visible but nothing is RUNNING yet", ensure_no_runner["opened"] is False, detail=str(ensure_no_runner))
 
 
-def _kill_window_process(tmux_session: str) -> None:
-    """Simulates the user closing the window. Found live debugging this
-    canary's first draft: the GUI app's own process (what `ps aux | grep
-    Ghostty` shows) is NOT what's attached to the pty -- `ps -t <tty>`
-    on a real attached client shows `login` and `tmux attach -t <session>`
-    instead, spawned BY the app but distinct from it. Closing a real
-    window tears down the pty, which SIGHUPs whatever's in its foreground
-    process group -- killing every process on that tty (not filtering by
-    app name, which matched nothing) is the faithful simulation of that,
-    not a workaround for it."""
-    result = subprocess.run(["tmux", "list-clients", "-t", tmux_session], capture_output=True, text=True)
-    line = result.stdout.strip().splitlines()[0] if result.stdout.strip() else None
-    if line is None:
-        return
-    tty = line.split(":")[0].strip().replace("/dev/", "")  # e.g. "/dev/ttys057: ..." -> "ttys057"
-    ps = subprocess.run(["ps", "-t", tty, "-o", "pid="], capture_output=True, text=True)
-    for pid_str in ps.stdout.split():
-        subprocess.run(["kill", "-HUP", pid_str], capture_output=True)
+def run_live() -> None:
+    print()
+    print("live check (opens and closes exactly one real window)")
+    session = f"jarvis-vwcanary-live-{uuid.uuid4().hex[:8]}"
 
+    def pane_pid() -> str | None:
+        result = subprocess.run(["tmux", "list-panes", "-t", session, "-F", "#{pane_pid}"], capture_output=True, text=True)
+        return result.stdout.strip() or None
 
-def run() -> int:
-    print(f"visible_windows_canary: tmux session {SESSION!r}, JARVIS_TEST_RUN={os.environ['JARVIS_TEST_RUN']!r}")
+    def kill_window_process() -> None:
+        result = subprocess.run(["tmux", "list-clients", "-t", session], capture_output=True, text=True)
+        line = result.stdout.strip().splitlines()[0] if result.stdout.strip() else None
+        if line is None:
+            return
+        tty = line.split(":")[0].strip().replace("/dev/", "")
+        ps = subprocess.run(["ps", "-t", tty, "-o", "pid="], capture_output=True, text=True)
+        for pid_str in ps.stdout.split():
+            subprocess.run(["kill", "-HUP", pid_str], capture_output=True)
 
     try:
-        subprocess.run(
-            ["tmux", "new-session", "-d", "-s", SESSION, "-x", "80", "-y", "24", "sleep 300"],
-            check=True,
-        )
-        check("scratch session came up", _has_session(SESSION))
-        inner_pid_before = _pane_pid(SESSION)
-        check("scratch session has a real process inside it", bool(inner_pid_before), detail=str(inner_pid_before))
+        subprocess.run(["tmux", "new-session", "-d", "-s", session, "-x", "80", "-y", "24", "sleep 120"], check=True)
+        pid_before = pane_pid()
+        check("scratch session came up with a real process inside", bool(pid_before), detail=str(pid_before))
 
-        # --- Reuse / detection, hermetic, no window opened yet ---------
-        check("has_attached_client() is False before anything attaches", not tw.has_attached_client(SESSION))
-        app = tw.detect_terminal_app()
-        check("detect_terminal_app() found something on this machine", app is not None, detail=str(app))
-
-        # --- Background team: no window, ever ---------------------------
-        registry_entry_bg = {
-            "id": "vwcanary-bg", "aliases": ["vwcanary-bg"], "root": "/tmp/vwcanary-bg",
-            "lead": "bg-session", "members": [{"tmux": SESSION, "claude_session": "bg-session"}],
-            "visible": False,
-        }
-        save_registry([registry_entry_bg])
-        bg_team = Team(
-            id="vwcanary-bg", aliases=["vwcanary-bg"], root="/tmp/vwcanary-bg",
-            has_lead=True, lead_reachable=True, visible=False,
-            members=[TeamMember(tmux=SESSION, claude_session="bg-session", liveness=LIVENESS_RUNNING, activity=None, is_lead=True)],
-        )
-        ensure_result = ta.ensure_window_for_team(bg_team)
-        check("ensure_window_for_team() no-ops for a background team", ensure_result["opened"] is False, detail=str(ensure_result))
-        check("no window actually opened for the background team", not tw.has_attached_client(SESSION))
-
-        toggle_result = ta.set_team_visible("vwcanary-bg", False)
-        check("set_team_visible(False) doesn't open a window either", toggle_result["ok"] and not tw.has_attached_client(SESSION))
-
-        # --- Open a real window, verify attach ---------------------------
-        open_result = tw.open_window_for_session(SESSION)
-        check("open_window_for_session() reports ok", open_result["ok"], detail=str(open_result))
-        check("open_window_for_session() reports opened=True on a fresh session", open_result.get("opened") is True, detail=str(open_result))
+        open_result = tw.open_window_for_session(session)
+        check("open_window_for_session() succeeded", open_result["ok"], detail=str(open_result))
 
         attached = False
-        for _ in range(20):  # up to ~10s for the app to actually launch and attach
-            if tw.has_attached_client(SESSION):
+        for _ in range(20):
+            if tw.has_attached_client(session):
                 attached = True
                 break
             time.sleep(0.5)
-        check("a real client attached to the session after opening", attached)
+        check("a real client attached after opening", attached)
 
-        # --- Reuse: opening again while attached does not stack -------
-        reopen_result = tw.open_window_for_session(SESSION)
+        kill_window_process()
+        detached = False
+        for _ in range(10):
+            if not tw.has_attached_client(session):
+                detached = True
+                break
+            time.sleep(0.5)
+        check("client detached after the window process was killed (closed)", detached)
         check(
-            "opening again while a client is already attached reuses, doesn't stack",
-            reopen_result["ok"] and reopen_result.get("opened") is False,
-            detail=str(reopen_result),
+            "tmux session is STILL ALIVE after the window closed -- a window is a view, not the process",
+            _has_session(session),
         )
-
-        # --- THE safety property: closing the window != killing the agent
-        _kill_window_process(SESSION)
-        time.sleep(1)
-        check(
-            "tmux session is STILL ALIVE after the window process was killed -- a window is a view, not the process",
-            _has_session(SESSION),
-        )
-        inner_pid_after = _pane_pid(SESSION)
-        check(
-            "the process INSIDE the session is unaffected (same pid, still running)",
-            inner_pid_after == inner_pid_before,
-            detail=f"before={inner_pid_before!r} after={inner_pid_after!r}",
-        )
-        check("client detached after the window process died", not tw.has_attached_client(SESSION))
-
-        # --- The other direction: killing the SESSION does end it -------
-        subprocess.run(["tmux", "kill-session", "-t", SESSION], capture_output=True)
-        time.sleep(0.5)
-        check("killing the session itself DOES end it (not vacuously unkillable)", not _has_session(SESSION))
+        check("the process INSIDE the session is unaffected (same pid, still running)", pane_pid() == pid_before)
 
     finally:
-        subprocess.run(["tmux", "kill-session", "-t", SESSION], capture_output=True)
+        subprocess.run(["tmux", "kill-session", "-t", session], capture_output=True)
+        check("session killed and confirmed gone (cleanup, not a new claim about the design)", not _has_session(session))
+
+
+def run() -> int:
+    live = "--live" in sys.argv
+    print(f"visible_windows_canary: JARVIS_TEST_RUN={os.environ['JARVIS_TEST_RUN']!r}, live={live}")
+
+    try:
+        run_hermetic()
+        if live:
+            run_live()
+        else:
+            print()
+            print("(skipping the live window-open check -- pass --live to run it; opens and closes exactly one window)")
+    finally:
         test_run_root = TEAMS_REGISTRY_PATH.parent
         if "test_runs" in str(test_run_root):
             import shutil

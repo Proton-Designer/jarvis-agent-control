@@ -88,14 +88,37 @@ def run() -> int:
         check(f"accepted: {name}", bool(tw._SAFE_SESSION_NAME.match(name)))
 
     print()
-    print("argv separators survive, so the allowlist is not the only thing holding")
+    print("the boundary guards are the RIGHT ones for each boundary")
     src = Path(tw.__file__).read_text()
-    check('tmux list-clients passes "--" before the session name',
-          '"tmux", "list-clients", "-t", "--", tmux_session' in src)
-    check('the Ghostty open passes "--" before the session name',
-          '"attach", "-t", "--", tmux_session' in src)
+    # These two assertions used to demand "--" before every session name,
+    # and they were WRONG -- my own fix, corrected 2026-08-20 by Engineer
+    # 2 and then reproduced directly:
+    #
+    #   tmux list-clients -t -- dashtest
+    #   -> command list-clients: too many arguments (need at most 0)
+    #
+    # tmux's subcommand parser does not honour "--" as end-of-options.
+    # "-t" binds the very NEXT token verbatim, so "-t --" sets the target
+    # to the literal string "--" and the real name becomes a stray
+    # positional. So the separator I added as a hardening measure
+    # silently broke has_attached_client(): it began failing on every
+    # call, meaning "is a window already open" answered no forever, and
+    # window REUSE stopped working -- the security fix quietly broke the
+    # feature.
+    #
+    # The correct rule is per-boundary, not one blanket habit:
+    #   - tmux via subprocess list form: no shell, no re-parse. The
+    #     allowlist (first char alnum/underscore) is what makes a
+    #     dash-leading name impossible, and it is sufficient.
+    #   - AppleScript: a real string-building boundary, so the name goes
+    #     in as argv and AppleScript quotes it.
+    check("the tmux calls do NOT pass -- (tmux would read it as the target)",
+          '"list-clients", "-t", tmux_session' in src and '"-t", "--"' not in src)
     check("AppleScript takes the name as argv, never string-interpolated",
-          "quoted form of (item 1 of argv)" in src and 'f\'tell application "Terminal" to do script "tmux attach -t {' not in src)
+          "quoted form of (item 1 of argv)" in src
+          and 'do script "tmux attach -t {' not in src)
+    check("a dash-leading name is still impossible, which is what -- was for",
+          not tw._SAFE_SESSION_NAME.match("-e") and not tw._SAFE_SESSION_NAME.match("--args"))
 
     print()
     if FAILURES:

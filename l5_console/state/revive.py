@@ -86,13 +86,13 @@ def _revive_role(target: ReviveTarget) -> dict:
     if not liveness["attached"]:
         return {
             "kind": "role", "id": target.id, "label": target.label,
-            "ok": True, "skipped": True,
+            "ok": True, "skipped": True, "was_running": False,
             "detail": "no session attached -- nothing to revive", "sub_results": None,
         }
     if liveness["liveness"] == LIVENESS_RUNNING:
         return {
             "kind": "role", "id": target.id, "label": target.label,
-            "ok": True, "skipped": True,
+            "ok": True, "skipped": True, "was_running": True,
             "detail": "already running", "sub_results": None,
         }
     result = activate_role(target.id)
@@ -119,7 +119,7 @@ def _revive_team(target: ReviveTarget) -> dict:
     if not result["results"]:
         item = {
             "kind": "team", "id": target.id, "label": target.label,
-            "ok": True, "skipped": True,
+            "ok": True, "skipped": True, "was_running": True,
             "detail": "nothing needed reconnecting", "sub_results": None,
         }
     else:
@@ -164,9 +164,30 @@ def summarize(results: list[dict]) -> str:
     it was. Never claims success while `results` contains any ok=False
     item -- callers should treat this string as spoken/rendered verbatim,
     not just a debug label."""
+    # "skipped" conflates two genuinely different situations, and saying
+    # "already up" about both is a false claim -- found live 2026-08-20
+    # driving the real console on a clean slate: with NO roles attached
+    # and NO teams registered, it announced "Nothing needed reviving --
+    # all 2 already up." Nothing was up. Nothing existed.
+    #
+    # That matters most in the exact situation this feature is for. After
+    # a reboot, a role whose record was lost reads as not-attached, gets
+    # skipped, and would have been reported as running -- a half-empty
+    # system described as healthy, which is the failure mode the whole
+    # feature exists to prevent.
     needed = [r for r in results if not r["skipped"]]
     if not needed:
-        return f"Nothing needed reviving -- all {len(results)} already up."
+        up = [r for r in results if r.get("was_running")]
+        if not results:
+            return "Nothing to revive -- no roles attached and no teams registered."
+        if not up:
+            return f"Nothing to revive -- none of the {len(results)} are attached or registered."
+        if len(up) == len(results):
+            return f"Nothing needed reviving -- all {len(results)} already up."
+        return (
+            f"Nothing needed reviving -- {len(up)} of {len(results)} already up, "
+            f"the rest have nothing attached."
+        )
     succeeded = [r for r in needed if r["ok"]]
     if len(succeeded) == len(needed):
         return f"Revived {len(succeeded)} of {len(needed)} (of {len(results)} total, rest already up)."

@@ -162,15 +162,23 @@ def has_attached_client(tmux_session: str) -> bool:
     see module docstring. Empty stdout (no error) means no client, not a
     failure -- tmux's own documented behavior for list-clients on a
     session with nothing attached."""
-    # "--" so a session name beginning with "-" is a VALUE, never a
-    # flag. Both guards are kept because they fail differently: the
-    # allowlist refuses the name outright, "--" makes it harmless even if
-    # the allowlist is ever loosened. Injection and argv smuggling are
-    # different bugs and neither guard covers the other.
+    # NO "--" here -- found LIVE by visible_windows_canary.py, not
+    # reasoned about: `tmux list-clients -t -- <name>` fails outright
+    # ("too many arguments"), because unlike most POSIX CLIs, tmux's own
+    # option parser does not treat "--" as an end-of-options marker for
+    # its subcommands. `-t` simply binds the very next argv token as its
+    # value, verbatim, dashes and all -- there was never an ambiguity for
+    # "--" to resolve, since subprocess.run's list form here never invokes
+    # a shell that could re-parse a leading "-" as a flag. The allowlist
+    # (first char alnum/underscore, so a name can't literally BE "-t" or
+    # start with "-") is the actual guard for this call; verified by
+    # re-running the canary after removing "--" -- has_attached_client()
+    # correctly returns True/False across the whole open/reuse/close
+    # cycle again.
     if not _SAFE_SESSION_NAME.match(tmux_session or ""):
         return False
     result = subprocess.run(
-        ["tmux", "list-clients", "-t", "--", tmux_session],
+        ["tmux", "list-clients", "-t", tmux_session],
         capture_output=True, text=True,
     )
     return bool(result.stdout.strip())
@@ -187,9 +195,15 @@ def _open_ghostty(tmux_session: str) -> dict:
     # window (which would just retarget the window this very console
     # might be running in) -- reuse is handled at a higher level, by
     # has_attached_client(), not by letting `open` decide.
+    # No "--" before tmux_session here either -- same reason as
+    # has_attached_client() above: this runs `tmux attach -t <name>`
+    # inside the new window, and tmux's own `-t` does not treat "--" as
+    # an end-of-options marker, it binds it as -t's literal value. The
+    # allowlist is what actually neutralises a hostile name for this
+    # call, same as the read path.
     try:
         result = subprocess.run(
-            ["open", "-na", "Ghostty.app", "--args", "-e", "tmux", "attach", "-t", "--", tmux_session],
+            ["open", "-na", "Ghostty.app", "--args", "-e", "tmux", "attach", "-t", tmux_session],
             capture_output=True, text=True, timeout=_OPEN_TIMEOUT_S,
         )
         if result.returncode != 0:
