@@ -112,9 +112,32 @@ def jarvis_say(message: str, kind: str, team: str = "") -> dict:
     if truncated:
         text = text[:MAX_CHARS].rstrip() + "."
 
-    speak(text, priority=KINDS[kind])
+    # BATCHED or IMMEDIATE, decided by the kind -- see return_queue.py.
+    # `error` is not batchable and goes straight out: something failed,
+    # and silence there is the failure class this project keeps finding.
+    # Completions and blocked questions collect, so three agents
+    # finishing together become one interruption instead of three.
+    #
+    # Note this does NOT delay anything that was already immediate. The
+    # instant ack, refusals and cancel-window confirmations never come
+    # through jarvis_say at all -- they call speak() directly, and are
+    # untouched by this.
+    import return_queue  # noqa: E402  (local: avoids a cycle at import time)
+
+    if kind in return_queue.BATCHABLE_KINDS:
+        queued = return_queue.enqueue(kind, text, team=team or None)
+        if not queued["ok"]:
+            # Never silently drop it. If the queue refuses for any
+            # reason, speak it now -- a message that reaches Ayman late
+            # or out of order is recoverable; one that vanishes is not.
+            log_event("jarvis_say_queue_refused", kind=kind, reason=queued["reason"])
+            speak(text, priority=KINDS[kind])
+    else:
+        speak(text, priority=KINDS[kind])
+
     log_event(
         "jarvis_say", kind=kind, team=team[:60], chars=len(text),
         truncated=truncated, priority=KINDS[kind], at=round(time.time(), 3),
+        batched=kind in return_queue.BATCHABLE_KINDS,
     )
     return {"ok": True, "reason": ""}

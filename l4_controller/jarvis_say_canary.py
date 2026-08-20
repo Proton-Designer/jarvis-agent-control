@@ -91,16 +91,33 @@ print("\n2. an empty message is refused, not silently succeeded")
 check(tools_voice.jarvis_say("   ", kind="completion")["ok"] is False, "whitespace-only message refused")
 
 print("\n3. priority reorders: a blocker submitted LAST is spoken FIRST")
+# REWRITTEN 2026-08-20 for batching (return_queue.py). These two checks
+# used to assert that a blocked_question REACHED speak() before a
+# completion did. That measurement point no longer exists: completions
+# and blocked questions are now collected and spoken as ONE utterance,
+# so neither reaches speak() individually and the old checks failed
+# against a system that was working correctly.
+#
+# The PROPERTY is unchanged and still worth asserting -- a stopped
+# session must not be buried behind things that merely finished. It now
+# lives inside the composed batch, so that is where it is checked. The
+# new first assertion is strictly stronger than what it replaces: not
+# just "the blocker came first" but "there was only ONE interruption",
+# which is the whole point of the feature.
+import return_queue  # noqa: E402
+
 spoken.clear()
-tools_voice.jarvis_say("filler to occupy the worker", kind="completion")
-time.sleep(0.02)  # let the worker pick up the filler so the next two queue together
+return_queue._write([])
 tools_voice.jarvis_say("gateway finished its tests", kind="completion")
 tools_voice.jarvis_say("billing is asking which database to use", kind="blocked_question")
+check(len(spoken) == 0, f"neither reached speak() immediately -- both queued (got {spoken})")
+batch = return_queue.flush_now()
 time.sleep(0.6)
-idx_block = next((i for i, s in enumerate(spoken) if "billing" in s), -1)
-idx_done = next((i for i, s in enumerate(spoken) if "gateway" in s), -1)
-check(idx_block != -1 and idx_done != -1, "both messages were spoken")
-check(idx_block < idx_done, f"blocked_question preempted completion (order: {spoken})")
+check(len(spoken) == 1, f"the batch is ONE utterance, not two (got {len(spoken)}: {spoken})")
+idx_block = batch["text"].find("billing")
+idx_done = batch["text"].find("gateway")
+check(idx_block != -1 and idx_done != -1, "both messages are in that one utterance")
+check(idx_block < idx_done, f"blocked_question leads the batch (text: {batch['text']!r})")
 
 print("\n4. the read-only surface gained speech but NOT the ability to act")
 probe = (
