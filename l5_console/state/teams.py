@@ -146,9 +146,48 @@ def _lead_claude_session(entry: dict) -> str | None:
     return member["claude_session"] if member else None
 
 
+# member_liveness() is polled at ~1-3Hz (poller.TEAMS_INTERVAL_S) --
+# printing a cwd-mismatch line on every single call would spam stderr
+# for as long as the mismatch persists. Logged ONCE per distinct
+# (root, tmux, found cwd) combination instead -- same dedup discipline
+# and same "never persist observed state" reasoning as
+# engine_roles._log_cwd_mismatch(), which this mirrors (added
+# 2026-08-20, when that gap was found and fixed there first).
+_LOGGED_CWD_MISMATCHES: set[tuple[str, str, str]] = set()
+
+
+def _log_cwd_mismatch(root: str, tmux: str, found_cwd: str) -> None:
+    key = (root, tmux, found_cwd)
+    if key in _LOGGED_CWD_MISMATCHES:
+        return
+    _LOGGED_CWD_MISMATCHES.add(key)
+    print(
+        f"teams: tmux {tmux!r} is LIVE but at cwd {found_cwd!r}, not the "
+        f"team root {root!r} -- reporting as not-running per contract, but a "
+        f"real session WAS found under this name",
+        file=sys.stderr,
+    )
+
+
 def member_liveness(root: str, member: dict, live_by_name: dict[str, dict]) -> tuple[str, str | None, str | None]:
     """Returns (liveness, tmux_binding, activity). tmux_binding is the
-    CURRENT tmux name if genuinely running, else None."""
+    CURRENT tmux name if genuinely running, else None.
+
+    NOTE on cwd-mismatch observability (2026-08-20): a tmux-name match
+    with a cwd mismatch is now LOGGED (see _log_cwd_mismatch()) so it is
+    no longer silently indistinguishable from "genuinely nothing live
+    under this name" in stderr, mirroring the same gap found and fixed
+    in engine_roles.role_liveness(). The return CONTRACT is deliberately
+    left unchanged here, though -- unlike role_liveness()'s dict, this
+    function returns a positional tuple unpacked at two call sites
+    (reconnect.py, this module's own discover_teams_and_unassigned()),
+    and actually surfacing the mismatch as DATA (not just a log line)
+    would mean widening that tuple (both call sites) and very likely
+    TeamMember's own dataclass fields to carry it somewhere a consumer
+    could read it -- that dataclass is an agreed contract with the
+    console's own engineer (see models.py's docstring), not something to
+    change unilaterally as a side effect of a logging fix. Flagged for
+    the Lead to scope separately if wanted."""
     stored_tmux = member.get("tmux")
     claude_session = member["claude_session"]
 
@@ -163,7 +202,11 @@ def member_liveness(root: str, member: dict, live_by_name: dict[str, dict]) -> t
 
     # Either not currently bound to a live tmux session, or the name is
     # live but hosts something else now (cwd mismatch) -- fails closed
-    # either way: not treated as this member running.
+    # either way: not treated as this member running. The cwd-mismatch
+    # sub-case is now logged (not silent) before falling through.
+    if live is not None and live["working_dir"] != root:
+        _log_cwd_mismatch(root, stored_tmux, live["working_dir"])
+
     if _has_history(root, claude_session):
         return LIVENESS_STOPPED, None, None
     return LIVENESS_LOST, None, None

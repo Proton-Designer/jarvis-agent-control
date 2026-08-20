@@ -244,6 +244,51 @@ def run() -> int:
             detail=pre3["detail"],
         )
 
+        # --- 2c. cwd_mismatch: a live session under this name is never
+        #         silently indistinguishable from "nothing is running" --
+        print("\n2c. role_liveness() surfaces cwd_mismatch/found_cwd instead of a silent not-running (2026-08-20 gap)")
+        er._save({"concierge": None, "orchestrator": None, "name_history": {"concierge": [], "orchestrator": []}})
+        er.attach_role(
+            "concierge", tmux="fake-tmux-cwd-check", working_dir="/old/subdir/expected",
+            claude_session="fake-uuid-cwd-check", model="haiku", effort="low",
+        )
+        _real_list_live_sessions = er._list_live_sessions
+        try:
+            # Direction 1: tmux name matches, cwd does NOT -- the
+            # attach/activate CONTRACT must be unchanged (never RUNNING),
+            # but the mismatch itself must be a visible fact, not a
+            # silent fall-through to plain not-running.
+            er._list_live_sessions = lambda: [{"session_id": "fake-tmux-cwd-check", "working_dir": "/actually/here"}]
+            mismatched = er.role_liveness("concierge")
+            check(
+                "cwd mismatch: liveness contract is unchanged -- never RUNNING",
+                mismatched["running"] is False and mismatched["liveness"] in ("stopped", "lost"),
+                detail=str(mismatched),
+            )
+            check(
+                "cwd mismatch: cwd_mismatch=True AND found_cwd names the session's REAL live cwd",
+                mismatched["cwd_mismatch"] is True and mismatched["found_cwd"] == "/actually/here",
+                detail=str(mismatched),
+            )
+
+            # Direction 2: tmux name matches AND cwd matches -- RUNNING,
+            # and cwd_mismatch must read back False here too (not a
+            # stale True bleeding over from the branch above).
+            er._list_live_sessions = lambda: [{"session_id": "fake-tmux-cwd-check", "working_dir": "/old/subdir/expected"}]
+            matched = er.role_liveness("concierge")
+            check(
+                "matching cwd: reports RUNNING",
+                matched["running"] is True and matched["liveness"] == "running",
+                detail=str(matched),
+            )
+            check(
+                "matching cwd: cwd_mismatch=False and found_cwd=None -- no false-positive mismatch flag",
+                matched["cwd_mismatch"] is False and matched["found_cwd"] is None,
+                detail=str(matched),
+            )
+        finally:
+            er._list_live_sessions = _real_list_live_sessions
+
         # --- 3 & 4. LIVE: create, verify the ACTUAL spawned command line,
         #            kill, activate (--resume), verify again -------------
         print("\n3&4. LIVE: create_role_session() spawns a real concierge; verify the actual process argv")
