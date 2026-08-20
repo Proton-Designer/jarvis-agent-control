@@ -19,14 +19,16 @@ the same reasoning applies one level up, to which tools even exist for a
 given caller to try.
 
 Tools registered here:
-  list_sessions() / session_activity() / spend() / pending_questions() -- tools_read.py
+  list_sessions() / session_activity() / spend() / pending_questions() -- tools_read.py.
+    pending_questions() (docs/TODO-feature-queue.md #5) is Sonnet-only
+    despite being read-only: the concierge passes transcripts verbatim
+    and never decides DISPATCH vs ANSWER itself, so it has no use for
+    the pending list -- that whole decision belongs to the router, which
+    has this alongside answer_blocked_session() below.
   report_dispatch_stage() / confirm_plan() / deliver_batch() /
-    answer_blocked_session() -- tools_write.py. The last is Sonnet-only
-    (docs/TODO-feature-queue.md #5): it delivers a keystroke to a real
-    pane, same write-authority reasoning as deliver_batch -- Haiku gets
-    pending_questions() (read-only) to recognize an utterance MIGHT be
-    answering something, then hands off via handoff_to_router() like any
-    other utterance; it never answers directly itself.
+    answer_blocked_session() -- tools_write.py. The last is Sonnet-only:
+    it delivers a real keystroke to a real pane, same write-authority
+    reasoning as deliver_batch.
   list_teams() / register_team_by_adoption() / register_team_fresh() --
     team_registry_tools.py (SPEC-orchestration.md SS1.3). All three are
     Sonnet-only, including the read-shaped list_teams(): it calls

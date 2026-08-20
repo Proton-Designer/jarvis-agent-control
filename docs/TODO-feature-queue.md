@@ -15,7 +15,7 @@ Status: `TODO` · `IN PROGRESS` · `BUILT` · `VERIFIED` (canary + driven live) 
 | 2 | Small items (3, independent) | Engineer 2 | **DONE** |
 | 3 | Speech batching | Lead | **DONE** — 17/17, both directions |
 | 4 | Pending-speech panel | Engineer 2 | **DONE** — 15/15, hides when empty |
-| 5 | Answering a blocked agent by voice | Engineer 1 | IN PROGRESS |
+| 5 | Answering a blocked agent by voice | Engineer 1 | **DONE** — 19/19, live pickers |
 
 **Why this order.** #1 and #2 touch disjoint files, so they run together.
 #3 (batching) and #1 (Kokoro) both rewrite parts of `say_feedback.py`, so

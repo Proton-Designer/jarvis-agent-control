@@ -65,6 +65,7 @@ this module ever targets a permission/plan-approval prompt.
 
 from __future__ import annotations
 
+import blocked_state
 from latency_log import log_event
 from providers import pending_questions, transport
 
@@ -168,6 +169,20 @@ def answer_blocked_session(answer_text: str, target: str | None = None) -> dict:
     )
     if not result.ok:
         return {"ok": False, "detail": f"couldn't deliver the answer to {entry['team_id']}: {result.detail}", "team_id": entry["team_id"]}
+
+    # Cleared HERE, immediately, not left for the poller's next tick.
+    # This is not a self-report -- transport.answer_blocked_question()
+    # already did a fresh, verified re-classification of the real pane
+    # before returning ok=True (see its own docstring), so this is
+    # exactly the "code-driven, not self-reported" fact dispatch_state.py
+    # already insists on elsewhere, just applied here. Without this, a
+    # second question asked in the same breath as this one (e.g. Ayman
+    # says "staging" then immediately "MySQL") would still see the
+    # just-answered session as pending for up to one poll interval and
+    # wrongly hold-and-ask against a question that's already resolved --
+    # found live building this feature's own canary, not theorized.
+    blocked_state.clear_blocked(entry["claude_session"])
+
     return {
         "ok": True,
         "detail": f"told {entry['team_id']}: {entry['options'][option_index - 1]}",

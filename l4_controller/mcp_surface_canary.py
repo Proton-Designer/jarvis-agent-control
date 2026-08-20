@@ -72,8 +72,8 @@ def run() -> int:
 
     expected_full = {
         "jarvis_say",
-        "list_sessions", "session_activity", "spend",
-        "report_dispatch_stage", "confirm_plan", "deliver_batch",
+        "list_sessions", "session_activity", "spend", "pending_questions",
+        "report_dispatch_stage", "confirm_plan", "deliver_batch", "answer_blocked_session",
         "list_teams", "register_team_by_adoption", "register_team_fresh",
     }
     # jarvis_say is on BOTH surfaces deliberately (tools_voice.py): the
@@ -89,7 +89,11 @@ def run() -> int:
     # nothing, and the next addition would arrive unnoticed.
     expected_ro = {"list_sessions", "session_activity", "spend", "jarvis_say", "handoff_to_router"}
 
-    check("full surface has all nine tools", full_names == expected_full, detail=f"got {sorted(full_names)}")
+    check(
+        "full surface has all twelve tools (2026-08-20: +pending_questions, +answer_blocked_session)",
+        full_names == expected_full,
+        detail=f"got {sorted(full_names)}",
+    )
     check(
         "read-only surface has exactly its three read tools plus jarvis_say and handoff_to_router",
         ro_names == expected_ro,
@@ -98,6 +102,16 @@ def run() -> int:
     check("deliver_batch is NOT on the read-only surface", "deliver_batch" not in ro_names)
     check("confirm_plan is NOT on the read-only surface", "confirm_plan" not in ro_names)
     check("report_dispatch_stage is NOT on the read-only surface", "report_dispatch_stage" not in ro_names)
+    # docs/TODO-feature-queue.md #5, 2026-08-20: answer_blocked_session is
+    # a delivery (a real keystroke into another session's pane), same
+    # write-authority reasoning as deliver_batch -- never the concierge's.
+    # pending_questions is READ-only but deliberately ALSO withheld: the
+    # concierge passes transcripts verbatim and the router decides
+    # DISPATCH vs ANSWER, so the concierge has no actual use for the
+    # pending list, and a tool it doesn't need is surface it shouldn't
+    # have (the Lead's ruling, 2026-08-20).
+    check("answer_blocked_session is NOT on the read-only surface", "answer_blocked_session" not in ro_names)
+    check("pending_questions is NOT on the read-only surface", "pending_questions" not in ro_names)
     # Team registry tools (SS1.3) are ALL Sonnet-only, including the
     # read-shaped list_teams() -- see server.py's docstring for why (a
     # live tmux round trip, not the console's cached poll layer Haiku's
