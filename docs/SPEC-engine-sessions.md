@@ -167,6 +167,34 @@ The peers tools load without the flag. What is lost is only the automatic
 push of peer messages into a session; the tools themselves, including
 `check_messages`, are all present.
 
+### 3.4 `--allowedTools` is required, not an optimisation
+
+The cage has two halves and the second is easy to forget, because
+forgetting it looks like a hang rather than a hole.
+
+The role's own MCP tools were pre-approved in
+`~/Jarvis/<role>/.claude/settings.local.json`. Moving the working
+directory to `~/Jarvis` orphans that file. Launched without it and asked
+to call its own `list_sessions`, the concierge stopped on:
+
+```
+ Do you want to proceed?
+ ❯ 1. Yes
+   2. No
+```
+
+and waited. Every voice turn would have hung there instead of answering —
+a Haiku layer whose entire purpose is answering in under two seconds,
+blocked forever on a dialog nobody is watching.
+
+So the allow list travels on the command line beside the deny list.
+Verified: the same launch plus `--allowedTools` ran the tool with no
+prompt and returned real data.
+
+**Both lists must come from one named constant per role, shared with
+that role's `.mcp.json`.** A tool present in the config but missing from
+the allow list is a silent hang, and a tool in neither is invisible.
+
 ---
 
 ## 4. Launch
