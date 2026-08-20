@@ -214,6 +214,19 @@ def prompt_preview_text(slot) -> str:
     return getattr(slot, "prompt_preview", None) or ""
 
 
+def is_server_stale(slot) -> bool:
+    """One predicate, shared by every surface -- docs/PLAN-silence-and-ux.md
+    R5, the 2026-08-20 incident where a role's MCP server ran pre-fix
+    code for its entire life with the console showing green throughout.
+    ADVISORY tier, below is_prompt_pending()/is_blocked() -- dim, never
+    bold-red: a stale server is not itself broken (the role answers
+    fine), it MIGHT be missing a fix nobody's confirmed it picked up
+    yet. Over-flagging is deliberate (see engine_roles._role_server_stale()'s
+    own docstring): a false positive costs one no-op Activate, a false
+    negative costs an afternoon."""
+    return bool(getattr(slot, "server_stale", False))
+
+
 def role_status_icon(slot) -> str:
     """The glyph beside role_status_phrase(). Its own function, and NOT
     liveness_icon(slot.liveness), because the two disagree in exactly one

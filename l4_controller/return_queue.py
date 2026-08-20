@@ -57,6 +57,8 @@ project keeps finding.
 """
 from __future__ import annotations
 
+import contextlib
+import fcntl
 import json
 import os
 import threading
@@ -70,6 +72,7 @@ from jarvis_paths import jarvis_home  # noqa: E402
 from latency_log import log_event  # noqa: E402
 
 QUEUE_PATH = jarvis_home() / "return_queue.json"
+FLUSH_LOCK_PATH = jarvis_home() / "return_queue.lock"
 
 # Long enough that a burst of agents finishing together lands in one
 # utterance; short enough that a single completion doesn't feel delayed.
@@ -94,6 +97,25 @@ _TICK_S = 0.5
 # hearing the answer is not.
 MAX_HOLD_S = 12.0
 
+# Same staleness discipline as l5_console/app/wake_state.py's
+# read_wake_state() (STALE_AFTER_S=1.0 there) -- daemon.py writes
+# wake_state.json at ~10Hz while live(), so missing more than a second
+# of writes means the writer is gone, not just between updates. Reused
+# as a literal constant here rather than importing that module: this is
+# an L4 file and wake_state.py lives under l5_console/app -- the console
+# layer -- and this queue must keep working with the console closed, so
+# it must not depend on anything under l5_console/app at all. Same
+# convention, applied independently, not a shared import.
+#
+# WHY THIS MATTERS (found live, 2026-08-20, Opus Lead 3): the CAPTURING
+# check below used to trust wake_state.json's `state` field with no
+# regard for `updated_at` at all. A daemon that crashes mid-capture
+# leaves "state": "CAPTURING" on disk FOREVER -- every batchable message
+# after that reads "he is still talking" permanently, and MAX_HOLD_S
+# becomes not a backstop but an unconditional 12s tax on every message,
+# forever, with nothing on screen explaining why.
+WAKE_STATE_STALE_AFTER_S = 1.0
+
 # Speech order. Lower speaks first. Mirrors say_feedback's priority
 # meaning so the two orderings can never disagree about what outranks
 # what.
@@ -103,6 +125,55 @@ BATCHABLE_KINDS = frozenset(_TIER)
 
 _lock = threading.RLock()
 _worker_started = False
+
+
+@contextlib.contextmanager
+def _cross_process_lock():
+    """docs/PLAN-silence-and-ux.md SS1 R3: `_lock` above is a
+    threading.RLock -- it only ever serializes threads INSIDE one
+    process. jarvis_say is registered on BOTH MCP surfaces
+    (server.py and server_readonly.py), so the concierge and the router
+    are two SEPARATE processes, each perfectly capable of running its
+    own _worker_loop() thread with its own, unrelated in-memory _lock --
+    each one correctly believing it is the only flusher, while
+    flush_now()'s read -> speak -> re-read -> write is not atomic across
+    two such processes. Two workers ticking at once can both read the
+    same pending items, both speak them (duplicate audio), and then race
+    on whose write of the remainder actually lands.
+
+    fcntl.flock() is a real OS-level, cross-process advisory lock
+    (unlike threading.Lock, which cannot see across a process boundary
+    at all) on FLUSH_LOCK_PATH. BLOCKING (no LOCK_NB): every operation
+    guarded by this lock (one enqueue, one check-and-maybe-flush tick)
+    is a brief, bounded file read/write plus enqueueing onto
+    say_feedback's OWN queue -- never the actual multi-second spoken
+    playback, since say_feedback.speak() itself is non-blocking (it only
+    enqueues; the real audio happens later, asynchronously, on
+    say_feedback's own worker thread). So blocking briefly here is cheap
+    and never risks holding this lock for as long as an utterance takes
+    to actually play. A crashed process cannot wedge this lock forever
+    either -- an OS-level flock is tied to the open file descriptor and
+    is released automatically by the kernel the moment that process dies
+    or the fd closes, `with` block or not.
+
+    THIS FIXES THE CONCURRENCY BUG, NOT STALENESS. A lock guarantees at
+    most one process acts on the queue at a time; it says nothing about
+    whether that process is running current code. That is a different
+    problem (see docs/PLAN-silence-and-ux.md SS4's standing rule) with a
+    different fix: R5 surfaces "this role is older than your code" so
+    Ayman knows to Activate it, which already respawns the process
+    cleanly. A dedicated always-on flusher process was considered and
+    rejected here -- it would only relocate the exact same staleness
+    risk to a new, equally-restartable component, not remove it; the
+    only real fix for a process running stale code is restarting that
+    process, which is what R5 makes visible and Activate already does."""
+    FLUSH_LOCK_PATH.parent.mkdir(parents=True, exist_ok=True)
+    with open(FLUSH_LOCK_PATH, "a") as lock_file:
+        fcntl.flock(lock_file, fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(lock_file, fcntl.LOCK_UN)
 
 
 def _read() -> list[dict]:
@@ -209,7 +280,14 @@ def enqueue(kind: str, text: str, team: str | None = None) -> dict:
     text = (text or "").strip()
     if not text:
         return {"ok": False, "reason": "empty text"}
-    with _lock:
+    # BOTH locks: _lock (intra-process -- a second thread in THIS same
+    # process, e.g. the worker thread racing a direct enqueue() call) AND
+    # _cross_process_lock() (a second PROCESS -- the concierge and the
+    # router each have their own copy of this module loaded, see that
+    # lock's own docstring). Neither alone is sufficient; they guard
+    # different boundaries and compose safely (distinct resources, same
+    # thread holds both throughout).
+    with _lock, _cross_process_lock():
         items = _read()
         items.append({"kind": kind, "text": text, "team": team, "queued_at": time.time()})
         _write(items)
@@ -251,7 +329,15 @@ def flush_now() -> dict:
     without ever being spoken."""
     from say_feedback import speak, PRIORITY_HIGH, PRIORITY_NORMAL
 
-    with _lock:
+    # docs/PLAN-silence-and-ux.md SS1 R3: BOTH locks, same reasoning as
+    # enqueue(). This is the span that used to race across processes --
+    # two workers (concierge's and the router's, each in its own process)
+    # could both read the same pending items here, both speak them, and
+    # then race on whose write of the remainder actually landed. The
+    # cross-process lock makes this whole read -> take -> write span
+    # atomic with respect to every OTHER process's flush_now() too, not
+    # just this one's own thread.
+    with _lock, _cross_process_lock():
         items = _sorted(_read())
         if not items:
             return {"ok": True, "spoken": 0, "text": ""}
@@ -303,9 +389,29 @@ def ready_to_flush(now: float | None = None) -> tuple[bool, str]:
     # forever, and swallowed a real answer.
     try:
         with (jarvis_home() / "wake_state.json").open() as f:
-            if json.load(f).get("state") == "CAPTURING":
+            wake_data = json.load(f)
+        if wake_data.get("state") == "CAPTURING":
+            # STALENESS, not just presence -- found live 2026-08-20 (Opus
+            # Lead 3): without this check, a daemon that crashes mid-
+            # capture leaves "state": "CAPTURING" on disk forever, and
+            # this gate would then read "he is still talking" permanently
+            # -- every batchable message pays the full MAX_HOLD_S, always,
+            # with nothing on screen explaining why. daemon.py writes
+            # this file at ~10Hz while live() runs (WAKE_STATE_WRITE_
+            # INTERVAL_S=0.1), so a write more than WAKE_STATE_STALE_
+            # AFTER_S old means the writer is gone, not just between
+            # ticks -- same convention l5_console/app/wake_state.py's
+            # read_wake_state() already uses (STALE_AFTER_S=1.0),
+            # reapplied here directly rather than imported (this file
+            # must keep working with the console closed, so it must not
+            # depend on anything under l5_console/app).
+            updated_at = float(wake_data.get("updated_at", 0))
+            if time.time() - updated_at <= WAKE_STATE_STALE_AFTER_S:
                 return False, "waiting until you stop talking"
-    except (FileNotFoundError, json.JSONDecodeError, OSError):
+            # Stale: fail toward SPEAKING, same direction as the
+            # FileNotFoundError case below -- a dead daemon's last word
+            # must not silently gate speech forever.
+    except (FileNotFoundError, json.JSONDecodeError, OSError, TypeError, ValueError):
         # No daemon running, or unreadable: nothing is being captured, so
         # there is nothing to interrupt. Fail toward SPEAKING -- silence
         # is the failure this channel exists to prevent.

@@ -199,6 +199,14 @@ def write_dictation(text: str) -> Path:
     return path
 
 
+# Above this, the transcript is referenced by path instead of inlined.
+# The pointer path was built for long-form dictation (~5,000 chars) and
+# that case keeps it. Deliberately conservative rather than measured to
+# the limit: the failing case today was 25 characters, and the win is
+# already fully captured well below any boundary worth probing.
+MAX_INLINE_TRANSCRIPT_CHARS = 1200
+
+
 def deliver_transcript(
     text: str,
     transport: Transport,
@@ -327,11 +335,69 @@ def deliver_transcript(
         log_event("handoff_team_list_failed", error=str(e))
         teams_text = "Registered teams: UNAVAILABLE (registry read failed -- route from the session list alone, and say so if you cannot)"
 
-    pointer = (
-        f"New dictation at {path} — read it and route the instructions inside. "
-        f"Live sessions right now (captured at send time): {_format_session_list(sessions)}"
-        f"\n{teams_text}"
-    )
+    # THE MESSAGE IS WRITTEN FOR THE CONCIERGE, because the concierge is
+    # who receives it. That sounds obvious; it was not true until now.
+    #
+    # This text said "read it and route the instructions inside" and was
+    # delivered to claude-concierge-1 (the variable is still called
+    # orchestrator_target). It was written for the ROUTER under the
+    # single-tier architecture and never rewritten when the concierge
+    # became the recipient. The concierge CANNOT route -- handoff_to_router
+    # takes no target, deliberately -- so it was being told to do the one
+    # thing it structurally cannot.
+    #
+    # And it obeyed. Found by Opus Lead 3, 2026-08-20, reading the
+    # transcript against the log:
+    #     Ayman: "Hello, how are you doing?"  ->  concierge: "Waiting."
+    #     Ayman: "Hello, how are you doing?"  ->  concierge: "Ready for work."
+    # Those are not answers to Ayman. They are answers to THIS TEXT -- what
+    # a session says when told to stand by for instructions to route and it
+    # finds none. Nothing here ever said "Ayman just said this to you;
+    # answer him."
+    #
+    # THE TRANSCRIPT IS INLINED, not pointed at, when it is short enough.
+    # Measured by Lead 3: the old pointer was 398 characters to reference a
+    # 25-character utterance, and the file content entered the context
+    # window either way -- as a tool result instead of a message. There is
+    # no length at which the indirection was cheaper, and it cost a whole
+    # model turn (~1.5s of a 3.28s response, on a layer whose first
+    # instruction is "never make Ayman wait") to fetch a string this
+    # process already had in memory when it wrote the file.
+    #
+    # It also created a bug class: the Read permission prompt that left the
+    # concierge stuck existed ONLY because of this indirection.
+    #
+    # The file is still written, always, and that is deliberate -- the
+    # .txt and the richer .chunks.json sidecar are the forensic trail this
+    # project has repeatedly been saved by, and they never depended on the
+    # pointer.
+    #
+    # Above the bound it falls back to the pointer path unchanged: a
+    # multi-thousand-character transcript typed into an input box is the
+    # case the indirection was actually designed for, and that case keeps
+    # the proven mechanism.
+    #
+    # The transcript NEVER leads the message. transport.deliver() derives
+    # leading_token = payload.split(" ")[0] for check_slash_payload(), so
+    # an inlined transcript beginning with a recognised slash command would
+    # reach a command-classification surface as untrusted input. Prefixing
+    # with "Ayman said:" makes the leading token a constant again, exactly
+    # as it was when every message began with "New".
+    if len(text) <= MAX_INLINE_TRANSCRIPT_CHARS:
+        pointer = (
+            f"Ayman said: \"{text}\"\n"
+            f"Answer him if you can, or hand it to the router. Full transcript "
+            f"also saved at {path}.\n"
+            f"Live sessions right now (captured at send time): {_format_session_list(sessions)}"
+            f"\n{teams_text}"
+        )
+    else:
+        pointer = (
+            f"Ayman said something long -- read it at {path}, then answer him "
+            f"if you can, or hand it to the router. "
+            f"Live sessions right now (captured at send time): {_format_session_list(sessions)}"
+            f"\n{teams_text}"
+        )
     result = transport.deliver(orchestrator_target, pointer)
     log_event("pointer_delivered", ok=result.ok, target=orchestrator_target)
     if not result.ok:

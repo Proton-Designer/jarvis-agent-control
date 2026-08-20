@@ -183,17 +183,19 @@ _ROLE_SERVER_INVOCATION = {
 }
 
 
-def _role_tools_reachable(role: str) -> bool:
-    """Whether THIS role's own MCP server process (server_readonly.py for
-    concierge, server.py for orchestrator) is actually running -- not
-    just "some jarvis-l4-shaped process is up somewhere". Verifies real
-    invocation shape (own trailing argument, never inside a `-c` body),
-    same discipline as orchestrator_has_tools()."""
+def _role_server_pid(role: str) -> str | None:
+    """The PID of THIS role's own MCP server process (server_readonly.py
+    for concierge, server.py for orchestrator), or None if it isn't
+    running. Verifies real invocation shape (own trailing argument,
+    never inside a `-c` body), same discipline as orchestrator_has_tools()
+    -- factored out of what used to be _role_tools_reachable()'s own body
+    so the PID can also feed _role_server_stale() below without a second,
+    slightly-different pgrep scan."""
     pattern = _ROLE_SERVER_PATTERN[role]
     invocation = _ROLE_SERVER_INVOCATION[role]
     pids = subprocess.run(["pgrep", "-f", pattern], capture_output=True, text=True)
     if pids.returncode != 0:
-        return False
+        return None
     for pid in pids.stdout.split():
         cmd = subprocess.run(["ps", "-o", "command=", "-p", pid], capture_output=True, text=True)
         if cmd.returncode != 0:
@@ -202,8 +204,90 @@ def _role_tools_reachable(role: str) -> bool:
         if " -c " in cmdline or cmdline.rstrip().endswith(" -c"):
             continue
         if invocation.search(cmdline):
-            return True
-    return False
+            return pid
+    return None
+
+
+def _role_tools_reachable(role: str) -> bool:
+    """Whether THIS role's own MCP server process is actually running --
+    not just "some jarvis-l4-shaped process is up somewhere"."""
+    return _role_server_pid(role) is not None
+
+
+# docs/PLAN-silence-and-ux.md R5, the 2026-08-20 incident: both engine
+# roles' MCP servers were forked BEFORE a real fix to code they import
+# landed (return_queue.py's flush-gate fix, committed 16:09:53; the
+# concierge's server forked at 16:04:31, the orchestrator's at 15:12:21)
+# and ran the pre-fix version for their entire life, silently -- a
+# Python process binds a module at first import and never re-reads it,
+# and nothing here calls importlib.reload(). The console showed both
+# roles green/running/tools-reachable throughout. That invisibility cost
+# four fix attempts and three engineers an afternoon before the actual
+# mechanism was found by reading process start times against a commit
+# timestamp by hand.
+#
+# COARSE BY DESIGN, not a real dependency graph: comparing the server's
+# own start time against the newest mtime anywhere under l4_controller/
+# doesn't know WHICH file the server actually imports, just that
+# SOMETHING in its dependency neighborhood changed after it started.
+# A real per-module import-graph check would need static analysis kept
+# correct as imports change, which is a much larger and more fragile
+# thing to build and maintain than the safety property here actually
+# needs. OVER-FLAGGING IS THE SAFE DIRECTION: a false "might be stale"
+# costs one no-op Activate (the server was already running current
+# code, the touched file was irrelevant to it) -- a false negative costs
+# an afternoon, which is the cost this section exists to make impossible
+# to repeat. Scoped to l4_controller/ only, deliberately: that's what an
+# MCP server subprocess can import. l5_console/state/*.py (this file
+# included) is never in this server's process at all -- it's imported by
+# the CONSOLE's own poller, a separate process that picks up fresh code
+# every time it's restarted, and by the LAUNCH COMMAND (_role_cage_args()
+# etc.), which is baked into argv at spawn and is therefore correct by
+# construction every time a role is created or Activated. Neither of
+# those can go stale this way; only the long-lived MCP server child can.
+_STALE_CHECK_DIR = Path(__file__).parent.parent.parent / "l4_controller"
+
+
+def _newest_relevant_mtime() -> float:
+    newest = 0.0
+    try:
+        for f in _STALE_CHECK_DIR.glob("*.py"):
+            try:
+                newest = max(newest, f.stat().st_mtime)
+            except OSError:
+                continue
+    except OSError:
+        return 0.0
+    return newest
+
+
+def _role_server_started_at(pid: str) -> float | None:
+    """Real process start time, LOCAL clock (matches file mtimes) --
+    macOS's `ps` has no `etimes` (Linux-only), so this parses `lstart`'s
+    human-readable date instead. Returns None on any parse failure
+    (never guesses)."""
+    result = subprocess.run(["ps", "-o", "lstart=", "-p", pid], capture_output=True, text=True)
+    if result.returncode != 0:
+        return None
+    try:
+        return time.mktime(time.strptime(result.stdout.strip(), "%a %b %d %H:%M:%S %Y"))
+    except ValueError:
+        return None
+
+
+def _role_server_stale(role: str) -> bool:
+    """True when this role's MCP server is running (a stopped role has
+    nothing to be stale) AND it was forked before the newest change
+    anywhere under l4_controller/. PURE READ -- no keystroke, no
+    restart, just two cheap filesystem/process lookups, safe to call
+    every poll tick same as every other role_liveness() check."""
+    pid = _role_server_pid(role)
+    if pid is None:
+        return False
+    started_at = _role_server_started_at(pid)
+    if started_at is None:
+        return False
+    return _newest_relevant_mtime() > started_at
 
 
 def _load() -> dict:
@@ -472,7 +556,7 @@ def role_liveness(role: str) -> dict:
         return {
             "attached": False, "running": False, "liveness": None, "record": None,
             "tools_reachable": False, "cwd_mismatch": False, "found_cwd": None,
-            "prompt_pending": False, "prompt_preview": None,
+            "prompt_pending": False, "prompt_preview": None, "server_stale": False,
         }
 
     live_by_name = {s["session_id"]: s for s in _list_live_sessions()}
@@ -489,6 +573,7 @@ def role_liveness(role: str) -> dict:
             "found_cwd": None,
             "prompt_pending": prompt_pending,
             "prompt_preview": prompt_preview,
+            "server_stale": _role_server_stale(role),
         }
 
     cwd_mismatch = live is not None and live["working_dir"] != record["working_dir"]
@@ -500,7 +585,7 @@ def role_liveness(role: str) -> dict:
     return {
         "attached": True, "running": False, "liveness": liveness, "record": record,
         "tools_reachable": False, "cwd_mismatch": cwd_mismatch, "found_cwd": found_cwd,
-        "prompt_pending": False, "prompt_preview": None,
+        "prompt_pending": False, "prompt_preview": None, "server_stale": False,
     }
 
 

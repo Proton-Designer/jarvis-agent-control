@@ -29,7 +29,7 @@ from staleness import is_stale
 from stream import StreamReader
 from format_helpers import (
     liveness_icon, liveness_color, team_liveness, compact_model_name, role_status_phrase, role_status_icon,
-    is_blocked, is_identity_stale, pending_speech_header, is_prompt_pending,
+    is_blocked, is_identity_stale, pending_speech_header, is_prompt_pending, is_server_stale,
     COLOR_OK, COLOR_WARN, COLOR_ERR, COLOR_ACCENT, COLOR_DIM, COLOR_INK,
 )
 from meter import Meter
@@ -109,6 +109,12 @@ class RailEngine(PlainStatic):
                 # detail lives in Console" split as pending-speech.
                 if is_prompt_pending(slot):
                     text.append("  ⚠ STUCK ON PROMPT", style=f"bold {COLOR_ERR}")
+                # ADVISORY tier (PLAN-silence-and-ux.md R5) -- deliberately
+                # BELOW prompt_pending, never shown alongside it (elif):
+                # a role stuck on a prompt needs attention now; a role
+                # merely running older code does not compete for it.
+                elif live and is_server_stale(slot):
+                    text.append("  code updated since activate", style=COLOR_DIM)
         if stale:
             text.append(_staleness_suffix(), style=COLOR_WARN)
         self.update(text)

@@ -82,6 +82,14 @@ class RoleSlot:
     # LIVENESS_RUNNING, same as tools_reachable above.
     prompt_pending: bool = False
     prompt_preview: str | None = None
+    # docs/PLAN-silence-and-ux.md R5, the 2026-08-20 incident: this
+    # role's MCP server subprocess was forked before the newest change
+    # under l4_controller/ -- coarse (any relevant-directory change, not
+    # real per-module import tracking) and deliberately biased toward
+    # over-flagging, see engine_roles._role_server_stale()'s own
+    # docstring for the full reasoning. Only meaningful when liveness ==
+    # LIVENESS_RUNNING -- a stopped/lost role has no server to be stale.
+    server_stale: bool = False
 
 
 @dataclass

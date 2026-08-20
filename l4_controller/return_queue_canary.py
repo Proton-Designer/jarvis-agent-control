@@ -12,6 +12,12 @@ replaced, because a delayed refusal is equivalent to a lost instruction
 (say_feedback's own docstring). So every batching check has a
 must-stay-immediate counterpart.
 
+Also covers R4 (docs/PLAN-silence-and-ux.md SS1, Opus Lead 3's finding):
+the CAPTURING gate must distinguish a FRESH wake_state.json write from a
+STALE one (a daemon that crashed mid-capture), never trust `state` alone.
+R3 (cross-process flush locking) is NOT covered here -- that needs real
+separate OS processes to mean anything, see return_queue_race_canary.py.
+
 Runs with the flush worker DISABLED (JARVIS_NO_RETURN_QUEUE_WORKER=1)
 and speak() patched -- flushes are driven explicitly here so timing is
 asserted, not raced against.
@@ -135,9 +141,16 @@ def run() -> int:
     wake_path = jarvis_home() / "wake_state.json"
     wake_path.parent.mkdir(parents=True, exist_ok=True)
 
-    wake_path.write_text(json.dumps({"state": "CAPTURING"}))
+    # updated_at IS the point here -- a FRESH write, matching what a
+    # real, live daemon actually writes (~10Hz). Without it, the gate
+    # below (docs/PLAN-silence-and-ux.md SS1 R4) would already, correctly,
+    # treat this as stale and fail toward speaking -- which would make
+    # THIS check (mid-sentence holds the batch) pass for the wrong
+    # reason, or fail outright once R4 landed. Precise freshness is the
+    # setup this check actually needs.
+    wake_path.write_text(json.dumps({"state": "CAPTURING", "updated_at": time.time()}))
     ready3, why3 = rq.ready_to_flush(now=time.time() + rq.SETTLE_S + 1)
-    check("mid-sentence holds the batch -- never interrupt him while he is talking",
+    check("mid-sentence (FRESH write) holds the batch -- never interrupt him while he is talking",
           ready3 is False and "talking" in why3, f"{ready3} {why3!r}")
 
     wake_path.write_text(json.dumps({"state": "IDLE"}))
@@ -149,10 +162,52 @@ def run() -> int:
     check("no daemon at all fails toward SPEAKING -- nothing to interrupt",
           ready5 is True)
 
+    print()
+    print("R4 -- a STALE CAPTURING (crashed mid-capture) must not gate speech forever")
+    # docs/PLAN-silence-and-ux.md SS1 R4 (Opus Lead 3's finding): a daemon
+    # that dies mid-capture leaves "state": "CAPTURING" on disk permanently.
+    # Without a staleness check this reads as "he is still talking" forever
+    # -- indistinguishable from check R4-fresh above, which is exactly the
+    # bug: the ONLY thing that should tell these two apart is updated_at.
+    rq._write([])
+    rq.enqueue("completion", "test item behind a stale CAPTURING flag")
+    stale_at = time.time() - rq.WAKE_STATE_STALE_AFTER_S - 5.0  # comfortably past the threshold
+    wake_path.write_text(json.dumps({"state": "CAPTURING", "updated_at": stale_at}))
+    ready_stale, why_stale = rq.ready_to_flush(now=time.time() + rq.SETTLE_S + 1)
+    check("a STALE CAPTURING write does NOT hold the batch -- fails toward speaking",
+          ready_stale is True, f"{ready_stale} {why_stale!r}")
+
+    # The negative control, same data shape, only updated_at differs --
+    # proves the fresh case above wasn't passing by some other accident
+    # (e.g. missing-file fallthrough) once this file also exercises stale.
+    rq._write([])
+    rq.enqueue("completion", "test item behind a fresh CAPTURING flag")
+    wake_path.write_text(json.dumps({"state": "CAPTURING", "updated_at": time.time()}))
+    ready_fresh, why_fresh = rq.ready_to_flush(now=time.time() + rq.SETTLE_S + 1)
+    check("...while a FRESH CAPTURING write (same run) still correctly holds it",
+          ready_fresh is False and "talking" in why_fresh, f"{ready_fresh} {why_fresh!r}")
+
+    # Malformed updated_at (not a number) must fail toward speaking too,
+    # same as a missing file -- never let a parse error read as "trust
+    # CAPTURING forever."
+    rq._write([])
+    rq.enqueue("completion", "test item behind a malformed updated_at")
+    wake_path.write_text(json.dumps({"state": "CAPTURING", "updated_at": "not-a-number"}))
+    ready_bad, _ = rq.ready_to_flush(now=time.time() + rq.SETTLE_S + 1)
+    check("a malformed updated_at fails toward SPEAKING, not toward trusting CAPTURING",
+          ready_bad is True)
+    wake_path.unlink(missing_ok=True)
+
     # THE BACKSTOP, and it is the assertion that matters most here: the
     # bug was not that one gate was wrong, it was that a stuck gate could
     # hold a message forever with every layer reporting success. Nothing
-    # may outrank this.
+    # may outrank this. Explicitly self-contained (its own enqueue, not
+    # relying on an item left over from an earlier check) -- the R4
+    # checks above clear the queue several times, and a test that depends
+    # on state left behind by unrelated earlier checks is exactly the
+    # kind of fragile ordering this file should not have.
+    rq._write([])
+    rq.enqueue("completion", "test item for the MAX_HOLD_S backstop")
     wake_path.write_text(json.dumps({"state": "CAPTURING"}))
     ready6, _ = rq.ready_to_flush(now=time.time() + rq.MAX_HOLD_S + 1)
     check("past MAX_HOLD_S it speaks even mid-sentence -- no gate may hold a "
@@ -169,7 +224,7 @@ def run() -> int:
         for f in FAILURES:
             print(f"  - {f}")
         return 1
-    print("all 17 checks passed")
+    print("all checks passed")
     return 0
 
 

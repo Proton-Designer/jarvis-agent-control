@@ -225,6 +225,16 @@ class TeamManageScreen(Screen):
         arm_list(listview)
 
     async def _on_relocate_chosen(self, tmux: str) -> None:
+        # docs/PLAN-silence-and-ux.md U2: measured live, 2026-08-20 --
+        # relocate_team_member() takes ~1.2s (one real /status round
+        # trip, per its own docstring). This was the one to_thread call
+        # site in the app with NO immediate feedback before it -- every
+        # other one (engine_flow.py's create/attach, quick_adopt_flow.py,
+        # revive_flow.py, this screen's own _do_refresh_context) already
+        # shows a working-state message first. Same pattern here now.
+        await self._clear()
+        body = self._body()
+        await body.mount(PlainStatic(f"Relocating {tmux}..."))
         result = await asyncio.to_thread(team_actions.relocate_team_member, self.team_id, tmux)
         await self._show_detail_step()
         self.query_one("#team_manage_result", PlainStatic).update(

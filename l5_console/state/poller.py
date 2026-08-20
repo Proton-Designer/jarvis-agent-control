@@ -154,6 +154,7 @@ class Poller:
             found_cwd=liveness.get("found_cwd"),
             prompt_pending=liveness.get("prompt_pending", False),
             prompt_preview=liveness.get("prompt_preview"),
+            server_stale=liveness.get("server_stale", False),
         )
 
     def _loop_engine(self) -> None:

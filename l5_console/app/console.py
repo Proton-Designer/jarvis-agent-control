@@ -34,7 +34,7 @@ from stream import StreamReader
 from format_helpers import (
     liveness_icon, liveness_color, team_liveness, compact_model_name, build_hint_line, role_status_phrase, role_status_icon,
     is_blocked, blocked_for, is_identity_stale, identity_staleness_note, model_effort_suffix,
-    pending_speech_header, pending_speech_kind_glyph, is_prompt_pending, prompt_preview_text,
+    pending_speech_header, pending_speech_kind_glyph, is_prompt_pending, prompt_preview_text, is_server_stale,
     COLOR_OK, COLOR_WARN, COLOR_ERR, COLOR_ACCENT, COLOR_DIM, COLOR_INK,
 )
 from meter import Meter
@@ -354,6 +354,18 @@ class EnginePanel(Widget):
                 text.append("\n")
                 text.append("⚠ stuck on a prompt: ", style=f"bold {COLOR_ERR}")
                 text.append(_truncate(prompt_preview_text(slot), 60), style=COLOR_ERR)
+            # docs/PLAN-silence-and-ux.md R5, the 2026-08-20 incident: a
+            # role's MCP server that was forked before the newest change
+            # under l4_controller/ -- ADVISORY tier, deliberately BELOW
+            # prompt_pending/blocked (dim, not bold, no icon override):
+            # the role is answering fine, it just might be missing a fix
+            # nobody's confirmed it picked up. Names the fix directly --
+            # Activate already respawns the server fresh (it's a child
+            # of the claude process, confirmed live) -- rather than
+            # making Ayman guess what "stale" means to do about it.
+            elif live and is_server_stale(slot):
+                text.append("\n")
+                text.append("code updated since last activate", style=COLOR_DIM)
             w["info"].update(text)
 
             w["create"].display = False
