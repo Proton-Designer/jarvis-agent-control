@@ -97,6 +97,21 @@ def _read() -> list[dict]:
 
 
 def _write(items: list[dict]) -> None:
+    # The guard belongs HERE, not only in enqueue(). Found by a sweep
+    # 2026-08-20: the real ~/.jarvis/return_queue.json reappeared
+    # containing "[]", written by a canary calling _write([]) to reset
+    # itself without isolation. enqueue() was refused correctly; the
+    # reset path went straight through, because I had protected the
+    # function I was thinking about rather than the operation that
+    # actually touches the file.
+    #
+    # Harmless this time -- an empty list is not a message that gets
+    # spoken. But "the guard covers one of two writers" is the same
+    # incompleteness as the denylist that missed /bin/rm, and it is only
+    # harmless by accident: _write() is also how flush_now() persists the
+    # REMAINDER after speaking, so an unisolated test hitting that path
+    # could discard real queued messages.
+    _refuse_if_unisolated_test()
     QUEUE_PATH.parent.mkdir(parents=True, exist_ok=True)
     tmp = QUEUE_PATH.with_suffix(".json.tmp")
     with tmp.open("w") as f:
