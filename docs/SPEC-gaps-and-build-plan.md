@@ -144,6 +144,57 @@ tuple unpacked at two call sites and feeding a `TeamMember` contract, and
 there is no consumer yet. Revisit when §1.1's render exists — that is the
 consumer.
 
+### 1.10 From Engineer 1's L1–L4 audit (2026-08-20)
+
+Merged from the audit; classifications theirs, rulings mine.
+
+- **Instant-ack ordering** — `daemon.py:305` speaks the ack before the
+  concierge preflight at `:341`, so with no concierge attached Ayman
+  hears the receipt, then the failure. **Ruled not-a-bug**: the ack
+  exists to remove silence on the slowest path and asserts receipt only,
+  never outcome. Moving it after the preflight reintroduces the silence
+  the layer exists to prevent.
+  **But the coverage hole underneath it is real and is being fixed**:
+  `instant_ack_canary` passes `orchestrator_target=` explicitly, which
+  skips the concierge-lookup branch entirely, so that path has no canary
+  at all. That is how a bug shipped there this morning — the dry-run path
+  spoke a HIGH-priority failure, which jumps the queue and would have
+  overtaken the ack on a real dictation.
+
+- **Blocked escalation has no L4 trigger** — accurate as scoped, but the
+  escalator lives in L5 (`poller.py:187`), so this is a layering
+  observation rather than a missing feature. Do not build a second one.
+
+- **`latency_log` assumes one dictation at a time** (`:13-17`), which the
+  concurrent-dictation work invalidated. No correlation id. Real, logged,
+  not blocking.
+
+- **`orchestrator_has_tools()` is not session-scoped** — verifies "some
+  server.py is running somewhere" rather than *this* router's
+  (`l2_l3_handoff.py:172-177`, which admits it). Real, logged.
+
+- **No COMPACTING / CONTEXT_FULL pane-state signature** — unverified
+  whether a mid-compaction pane fails safe. Needs live observation before
+  code.
+
+Verified built, reachable AND surfaced: dispatch keying, the tool-surface
+split (checked via import graph), speech serialization, member-identity
+restart detection, cancel-window fail-closed, and `slash_guard`'s three
+hazard classes.
+
+### 1.11 A canary that launches real sessions is load-sensitive
+
+`team_actions_canary` failed twice in one afternoon and passed on
+unloaded re-runs. Chasing it found two genuine bugs — `capture-pane`
+returning only the visible screen (losing the first line of a long
+reply, a real production data-loss path) and a 10s turn-start timeout
+measured on an idle machine. Both fixed.
+
+It still timed out once afterwards on a heavily loaded box. It launches
+real Claude sessions, so the sensitivity is inherent, and neither fix
+claims otherwise. Worth hardening — but the lesson is the one already
+recorded above: "just a flake" is where two real bugs were hiding.
+
 ### 1.9 Deliberately deferred, not gaps
 
 Recorded so nobody "discovers" them as oversights:
