@@ -18,17 +18,34 @@ the small JSON registry that tracks WHICH session is attached needed
 isolating -- that's what actually gets read/written repeatedly and is
 what a crashed or racing canary could clobber.
 
-Checks 1-2 are fast/hermetic (fake tmux names, no real process). Checks
-3-4 are LIVE -- a real `claude --model haiku` launch into the REAL,
-already-configured ~/Jarvis/concierge directory (reusing its existing
-.mcp.json/.claude/settings.local.json, never writing new ones), a real
-kill, and a real --resume relaunch. Uses a uniquely-named throwaway tmux
-session and cleans it up unconditionally -- never touches the real
+Check 0 is the pure-builder guarantee the Lead asked for directly
+(2026-08-20): _build_launch_cmd() and _build_resume_cmd() both delegate
+to the SAME _role_cage_args(role), so "the resume command carries the
+identical cage as the launch command" is assertable as a fast, hermetic
+string comparison -- no live launch required to catch a cage that
+drifted between the two call sites. Checks 1-2 are also fast/hermetic
+(fake tmux names, no real process). Checks 3-4 are LIVE -- a real `claude --session-id <minted uuid> ...` launch at
+the REAL, shared ~/Jarvis cwd (restructured 2026-08-20: both roles now
+launch there directly, not into a per-role subdirectory -- reusing
+~/Jarvis's own already-in-place CLAUDE.md/settings.local.json, never
+writing new ones; only --mcp-config still points into the role's own
+subdirectory, for its static .mcp.json), a real kill, and a real
+--resume relaunch. Uses a uniquely-named throwaway tmux session and
+cleans it up unconditionally -- never touches the real
 jarvis-concierge/jarvis-orchestrator sessions already running on this
 machine. Tests the CONCIERGE path specifically, per the spec's own
 verification wording -- the ORCHESTRATOR path runs through the exact
 same create_role_session()/activate_role() functions, parametrized by
 role, so this is not a second, independent code path to re-prove live.
+
+NOTE: because JARVIS_HOME is deliberately not test-isolated (same
+reasoning as ROLE_HOME before it -- see JARVIS_HOME's own comment in
+engine_roles.py), this canary's two live launches write real transcript
+files into ~/Jarvis's own real project directory
+(~/.claude/projects/-Users-aymanmohammed-Jarvis/), interleaved with
+Ayman's real conversation history there. That's an accepted, unavoidable
+consequence of both roles now sharing that one real cwd -- not a
+regression this canary introduces.
 
 Run after touching engine_roles.py or setup.py's create_fresh_member()
 extension (SLOW -- two real Claude Code launches):
@@ -51,6 +68,7 @@ sys.path.insert(0, str(Path(__file__).parent))
 
 import engine_roles as er  # noqa: E402
 from reconnect import wait_for_ready  # noqa: E402
+from teams import CLAUDE_PROJECTS_DIR, encode_project_path  # noqa: E402
 
 assert "test_runs" in str(er.ENGINE_REGISTRY_PATH), (
     f"ENGINE_REGISTRY_PATH is NOT test-isolated ({er.ENGINE_REGISTRY_PATH}) -- "
@@ -94,6 +112,46 @@ def run() -> int:
     live_tmux_created: list[str] = []
 
     try:
+        # --- 0. The pure builders share the cage by construction --------
+        print("0. _build_launch_cmd()/_build_resume_cmd() share the IDENTICAL cage, by construction")
+        concierge_cage = " ".join(er._role_cage_args("concierge"))
+        orchestrator_cage = " ".join(er._role_cage_args("orchestrator"))
+        check(
+            "concierge cage includes both --allowedTools and --disallowedTools",
+            "--allowedTools" in concierge_cage and "--disallowedTools" in concierge_cage,
+            detail=concierge_cage,
+        )
+        check(
+            "orchestrator cage is --dangerously-skip-permissions, nothing else",
+            orchestrator_cage == "--dangerously-skip-permissions",
+            detail=orchestrator_cage,
+        )
+        check(
+            "neither cage ever mentions the removed --dangerously-load-development-channels flag",
+            "dangerously-load-development-channels" not in concierge_cage and "dangerously-load-development-channels" not in orchestrator_cage,
+        )
+
+        sample_launch = er._build_launch_cmd("concierge", "sample-uuid-launch", "Sample Name", "haiku", "low")
+        sample_resume = er._build_resume_cmd("concierge", {"claude_session": "sample-uuid-launch", "model": "haiku", "effort": "low", "name": "Sample Name"})
+        check(
+            "PURE, no live launch: concierge's launch command ends in the exact same cage string as its resume command",
+            sample_launch.endswith(concierge_cage) and sample_resume.endswith(concierge_cage),
+            detail=f"launch={sample_launch!r}\nresume={sample_resume!r}",
+        )
+
+        sample_launch_o = er._build_launch_cmd("orchestrator", "sample-uuid-o", "Sample O", "sonnet", "high")
+        sample_resume_o = er._build_resume_cmd("orchestrator", {"claude_session": "sample-uuid-o", "model": "sonnet", "effort": "high", "name": "Sample O"})
+        check(
+            "PURE, no live launch: orchestrator's launch command ends in the exact same cage string as its resume command",
+            sample_launch_o.endswith(orchestrator_cage) and sample_resume_o.endswith(orchestrator_cage),
+            detail=f"launch={sample_launch_o!r}\nresume={sample_resume_o!r}",
+        )
+        check(
+            "PURE: _build_resume_cmd() never emits -n/--session-id -- only _build_launch_cmd() establishes a fresh identity",
+            "-n " not in sample_resume and "--session-id" not in sample_resume,
+            detail=sample_resume,
+        )
+
         # Start from a known-empty state for this run.
         er._save({"concierge": None, "orchestrator": None, "name_history": {"concierge": [], "orchestrator": []}})
 
@@ -208,6 +266,25 @@ def run() -> int:
             check("actual argv includes --strict-mcp-config", "--strict-mcp-config" in cmdline, detail=cmdline)
             check("actual argv includes --model haiku", "--model haiku" in cmdline, detail=cmdline)
             check("actual argv includes --effort low", "--effort low" in cmdline, detail=cmdline)
+            check(
+                "actual argv includes --session-id with a real uuid4 (we minted it, never discovered it after launch)",
+                f"--session-id {record['claude_session']}" in cmdline,
+                detail=cmdline,
+            )
+            try:
+                uuid.UUID(record["claude_session"])
+                minted_is_valid_uuid = True
+            except ValueError:
+                minted_is_valid_uuid = False
+            check("the minted claude_session is a well-formed uuid4", minted_is_valid_uuid, detail=record["claude_session"])
+            check("actual argv includes the concierge cage: --permission-mode acceptEdits", "--permission-mode acceptEdits" in cmdline, detail=cmdline)
+            check("actual argv includes --disallowedTools with the full measured list (spot-check: Workflow, CronCreate, RemoteTrigger)", all(t in cmdline for t in ("--disallowedTools", "Workflow", "CronCreate", "RemoteTrigger")), detail=cmdline)
+            check(
+                "actual argv includes --allowedTools with the full measured list (spot-check: list_sessions, handoff_to_router, claude-peers__list_peers) -- required or the concierge hangs on its own tools' permission prompt",
+                all(t in cmdline for t in ("--allowedTools", "mcp__jarvis-l4-readonly__list_sessions", "mcp__jarvis-l4-readonly__handoff_to_router", "mcp__claude-peers__list_peers")),
+                detail=cmdline,
+            )
+            check("actual argv NEVER includes the removed --dangerously-load-development-channels flag", "dangerously-load-development-channels" not in cmdline, detail=cmdline)
 
             # "server_readonly.py" itself never appears in the `claude`
             # process's OWN argv -- that's the DOWNSTREAM MCP server's
@@ -235,9 +312,9 @@ def run() -> int:
                 capture_output=True, text=True,
             ).stdout.strip()
             check(
-                "the session's real cwd is the concierge role subdirectory, not ~/Jarvis itself",
-                live_cwd == str(er.ROLE_HOME["concierge"]),
-                detail=f"got {live_cwd!r}",
+                "the session's real cwd is the shared ~/Jarvis itself, NOT the concierge role subdirectory (restructured 2026-08-20)",
+                live_cwd == er._JARVIS_HOME_RESOLVED,
+                detail=f"got {live_cwd!r}, expected {er._JARVIS_HOME_RESOLVED!r}",
             )
 
             liveness = er.role_liveness("concierge")
@@ -260,6 +337,18 @@ def run() -> int:
             subprocess.run(["tmux", "send-keys", "-t", record["tmux"], "Enter"], capture_output=True)
             wait_for_ready(record["tmux"])
 
+            # The core claim this whole redesign rests on, checked directly
+            # against disk rather than trusted from the Lead's write-up:
+            # `claude --session-id <uuid> ...` really does write the
+            # transcript to exactly `<uuid>.jsonl`, at the SHARED JARVIS_HOME
+            # project directory (not a per-role one).
+            transcript_path = CLAUDE_PROJECTS_DIR / encode_project_path(er._JARVIS_HOME_RESOLVED) / f"{record['claude_session']}.jsonl"
+            check(
+                "the minted uuid's transcript file exists at exactly <uuid>.jsonl under the shared JARVIS_HOME project dir",
+                transcript_path.exists(),
+                detail=str(transcript_path),
+            )
+
             # --- kill it, then Activate should bring back the SAME session --
             print("\n4b. kill the real session, then Activate revives it with the same model+effort")
             subprocess.run(["tmux", "kill-session", "-t", record["tmux"]], capture_output=True)
@@ -279,9 +368,22 @@ def run() -> int:
                 time.sleep(1.0)
                 revived_cmdline = _live_command_line(record["tmux"])
                 check("revived process actual argv includes --resume with the SAME claude_session", f"--resume {record['claude_session']}" in revived_cmdline, detail=revived_cmdline)
+                check("revived process actual argv NEVER includes --session-id (it's a revival, not a fresh identity)", "--session-id" not in revived_cmdline, detail=revived_cmdline)
                 check("revived process actual argv still has --model haiku", "--model haiku" in revived_cmdline, detail=revived_cmdline)
                 check("revived process actual argv still has --effort low (SAME effort)", "--effort low" in revived_cmdline, detail=revived_cmdline)
                 check("revived process actual argv still has --strict-mcp-config", "--strict-mcp-config" in revived_cmdline, detail=revived_cmdline)
+                # THE failure this design has to rule out (the Lead's own
+                # framing): "a revived concierge coming back uncaged."
+                # Checked directly against the real revived process's argv,
+                # not assumed from the code reading the same as create's.
+                check("revived process actual argv still has the concierge cage: --permission-mode acceptEdits", "--permission-mode acceptEdits" in revived_cmdline, detail=revived_cmdline)
+                check("revived process actual argv still has the full --disallowedTools list (spot-check: Workflow, CronCreate, RemoteTrigger)", all(t in revived_cmdline for t in ("--disallowedTools", "Workflow", "CronCreate", "RemoteTrigger")), detail=revived_cmdline)
+                check(
+                    "revived process actual argv still has the full --allowedTools list (spot-check: list_sessions, handoff_to_router, claude-peers__list_peers) -- the exact 'revived uncaged' gap this design has to rule out",
+                    all(t in revived_cmdline for t in ("--allowedTools", "mcp__jarvis-l4-readonly__list_sessions", "mcp__jarvis-l4-readonly__handoff_to_router", "mcp__claude-peers__list_peers")),
+                    detail=revived_cmdline,
+                )
+                check("revived process actual argv NEVER includes the removed --dangerously-load-development-channels flag", "dangerously-load-development-channels" not in revived_cmdline, detail=revived_cmdline)
                 revived_liveness = er.role_liveness("concierge")
                 check(
                     "revived session's tools_reachable is True -- the real server_readonly.py process came back too",

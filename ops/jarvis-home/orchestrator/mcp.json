@@ -6,6 +6,12 @@
       "env": {
         "JARVIS_MUTE": "0"
       }
+    },
+    "claude-peers": {
+      "type": "stdio",
+      "command": "bun",
+      "args": ["/Users/aymanmohammed/claude-peers-mcp/server.ts"],
+      "env": {}
     }
   }
 }
