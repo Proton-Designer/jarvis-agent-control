@@ -154,6 +154,8 @@ class TeamManageScreen(Screen):
             text.append("⚠ no lead assigned\n", style=COLOR_WARN)
         elif not team.lead_reachable:
             text.append("⚠ lead unreachable\n", style=COLOR_WARN)
+        if not team.visible:
+            text.append("○ background -- no window\n", style=COLOR_DIM)
         for m in team.members:
             name = m.tmux or "(not bound)"
             badge = "LEAD " if m.is_lead else "     "
@@ -250,6 +252,24 @@ class TeamManageScreen(Screen):
             f"{'✓' if result['ok'] else '⚠'} {result['detail']}"
         )
 
+    # --- Toggle visible/background (SPEC-gaps-and-build-plan.md §1.6) ------
+
+    async def _do_toggle_visible(self) -> None:
+        team = self._current_team()
+        new_visible = not team.visible
+        result_widget = self.query_one("#team_manage_result", PlainStatic)
+        if new_visible:
+            result_widget.update("Opening a window...")
+        # set_team_visible() shells out (open/osascript) when turning
+        # visible on -- a plain blocking subprocess call, not
+        # asyncio-native, same to_thread discipline as every other
+        # multi-second state-layer call in this app.
+        result = await asyncio.to_thread(team_actions.set_team_visible, self.team_id, new_visible)
+        await self._show_detail_step()
+        self.query_one("#team_manage_result", PlainStatic).update(
+            f"{'✓' if result['ok'] else '⚠'} {result['detail']}"
+        )
+
     # --- Remove team / Refresh context: direct actions, no sub-picker ------
 
     async def _do_remove_team(self) -> None:
@@ -304,5 +324,7 @@ class TeamManageScreen(Screen):
             await self._show_remove_member_step()
         elif bid == "refresh_context":
             await self._do_refresh_context()
+        elif bid == "toggle_visible":
+            await self._do_toggle_visible()
         elif bid == "remove_team":
             await self._do_remove_team()

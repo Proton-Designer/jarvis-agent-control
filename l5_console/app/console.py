@@ -468,6 +468,13 @@ class TeamsPanel(PlainStatic):
                 table.add_row(Text("  ⚠ no lead assigned", style=COLOR_WARN), "", "")
             elif not t.lead_reachable:
                 table.add_row(Text("  ⚠ lead unreachable", style=COLOR_WARN), "", "")
+            # SPEC-gaps-and-build-plan.md §1.6: visible is the default and
+            # the common case, so this row is deliberately silent when
+            # true -- only background (the exception) earns a line, same
+            # "don't clutter the common case" discipline as has_lead/
+            # lead_reachable above.
+            if not t.visible:
+                table.add_row(Text("  ○ background -- no window", style=COLOR_DIM), "", "")
 
             # Per-team context line (SPEC-teams.md SS3) -- dim, truncated,
             # the "(self-described, unverified)" qualifier ONLY for

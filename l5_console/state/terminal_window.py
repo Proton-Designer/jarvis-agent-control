@@ -50,6 +50,7 @@ the session was created.
 
 from __future__ import annotations
 
+import re
 import subprocess
 
 # Order matters: prefer whichever is confirmed actually in use, over
@@ -59,6 +60,59 @@ import subprocess
 # deliberate choice over the OS default; Terminal.app is the final
 # fallback since macOS always has it.
 _CANDIDATE_APPS = ["Ghostty", "iTerm", "Terminal"]
+
+# Every tmux session name that reaches a subprocess or an AppleScript
+# from this module must match this first. Flagged by automated security
+# review 2026-08-20 and confirmed real, with a worse path than the review
+# described.
+#
+# THE THREAT IS NOT HYPOTHETICAL HERE. Session names are not all ours: a
+# team ADOPTED from existing sessions takes its names from whatever
+# `tmux list-sessions` reports, and tmux permits spaces, quotes and shell
+# metacharacters in a session name. More to the point, agents in this
+# system create tmux sessions, and the orchestrator runs with
+# --dangerously-skip-permissions. So a session named
+#     x"; do shell script "curl ..."; --
+# created by a prompt-injected or misbehaving agent, adopted into a team,
+# and later given a window, would execute as AppleScript -- arbitrary
+# code OUTSIDE the tool cage the whole engine design exists to maintain.
+# That is a privilege escalation from "an agent can type into a pane" to
+# "an agent can run anything," which is precisely the bright line
+# SPEC-blockers SS2 draws.
+#
+# Deliberately an allowlist, not an escape or a denylist of dangerous
+# characters: everything this project generates already fits it
+# (claude-concierge-5, jarvis-orchestrator), so a name that does not fit
+# is either hostile or unusable, and refusing is correct in both cases.
+# Anchored with \A and \Z, never ^/$ -- ^/$ match at newlines in Python,
+# so "safe\n\"; do shell script ..." would pass a ^...$ check.
+# First character must be alphanumeric or underscore: a name may CONTAIN
+# "-" but may not START with one. Found by testing this guard rather
+# than trusting it -- the first version allowed "-" anywhere, so the
+# literal session name "-e" passed the allowlist AND opened a real
+# window, which is the exact argv-smuggling case the guard was added
+# for. I had even written a comment below asserting the allowlist
+# excluded a leading dash. It did not. The "--" separators are what
+# actually neutralise it; this makes the allowlist agree with them
+# instead of quietly disagreeing.
+_SAFE_SESSION_NAME = re.compile(r"\A[A-Za-z0-9_][A-Za-z0-9_.-]*\Z")
+
+
+def _reject_unsafe(tmux_session: str) -> dict | None:
+    """None when the name is safe; a ready-to-return refusal dict
+    otherwise. Fails CLOSED -- refuses to open rather than opening
+    something sanitized-and-hopefully-fine."""
+    if not _SAFE_SESSION_NAME.match(tmux_session or ""):
+        return {
+            "ok": False,
+            "opened": False,
+            "detail": (
+                f"refusing to open a window for {tmux_session!r}: a session name must be "
+                "letters, digits, dot, dash or underscore only"
+            ),
+        }
+    return None
+
 
 _OSASCRIPT_TIMEOUT_S = 5.0
 _OPEN_TIMEOUT_S = 10.0
@@ -108,8 +162,15 @@ def has_attached_client(tmux_session: str) -> bool:
     see module docstring. Empty stdout (no error) means no client, not a
     failure -- tmux's own documented behavior for list-clients on a
     session with nothing attached."""
+    # "--" so a session name beginning with "-" is a VALUE, never a
+    # flag. Both guards are kept because they fail differently: the
+    # allowlist refuses the name outright, "--" makes it harmless even if
+    # the allowlist is ever loosened. Injection and argv smuggling are
+    # different bugs and neither guard covers the other.
+    if not _SAFE_SESSION_NAME.match(tmux_session or ""):
+        return False
     result = subprocess.run(
-        ["tmux", "list-clients", "-t", tmux_session],
+        ["tmux", "list-clients", "-t", "--", tmux_session],
         capture_output=True, text=True,
     )
     return bool(result.stdout.strip())
@@ -128,7 +189,7 @@ def _open_ghostty(tmux_session: str) -> dict:
     # has_attached_client(), not by letting `open` decide.
     try:
         result = subprocess.run(
-            ["open", "-na", "Ghostty.app", "--args", "-e", "tmux", "attach", "-t", tmux_session],
+            ["open", "-na", "Ghostty.app", "--args", "-e", "tmux", "attach", "-t", "--", tmux_session],
             capture_output=True, text=True, timeout=_OPEN_TIMEOUT_S,
         )
         if result.returncode != 0:
@@ -145,13 +206,30 @@ def _open_via_applescript(app: str, tmux_session: str) -> dict:
     # UNVERIFIED LIVE: iTerm isn't installed on this machine (see module
     # docstring); this branch is written to the documented AppleScript
     # dictionary shape but has not been driven against a real iTerm.
+    # The session name is passed as an ARGV ARGUMENT and shell-quoted by
+    # AppleScript itself, never interpolated into the script text. With
+    # _SAFE_SESSION_NAME already enforced upstream this is redundant --
+    # deliberately so. The allowlist is the guarantee; this is what stops
+    # a future loosening of that allowlist from silently becoming a
+    # command-injection hole, which is exactly how this class of bug
+    # comes back.
     if app == "Terminal":
-        script = f'tell application "Terminal" to do script "tmux attach -t {tmux_session}"'
+        script = (
+            'on run argv\n'
+            '  tell application "Terminal" to do script '
+            '("tmux attach -t " & quoted form of (item 1 of argv))\n'
+            'end run'
+        )
     else:
-        script = f'tell application "{app}" to create window with default profile command "tmux attach -t {tmux_session}"'
+        script = (
+            'on run argv\n'
+            f'  tell application "{app}" to create window with default profile '
+            'command ("tmux attach -t " & quoted form of (item 1 of argv))\n'
+            'end run'
+        )
     try:
         result = subprocess.run(
-            ["osascript", "-e", script],
+            ["osascript", "-e", script, "--", tmux_session],
             capture_output=True, text=True, timeout=_OPEN_TIMEOUT_S,
         )
         if result.returncode != 0:
@@ -172,6 +250,10 @@ def open_window_for_session(tmux_session: str, app: str | None = None) -> dict:
     `app`: override for testing/callers that already know which app to
     use; production callers should leave this None and let
     detect_terminal_app() decide."""
+    refusal = _reject_unsafe(tmux_session)
+    if refusal is not None:
+        return refusal
+
     if has_attached_client(tmux_session):
         return {"ok": True, "opened": False, "detail": f"{tmux_session!r} already has a window open"}
 
