@@ -31,7 +31,11 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent / "l5_console" / "state"))
 from teams import load_registry  # noqa: E402
 
-from say_feedback import PRIORITY_HIGH, speak  # noqa: E402
+import threading
+import time
+
+from say_feedback import PRIORITY_HIGH, speak, SAY_LOG_PATH
+from latency_log import log_event  # noqa: E402
 
 GENERIC_ACK = "Okay, one sec."
 
@@ -73,7 +77,72 @@ def instant_ack_phrase(transcript: str) -> str:
     return "Okay -- " + " and ".join(names) + "."
 
 
+# How long to wait for a REAL reply before falling back to the ack.
+#
+# Ayman, 2026-08-20: "I don't wanna hear ok one second after I say hello,
+# that's just weird, I need a direct response to my statement not an ack."
+# He is right, and the reasoning behind the old behaviour had expired
+# without anyone noticing.
+#
+# The ack was designed when a reply took 30+ seconds -- one big
+# orchestrator did the thinking, and silence that long is
+# indistinguishable from "it didn't hear me". That problem is real and
+# the ack solved it. But the concierge now answers in ~2.3s (measured
+# live: pointer delivered 16:45:52.053, jarvis_say 16:45:54.398). An
+# announcement that something is coming, two seconds before it arrives,
+# is worse than nothing: it delays the actual answer and makes a fast
+# system feel slow.
+#
+# So the ack becomes a FALLBACK rather than a preamble. If a real reply
+# lands first, he never hears it at all. If nothing has been said by the
+# deadline -- a slow router turn, a wedged concierge, a dispatch that
+# genuinely takes time -- it still fires, and the silence problem it was
+# built for stays solved.
+#
+# 3.0s, slightly above the measured 2.3s: below that a normal answer
+# would race the ack and sometimes lose, which would be the old weirdness
+# reappearing at random.
+ACK_FALLBACK_AFTER_S = 3.0
+
+
 def speak_instant_ack(transcript: str) -> None:
-    """Fire-and-forget entry point -- call this FIRST, before handing the
-    transcript to the concierge tier for real classification/routing."""
-    speak(instant_ack_phrase(transcript), priority=PRIORITY_HIGH)
+    """Speaks the ack ONLY IF nothing else has spoken within
+    ACK_FALLBACK_AFTER_S. Returns immediately; the wait happens on a
+    daemon thread.
+
+    "Has anything been said" is read from say_feedback's own say_log,
+    which every speaker appends to REGARDLESS OF PROCESS -- the concierge
+    answers from inside an MCP server while this runs in the wake daemon,
+    so an in-process flag could not see it. The log is the only signal
+    both sides already share.
+
+    Fails toward SPEAKING: if the log can't be read, the ack fires. A
+    spurious "Okay, one sec." is mildly annoying; silence after a
+    dictation is the failure this whole layer exists to prevent, and that
+    asymmetry is why the ack existed in the first place."""
+    phrase = instant_ack_phrase(transcript)
+    baseline = _say_log_size()
+
+    def _maybe_speak() -> None:
+        time.sleep(ACK_FALLBACK_AFTER_S)
+        now = _say_log_size()
+        if now is None or baseline is None or now > baseline:
+            if now is not None and baseline is not None and now > baseline:
+                # Something real was already said -- he does not need to
+                # be told his words were received by something that has
+                # already replied to them.
+                log_event("instant_ack_suppressed", reason="real_reply_spoke_first")
+                return
+        speak(phrase, priority=PRIORITY_HIGH)
+        log_event("instant_ack_spoken", after_s=ACK_FALLBACK_AFTER_S)
+
+    threading.Thread(target=_maybe_speak, daemon=True, name="instant-ack").start()
+
+
+def _say_log_size() -> int | None:
+    """Byte length of the shared speech log, or None if unreadable.
+    Cheap, and any append at all means somebody spoke."""
+    try:
+        return SAY_LOG_PATH.stat().st_size
+    except OSError:
+        return None

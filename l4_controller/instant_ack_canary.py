@@ -58,6 +58,7 @@ def read_new_say_log_texts(log_path: Path, offset: int) -> list[str]:
 
 def main() -> int:
     results: list[CheckResult] = []
+    from instant_ack import instant_ack_phrase as _ack_phrase
     save_registry(
         [
             {"id": "gateway", "aliases": ["gateway", "the gateway project"], "root": "/tmp/x", "inbox": "", "members": []},
@@ -93,8 +94,16 @@ def main() -> int:
         texts = read_new_say_log_texts(log_path, offset)
         results.append(
             CheckResult(
-                name="ack is the FIRST thing spoken for a live dictation",
-                passed=bool(texts) and texts[0] == "Okay -- gateway.",
+                # WAS "ack is the FIRST thing spoken". The ack is no longer
+                # spoken up front at all -- it is a fallback that fires only
+                # if nothing else speaks within ACK_FALLBACK_AFTER_S (Ayman,
+                # 2026-08-20: "I need a direct response to my statement not
+                # an ack"). So this now asserts the PHRASE CHOICE, which is
+                # what it was really protecting: naming the team he actually
+                # said, never a guess. The timing is asserted separately,
+                # with the clock shortened, in the fallback section below.
+                name="a team-naming dictation produces a team-naming ack phrase",
+                passed=_ack_phrase("tell gateway to run its tests") == "Okay -- gateway.",
                 detail=f"got: {texts}",
             )
         )
@@ -111,7 +120,8 @@ def main() -> int:
         results.append(
             CheckResult(
                 name="both mentioned teams named, in registry order",
-                passed=bool(texts) and texts[0] == "Okay -- gateway and billing.",
+                passed=_ack_phrase("tell gateway and billing to run their tests")
+                == "Okay -- gateway and billing.",
                 detail=f"got: {texts}",
             )
         )
@@ -126,7 +136,7 @@ def main() -> int:
         results.append(
             CheckResult(
                 name="unrecognized transcript gets the generic ack, not a fabricated team name",
-                passed=bool(texts) and texts[0] == "Okay, one sec.",
+                passed=_ack_phrase("what's the weather like today") == "Okay, one sec.",
                 detail=f"got: {texts}",
             )
         )
@@ -149,22 +159,28 @@ def main() -> int:
         texts = read_new_say_log_texts(log_path, offset)
         results.append(
             CheckResult(
-                name="no orchestrator_target + no concierge attached: ack is STILL spoken first",
-                passed=bool(texts) and texts[0] == "Okay -- gateway.",
+                name="no concierge attached: the failure is spoken, and spoken ALONE",
+                passed=bool(texts) and "concierge" in texts[0].lower(),
                 detail=f"got: {texts}",
             )
         )
         results.append(
             CheckResult(
-                name="no orchestrator_target + no concierge attached: the failure follows the ack, never precedes it",
-                passed=len(texts) >= 2 and "concierge" in texts[1].lower() and "attached" in texts[1].lower(),
+                # The ack is now SUPPRESSED here, and that is correct: the
+                # failure message is itself a real reply, so telling him
+                # "Okay, one sec." afterwards would promise work that was
+                # just refused. Previously the ack came first and the
+                # failure second, which was the best available behaviour
+                # when the ack was unconditional.
+                name="...and the ack does NOT also fire -- a refusal is a reply, not a wait",
+                passed=not any("one sec" in t.lower() or t.startswith("Okay -- ") for t in texts),
                 detail=f"got: {texts}",
             )
         )
 
         # --- Never asserts an outcome ---
         outcome_words = ("sending", "sent", "delivered", "dispatching", "routing")
-        ack_text = texts[0] if texts else ""
+        ack_text = _ack_phrase("something with no known team in it")
         results.append(
             CheckResult(
                 name="ack phrase never asserts an outcome (receipt only)",
@@ -172,6 +188,60 @@ def main() -> int:
                 detail=f"ack text: {ack_text!r}",
             )
         )
+
+        # --- The ack is a FALLBACK now, not a preamble (Ayman, 2026-08-20)
+        #
+        # "I don't wanna hear ok one second after I say hello, that's just
+        # weird, I need a direct response to my statement not an ack."
+        #
+        # The ack solved a real problem -- 30+ second silences under the
+        # old single-tier orchestrator -- and that problem stopped
+        # existing when the concierge started answering in ~2.3s.
+        # Announcing that an answer is coming, two seconds before it
+        # arrives, delays the answer and makes a fast system feel slow.
+        #
+        # BOTH DIRECTIONS, and the second is why this wasn't just a
+        # deletion: removing the ack outright is the easy read of his
+        # complaint and the wrong one. The silence it was built for is
+        # still reachable -- a wedged concierge, a genuinely slow router
+        # turn -- and that is exactly the case where he'd be left with
+        # nothing at all.
+        import instant_ack as _ia
+        import unittest.mock as _mock
+        _prev = _ia.ACK_FALLBACK_AFTER_S
+        _ia.ACK_FALLBACK_AFTER_S = 0.4
+        try:
+            with _mock.patch.object(_ia, "speak") as _sp:
+                with _mock.patch.object(_ia, "_say_log_size", side_effect=[100, 250]):
+                    _ia.speak_instant_ack("hello")
+                    time.sleep(0.9)
+            results.append(CheckResult(
+                name="a real reply speaking first SUPPRESSES the ack",
+                passed=not _sp.called,
+                detail=f"speak called: {_sp.called}",
+            ))
+
+            with _mock.patch.object(_ia, "speak") as _sp2:
+                with _mock.patch.object(_ia, "_say_log_size", side_effect=[100, 100]):
+                    _ia.speak_instant_ack("hello")
+                    time.sleep(0.9)
+            results.append(CheckResult(
+                name="but SILENCE still fires it -- the case the ack exists for is not regressed",
+                passed=_sp2.called,
+                detail=f"speak called: {_sp2.called}",
+            ))
+
+            with _mock.patch.object(_ia, "speak") as _sp3:
+                with _mock.patch.object(_ia, "_say_log_size", return_value=None):
+                    _ia.speak_instant_ack("hello")
+                    time.sleep(0.9)
+            results.append(CheckResult(
+                name="an unreadable say_log fails toward SPEAKING, never toward silence",
+                passed=_sp3.called,
+                detail=f"speak called: {_sp3.called}",
+            ))
+        finally:
+            _ia.ACK_FALLBACK_AFTER_S = _prev
 
     finally:
         save_registry([])
@@ -190,6 +260,7 @@ def main() -> int:
         print("\nCANARY FAILED.")
         return 1
     print("\nAll checks passed.")
+
     return 0
 
 
