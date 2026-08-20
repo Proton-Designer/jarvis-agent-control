@@ -12,7 +12,7 @@ Status: `TODO` · `IN PROGRESS` · `BUILT` · `VERIFIED` (canary + driven live) 
 | # | Feature | Owner | Status |
 |---|---------|-------|--------|
 | 1 | Kokoro-82M TTS, British male voice | Engineer 1 | IN PROGRESS |
-| 2 | Small items (3, independent) | Engineer 2 | IN PROGRESS |
+| 2 | Small items (3, independent) | Engineer 2 | **DONE** |
 | 3 | Speech batching | Lead | TODO — blocked on #1 |
 | 4 | Pending-speech panel | — | TODO — blocked on #3 |
 | 5 | Answering a blocked agent by voice | — | TODO — last, largest |
