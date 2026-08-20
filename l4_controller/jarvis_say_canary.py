@@ -17,12 +17,18 @@ Guards four properties, in the order that matters:
    with jarvis_say added -- i.e. adding a speaking tool to the concierge
    did not smuggle in the ability to act.
 
-Runs with the `say` subprocess patched out, NOT with JARVIS_MUTE: mute
-skips the call entirely, which would make every ordering assertion below
-vacuous. Same discipline as speech_queue_canary.py, and the same reason
-it refuses to run muted.
+Runs with say_feedback._speak_now() patched out (the one seam the worker
+calls per item regardless of which backend -- Kokoro or the `say`
+fallback -- would actually produce the audio, 2026-08-20 Kokoro
+rewrite), NOT with JARVIS_MUTE: mute skips the call entirely, which
+would make every ordering assertion below vacuous. Same discipline as
+speech_queue_canary.py, and the same reason it refuses to run muted.
 
-    python3 l4_controller/jarvis_say_canary.py
+MUST run via the venv that has kokoro-onnx installed (2026-08-20 Kokoro
+rewrite) -- say_feedback.py now imports kokoro_tts at module load, which
+needs numpy/onnxruntime:
+
+    l4_controller/.venv/bin/python3 l4_controller/jarvis_say_canary.py
 """
 from __future__ import annotations
 
@@ -35,8 +41,8 @@ from pathlib import Path
 
 if os.environ.get("JARVIS_MUTE") == "1":
     print("REFUSING: do not run this canary with JARVIS_MUTE=1.")
-    print("The subprocess patch below is what keeps it silent; mute skips")
-    print("the `say` call entirely and makes every ordering check vacuous.")
+    print("The _speak_now() patch below is what keeps it silent; mute skips")
+    print("that call entirely and makes every ordering check vacuous.")
     sys.exit(2)
 
 sys.path.insert(0, str(Path(__file__).parent))
@@ -55,25 +61,23 @@ def check(ok: bool, label: str) -> None:
 spoken: list[str] = []
 
 
-def _fake_say(argv, **kwargs):
+def _fake_speak_now(text):
     # Records service order and takes real time, so a genuinely
     # concurrent pair would be caught rather than looking sequential.
-    spoken.append(argv[-1])
+    spoken.append(text)
     time.sleep(0.05)
-    return subprocess.CompletedProcess(argv, 0)
 
 
 print("jarvis_say canary\n")
-# `sf.subprocess` IS the global subprocess module object, so assigning to
-# sf.subprocess.run patches subprocess.run for EVERY module in this
-# process -- including this canary's own probe call in check 4. That is
-# not a hypothetical: it silently made the probe return a fake
-# CompletedProcess with no output, which surfaced as "the security check
-# found nothing" instead of "the security check never ran." A test that
-# sabotages itself and reports a pass is worse than no test.
-# Saved here and restored before check 4 runs.
-_real_subprocess_run = sf.subprocess.run
-sf.subprocess.run = _fake_say
+# Patching sf._speak_now (not sf.subprocess.run) means this canary's own
+# probe subprocess call in check 4 is untouched by the fake -- unlike the
+# old subprocess.run-wide patch, which silently made that probe return a
+# fake CompletedProcess with no output too (found live: surfaced as "the
+# security check found nothing" instead of "the security check never
+# ran" -- a test that sabotages itself and reports a pass is worse than
+# no test). No restore-before-check-4 dance needed any more; the seam is
+# specific to speech, not global to every subprocess call in the process.
+sf._speak_now = _fake_speak_now
 
 print("1. an unknown kind is REFUSED, never silently downgraded")
 r = tools_voice.jarvis_say("something happened", kind="blocked")  # near-miss of blocked_question
@@ -99,7 +103,6 @@ check(idx_block != -1 and idx_done != -1, "both messages were spoken")
 check(idx_block < idx_done, f"blocked_question preempted completion (order: {spoken})")
 
 print("\n4. the read-only surface gained speech but NOT the ability to act")
-sf.subprocess.run = _real_subprocess_run  # see the note at the patch site
 probe = (
     "import sys, server_readonly, asyncio;"
     "t=sorted(x.name for x in asyncio.run(server_readonly.app.list_tools()));"

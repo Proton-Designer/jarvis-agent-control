@@ -27,10 +27,13 @@ still safe today, but one `app.tool()` call away from a leak. (2) alone
 would pass even if someone registered the wrong function under the right
 name. Together they're the actual guarantee.
 
+Already needed l4_controller/.venv (the `mcp` package); also now needed
+for kokoro_tts, imported at module load by say_feedback.py (2026-08-20).
+
 Run after touching server.py, server_readonly.py, tools_read.py, or
 tools_write.py:
 
-    python3 l4_controller/mcp_surface_canary.py
+    l4_controller/.venv/bin/python3 l4_controller/mcp_surface_canary.py
 """
 from __future__ import annotations
 

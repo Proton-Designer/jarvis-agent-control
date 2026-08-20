@@ -29,7 +29,7 @@ from textual.screen import Screen
 from textual.widgets import Button, ListItem, ListView
 
 from widgets import PlainStatic, PlainLabel, arm_list
-from format_helpers import liveness_icon, liveness_color, team_liveness, COLOR_ACCENT, COLOR_DIM, COLOR_WARN
+from format_helpers import liveness_icon, liveness_color, team_liveness, identity_staleness_note, model_effort_suffix, COLOR_ACCENT, COLOR_DIM, COLOR_WARN
 
 sys.path.insert(0, str(Path(__file__).parent.parent / "state"))
 import team_actions  # noqa: E402
@@ -160,7 +160,18 @@ class TeamManageScreen(Screen):
             name = m.tmux or "(not bound)"
             badge = "LEAD " if m.is_lead else "     "
             text.append(f"{badge}", style=f"bold {COLOR_ACCENT}" if m.is_lead else COLOR_DIM)
-            text.append(f"{liveness_icon(m.liveness)} {name}  {m.liveness}\n", style=liveness_color(m.liveness))
+            text.append(f"{liveness_icon(m.liveness)} {name}  {m.liveness}", style=liveness_color(m.liveness))
+            # Same shared function as console.py's TeamsPanel
+            # (TODO-feature-queue.md item 2) -- this detail view didn't
+            # show model at all before, so adding effort "beside" it
+            # meant adding both.
+            suffix = model_effort_suffix(m)
+            if suffix:
+                text.append(f"  ({suffix})", style=COLOR_DIM)
+            stale_note = identity_staleness_note(m)
+            if stale_note:
+                text.append(f"  ({stale_note})", style=COLOR_WARN)
+            text.append("\n")
         if team.context_summary:
             ctx = team.context_summary.strip().splitlines()[0][:200]
             text.append(f"\n{ctx}", style=COLOR_DIM)

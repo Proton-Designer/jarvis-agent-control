@@ -43,10 +43,12 @@ from __future__ import annotations
 
 from mcp.server.mcpserver import MCPServer
 
+import kokoro_tts
 import team_registry_tools
 import tools_read
 import tools_voice
 import tools_write
+from latency_log import log_event
 
 app = MCPServer(name="jarvis-l4-controller")
 
@@ -70,4 +72,19 @@ register_team_fresh = app.tool()(team_registry_tools.register_team_fresh)
 
 
 if __name__ == "__main__":
+    # Warm Kokoro BEFORE serving, not on the first real speak() call --
+    # measured live (kokoro_tts.py's docstring): the first synthesis call
+    # after a fresh model load costs an extra ~1.5s (ONNX Runtime's own
+    # session warmup) on top of ~390ms model load. Paying that here, at
+    # process startup where a couple extra seconds is invisible, is the
+    # whole point -- the alternative is the first thing this session ever
+    # speaks (which could be the instant ack) eating that cost instead,
+    # undermining the exact silence the ack exists to remove. Never
+    # printed to stdout: this process's stdout IS the MCP stdio protocol
+    # stream, and anything written there outside the protocol corrupts
+    # it (the same hazard jarvis_say_canary.py's own probe already
+    # documents). Best-effort and non-fatal either way -- a failed warm
+    # here just means the first real speak() call falls back to `say`
+    # audibly/logged, same as any other Kokoro-unavailable case.
+    log_event("kokoro_tts_warm_startup", **kokoro_tts.warm())
     app.run(transport="stdio")

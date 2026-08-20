@@ -29,7 +29,7 @@ from staleness import is_stale
 from stream import StreamReader
 from format_helpers import (
     liveness_icon, liveness_color, team_liveness, compact_model_name, role_status_phrase, role_status_icon,
-    is_blocked,
+    is_blocked, is_identity_stale,
     COLOR_OK, COLOR_WARN, COLOR_ERR, COLOR_ACCENT, COLOR_DIM, COLOR_INK,
 )
 from meter import Meter
@@ -133,12 +133,25 @@ class RailTeams(PlainStatic):
         if blocked_members:
             text.append(f"  {len(blocked_members)} blocked", style=f"bold {COLOR_ERR}")
 
+        # Same aggregate-count shape as blocked, for the same reason:
+        # Rail has no per-member rows to attach a note to, so a count
+        # plus a pointer at Console (where the per-member "unverified
+        # since Xm" note lives) is the most this width can honestly
+        # carry. Deliberately not bold/COLOR_ERR like blocked -- this is
+        # "worth a glance," not "work has stopped."
+        stale_members = [m for t in teams for m in t.members if is_identity_stale(m)]
+        if stale_members:
+            text.append(f"  {len(stale_members)} unverified", style=COLOR_WARN)
+
         for t in teams:
             text.append(f"\n  {liveness_icon(team_liveness(t))} {t.id}", style=liveness_color(team_liveness(t)))
             text.append(f" ({len(t.members)})", style=COLOR_DIM)
             n = sum(1 for m in t.members if is_blocked(m))
             if n:
                 text.append(f"  ⚠ {n} blocked", style=f"bold {COLOR_ERR}")
+            u = sum(1 for m in t.members if is_identity_stale(m))
+            if u:
+                text.append(f"  {u} unverified", style=COLOR_WARN)
         self.update(text)
 
 
@@ -170,7 +183,12 @@ class RailUnassigned(PlainStatic):
         if not unassigned:
             self.update("")
             return
-        self.update(Text(f"⚑ {len(unassigned)} unassigned session(s) -- press 'a' to adopt", style=COLOR_WARN))
+        # 'u', not 'a' -- TODO-feature-queue.md item 3: [u] is the
+        # one-keystroke quick-adopt path (quick_adopt_flow.py), [a] is
+        # the full multi-step wizard. This is the exact spot Ayman
+        # discovers an unassigned session, so it should point at the
+        # fast path, not the deliberate one.
+        self.update(Text(f"⚑ {len(unassigned)} unassigned session(s) -- press 'u' to adopt", style=COLOR_WARN))
 
 
 class Rail(Widget):

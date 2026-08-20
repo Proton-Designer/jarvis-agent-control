@@ -33,7 +33,7 @@ from staleness import is_stale
 from stream import StreamReader
 from format_helpers import (
     liveness_icon, liveness_color, team_liveness, compact_model_name, build_hint_line, role_status_phrase, role_status_icon,
-    is_blocked, blocked_for,
+    is_blocked, blocked_for, is_identity_stale, identity_staleness_note, model_effort_suffix,
     COLOR_OK, COLOR_WARN, COLOR_ERR, COLOR_ACCENT, COLOR_DIM, COLOR_INK,
 )
 from meter import Meter
@@ -507,14 +507,13 @@ class TeamsPanel(PlainStatic):
                 # dedicated column risks crowding at real terminal
                 # widths sooner than a dim inline suffix does.
                 activity = m.activity or ("idle" if m.liveness == LIVENESS_RUNNING else "")
-                if m.model:
-                    # compact_model_name(), not the raw m.model -- an
-                    # adopted member's model comes back from /status as
-                    # "Opus (claude-opus-5)" verbatim (found live
-                    # building Engine's own equivalent column), which
-                    # doesn't fit a compact inline suffix.
-                    model_short = compact_model_name(m.model)
-                    activity = f"{activity} · {model_short}" if activity else model_short
+                # Model + effort folded together, one shared function
+                # (TODO-feature-queue.md item 2) -- see
+                # format_helpers.model_effort_suffix()'s own docstring
+                # for why either half is omitted, never a placeholder.
+                suffix = model_effort_suffix(m)
+                if suffix:
+                    activity = f"{activity} · {suffix}" if activity else suffix
                 # A blocked member is NOT a busy one. SPEC-blockers.md
                 # SS6: work has stopped and something is required, and it
                 # should be the most prominent thing on screen -- more
@@ -566,6 +565,20 @@ class TeamsPanel(PlainStatic):
                     q.append(_truncate(m.blocked_question.replace("\n", " "), 68), style=COLOR_WARN)
                     table.add_row(q, "", "")
 
+                # identity_verified_at (SPEC-teams.md SS2, TODO-feature-
+                # queue.md item 2): a member that LOOKS active while its
+                # identity hasn't been re-verified in a while is the
+                # false-confident-active case the spec names by name.
+                # Own line, same shape as the blocked-question line above
+                # -- deliberately less alarming (plain COLOR_WARN, no
+                # bold, no icon in the legend) since this is "worth a
+                # glance," not "work has stopped."
+                stale_note = identity_staleness_note(m)
+                if stale_note:
+                    note = Text("     ", style=COLOR_DIM)
+                    note.append(stale_note, style=COLOR_WARN)
+                    table.add_row(note, "", "")
+
         if unassigned:
             table.add_row("", "", "")
             table.add_row(Text(f"⚑ {len(unassigned)} unassigned", style=COLOR_WARN), "", "")
@@ -592,7 +605,7 @@ class TeamsPanel(PlainStatic):
         # on styling. Deliberately a LIST here, not two separate calls,
         # so a future action (remove, swap-lead) is one more tuple, not
         # a rewrite of this section.
-        hints = build_hint_line([("a", "add team"), ("r", "reconnect"), ("t", "manage teams")])
+        hints = build_hint_line([("a", "add team"), ("u", "adopt a session"), ("r", "reconnect"), ("t", "manage teams")])
 
         grid = Table.grid(padding=(1, 0, 0, 0))
         grid.add_row(table)

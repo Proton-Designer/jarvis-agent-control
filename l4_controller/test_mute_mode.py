@@ -12,7 +12,10 @@ at all, with the correct timeout, regardless of MUTE. Verified by
 monkeypatching cancel_listener.listen_for_cancel to record the call
 instead of timing wall-clock elapsed time.
 
-Run with: JARVIS_MUTE=1 python3 test_mute_mode.py
+Run with: JARVIS_MUTE=1 l4_controller/.venv/bin/python3
+l4_controller/test_mute_mode.py -- MUST use the venv (2026-08-20:
+say_feedback.py now imports kokoro_tts at module load, which needs
+numpy, even though mute means _speak_now() itself never runs here).
 """
 
 from __future__ import annotations

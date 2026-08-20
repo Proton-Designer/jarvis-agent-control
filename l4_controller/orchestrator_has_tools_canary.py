@@ -21,9 +21,11 @@ Asserts BOTH directions -- a canary that only proves the happy path
 protects nothing.
 
 Run after touching l2_l3_handoff.py's orchestrator_has_tools()/
-_looks_like_real_server_process():
+_looks_like_real_server_process(). MUST run via l4_controller/.venv
+(2026-08-20: say_feedback.py now imports kokoro_tts at module load,
+transitively pulled in through l2_l3_handoff.py).
 
-    python3 l4_controller/orchestrator_has_tools_canary.py
+    l4_controller/.venv/bin/python3 l4_controller/orchestrator_has_tools_canary.py
 """
 from __future__ import annotations
 

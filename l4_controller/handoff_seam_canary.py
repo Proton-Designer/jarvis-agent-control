@@ -26,9 +26,12 @@ Three failure modes, each asserted to speak an explicit, distinct message
 Plus the happy path, proving the ack is spoken, the pointer is delivered,
 and dispatch_state ends up "forwarded" under the dictation's own ref.
 
+MUST run via l4_controller/.venv (2026-08-20: say_feedback.py now imports
+kokoro_tts at module load, transitively pulled in through transport.py).
+
 Run after touching l2_l3_handoff.py or dispatch_state.py:
 
-    python3 l4_controller/handoff_seam_canary.py
+    l4_controller/.venv/bin/python3 l4_controller/handoff_seam_canary.py
 """
 from __future__ import annotations
 

@@ -1,6 +1,17 @@
 """
-Spoken feedback via macOS `say`, and the parallel echo+cancel-window
-primitive used for plan confirmation.
+Spoken feedback via Kokoro-82M (docs/TODO-feature-queue.md #1), and the
+parallel echo+cancel-window primitive used for plan confirmation.
+
+KOKORO IS PRIMARY, `say` IS THE FALLBACK ONLY. Every queued item goes
+through kokoro_tts.py first; `say` runs only when Kokoro fails to load
+or a specific synthesis call errors. The fallback is never silent: it
+speaks in a different (lesser) voice, which is itself an audible signal
+something changed, AND every fallback is logged via latency_log's
+`kokoro_tts_fallback` event (grep-able, and what the fallback canary
+asserts against) -- a silent degrade to the old voice is exactly the
+failure class this project keeps finding and ruling against. See
+_speak_now()'s docstring and kokoro_tts.py's module docstring for the
+measured cold-start/warm-latency numbers this design is based on.
 
 Every refusal, delivery, and batch summary is spoken — a refusal Ayman
 doesn't hear is functionally identical to a lost instruction, and with auto
@@ -79,6 +90,7 @@ import threading
 import time
 from pathlib import Path
 
+import kokoro_tts
 from cancel_listener import listen_for_cancel
 from latency_log import log_event
 
@@ -88,15 +100,21 @@ from jarvis_paths import jarvis_home  # noqa: E402
 MUTE = os.environ.get("JARVIS_MUTE", "0") == "1"
 SAY_LOG_PATH = jarvis_home() / "say_log.jsonl"
 
-# Default `say` voice is a novelty/robotic system voice (Fred/Alex-class),
-# not something meant to be heard on every turn. Samantha is the best
-# quality voice actually installed on this machine (checked via `say -v
-# '?'` — no Siri/Enhanced/Premium voices are downloaded locally; those
-# require a one-time System Settings > Accessibility > Spoken Content
-# download this can't trigger headlessly). Overridable via JARVIS_VOICE so
-# picking a downloaded premium voice later is a config change, not a code
-# change.
-VOICE = os.environ.get("JARVIS_VOICE", "Samantha")
+# Kokoro's own voice (kokoro_tts.py:DEFAULT_VOICE, "bm_george" -- see that
+# module's docstring for why, over the equally-graded bm_fable and the
+# lower-graded bm_daniel/bm_lewis). Overridable so a later ear-check
+# result (Ayman's, or a future voice) is a config change, not a code one.
+KOKORO_VOICE = os.environ.get("JARVIS_KOKORO_VOICE", kokoro_tts.DEFAULT_VOICE)
+
+# FALLBACK-ONLY now (Kokoro is primary -- see _speak_now()). "Daniel" is
+# real macOS British-male voice (verified live via `say -v '?'`, en_GB,
+# installed by default -- confirmed present on this machine, no download
+# needed) -- chosen so even a degraded fallback keeps the voice
+# CHARACTER Ayman actually asked for (British male), rather than jumping
+# to an unrelated American female voice on the one path that's already
+# a worse experience. Previously "Samantha", back when `say` was the
+# only voice this module had. Overridable via JARVIS_VOICE.
+VOICE = os.environ.get("JARVIS_VOICE", "Daniel")
 
 PRIORITY_HIGH = 0    # refusals, cancel-window confirmations -- timing/safety-sensitive
 PRIORITY_NORMAL = 1  # everything else; the default for untouched call sites
@@ -135,14 +153,14 @@ def _ensure_worker_started() -> None:
 
 def _worker_loop() -> None:
     """Services _speech_queue forever, one item at a time, lowest
-    priority-number first, FIFO within a tie (the seq field). Runs `say`
-    SYNCHRONOUSLY (subprocess.run, not Popen) so the next item can never
-    start until this one's audio has actually finished -- that's the
-    entire serialization guarantee. A per-item exception is caught and
-    logged rather than killing the worker: a dead worker thread means
-    every future speak() call silently stops producing audio forever,
-    which is exactly the kind of failure this project's own rules say
-    must never be silent."""
+    priority-number first, FIFO within a tie (the seq field). Runs
+    _speak_now() SYNCHRONOUSLY so the next item can never start until
+    this one's audio has actually finished -- that's the entire
+    serialization guarantee, unchanged by the Kokoro rewrite. A per-item
+    exception is caught and logged rather than killing the worker: a
+    dead worker thread means every future speak() call silently stops
+    producing audio forever, which is exactly the kind of failure this
+    project's own rules say must never be silent."""
     while True:
         _priority, _seq, text, on_start = _speech_queue.get()
         try:
@@ -156,11 +174,43 @@ def _worker_loop() -> None:
             if on_start is not None:
                 on_start()
             if not MUTE:
-                subprocess.run(["say", "-v", VOICE, text], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                _speak_now(text)
         except Exception as e:  # noqa: BLE001
             log_event("say_feedback_worker_error", error=str(e), text_chars=len(text))
         finally:
             _speech_queue.task_done()
+
+
+def _speak_now(text: str) -> None:
+    """The ONE place audio actually plays. Kokoro is tried first; `say`
+    is the fallback ONLY when Kokoro is unavailable (missing model
+    files, a load failure) or this specific synthesis call errors --
+    never a silent degrade, see the module docstring. Canaries patch
+    THIS function (not the subprocess calls inside it, and not
+    kokoro_tts directly) so ordering/priority/mute tests stay decoupled
+    from which backend actually produced the audio -- see
+    speech_queue_canary.py and jarvis_say_canary.py.
+
+    Every call is reported via latency_log (`kokoro_tts_ok` with the
+    measured synthesis time, or `kokoro_tts_fallback` with the error) --
+    this is the "audible or logged" requirement's LOGGED half; the
+    audible half is that a fallback genuinely sounds different (Daniel
+    via `say`, not Kokoro's bm_george), which Ayman can hear without
+    reading a log at all."""
+    t0 = time.monotonic()
+    try:
+        wav_path = kokoro_tts.synthesize_to_wav(text, voice=KOKORO_VOICE)
+    except Exception as e:  # noqa: BLE001 -- kokoro_tts.KokoroUnavailable, or anything else it didn't anticipate
+        log_event("kokoro_tts_fallback", error=str(e), text_chars=len(text))
+        subprocess.run(["say", "-v", VOICE, text], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        return
+
+    synth_ms = (time.monotonic() - t0) * 1000
+    log_event("kokoro_tts_ok", synth_ms=round(synth_ms, 1), text_chars=len(text), voice=KOKORO_VOICE)
+    try:
+        subprocess.run(["afplay", str(wav_path)], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    finally:
+        wav_path.unlink(missing_ok=True)
 
 
 def _enqueue(text: str, priority: int, on_start=None) -> None:

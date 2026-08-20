@@ -23,9 +23,12 @@ mismatched member gets an audible flag AND still receives its delivery --
 never silently blocked, never silently proceeding as though nothing
 happened.
 
+MUST run via l4_controller/.venv (2026-08-20: say_feedback.py now imports
+kokoro_tts at module load, transitively pulled in through tools_write.py).
+
 Run after touching member_identity.py or tools_write.py's use of it:
 
-    python3 l4_controller/member_identity_canary.py
+    l4_controller/.venv/bin/python3 l4_controller/member_identity_canary.py
 """
 from __future__ import annotations
 

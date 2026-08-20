@@ -50,9 +50,19 @@ import setup as setup_state  # noqa: E402
 import team_actions  # noqa: E402
 import teams as teams_state  # noqa: E402
 import api as state  # noqa: E402
+import engine_roles  # noqa: E402
 
 FRESH_TEAM_MODELS = ["sonnet", "opus"]
 FRESH_TEAM_COUNTS = [1, 2, 3, 4, 5]
+# Reuses engine_roles.EFFORTS -- one vocabulary for "effort" across the
+# whole app rather than a second list that could silently drift from it.
+# "medium" as the default, not a per-role default the way Engine has
+# (concierge=medium, orchestrator=high): teams aren't roles, there's no
+# equivalent latency/depth split to key a default off of, and medium is
+# already the least-surprising middle choice for a general-purpose team
+# member (TODO-feature-queue.md item 2, 2026-08-20).
+FRESH_TEAM_EFFORTS = list(engine_roles.EFFORTS)
+FRESH_TEAM_DEFAULT_EFFORT = "medium"
 
 # Hidden directories (dotfiles) never appear in the walker -- noise, not
 # a real project root in the overwhelming majority of cases, and this is
@@ -101,6 +111,7 @@ class SetupScreen(Screen):
         self.inbox_tmux: str | None = None
         self.fresh_model: str = FRESH_TEAM_MODELS[0]
         self.fresh_count: int = 1
+        self.fresh_effort: str = FRESH_TEAM_DEFAULT_EFFORT
         self._walker_dir: Path = _WALKER_START
 
     def compose(self) -> ComposeResult:
@@ -134,10 +145,11 @@ class SetupScreen(Screen):
 
         The count is branch-dependent and that is why a single hardcoded
         total was never right: adopting runs 4 steps, a fresh team runs
-        6. Derived from self.kind rather than duplicated per screen, so
+        7 (added an EFFORT step, TODO-feature-queue.md item 2 -- was 6).
+        Derived from self.kind rather than duplicated per screen, so
         adding a step means changing one number here instead of finding
         every title that mentions it."""
-        total = 4 if self.kind == "adopt" else 6
+        total = 4 if self.kind == "adopt" else 7
         return f"STEP {n} OF {total} — {label}"
 
     # --- Step 1: which kind (§5.1 step 1) ---------------------------------
@@ -355,15 +367,33 @@ class SetupScreen(Screen):
         arm_list(listview)
 
     async def _on_fresh_model_chosen(self, model: str) -> None:
-        await self._launch_fresh_members(self.root, self.fresh_count, model)
+        self.fresh_model = model
+        await self._show_fresh_effort_step()
 
-    async def _launch_fresh_members(self, root: str, count: int, model: str) -> None:
+    async def _show_fresh_effort_step(self) -> None:
+        await self._clear()
+        body = self._body()
+        body.border_title = self._step_title(5, "FRESH · EFFORT")
+        await body.mount(PlainStatic("Effort for all agents?"))
+        listview = ListView(id="fresh_effort_list")
+        await body.mount(listview)
+        for e in FRESH_TEAM_EFFORTS:
+            label = e.capitalize() + ("  (default)" if e == self.fresh_effort else "")
+            await listview.append(ListItem(PlainLabel(label), name=e))
+        await body.mount(Button("Back", id="back_to_fresh_model"))
+        arm_list(listview)
+
+    async def _on_fresh_effort_chosen(self, effort: str) -> None:
+        self.fresh_effort = effort
+        await self._launch_fresh_members(self.root, self.fresh_count, self.fresh_model, effort)
+
+    async def _launch_fresh_members(self, root: str, count: int, model: str, effort: str) -> None:
         await self._show_loading(f"Launching {count} agent(s) in {root}...")
         base = _slugify(Path(root).name)
         results = []
         for i in range(1, count + 1):
             tmux_name = f"claude-{base}-{i}" if count > 1 else f"claude-{base}"
-            result = setup_state.create_fresh_member(tmux_name, root, model)
+            result = setup_state.create_fresh_member(tmux_name, root, model, effort=effort)
             results.append((tmux_name, result))
 
         # create_fresh_member resolves `root` internally (symlinked
@@ -388,7 +418,7 @@ class SetupScreen(Screen):
             if succeeded:
                 await body.mount(PlainStatic(f"{len(succeeded)} did come up -- you can still form a team from those, or cancel."))
                 self.candidates = [
-                    {"tmux": name, "claude_session": r["claude_session"], "model": model, "summary": "(freshly created, no summary yet)"}
+                    {"tmux": name, "claude_session": r["claude_session"], "model": model, "effort": effort, "summary": "(freshly created, no summary yet)"}
                     for name, r in succeeded
                 ]
                 continue_button = Button("Continue with the ones that came up", id="continue_partial")
@@ -399,7 +429,7 @@ class SetupScreen(Screen):
             return
 
         self.candidates = [
-            {"tmux": name, "claude_session": r["claude_session"], "model": model, "summary": "(freshly created, no summary yet)"}
+            {"tmux": name, "claude_session": r["claude_session"], "model": model, "effort": effort, "summary": "(freshly created, no summary yet)"}
             for name, r in results
         ]
         await self._show_inbox_step()
@@ -409,7 +439,7 @@ class SetupScreen(Screen):
     async def _show_inbox_step(self) -> None:
         await self._clear()
         body = self._body()
-        body.border_title = self._step_title(3 if self.kind == "adopt" else 5, "WHO RECEIVES INSTRUCTIONS")
+        body.border_title = self._step_title(3 if self.kind == "adopt" else 6, "WHO RECEIVES INSTRUCTIONS")
         listview = ListView(id="inbox_list")
         await body.mount(listview)
         for c in self.candidates:
@@ -433,7 +463,7 @@ class SetupScreen(Screen):
     async def _show_alias_step(self) -> None:
         await self._clear()
         body = self._body()
-        body.border_title = self._step_title(4 if self.kind == "adopt" else 6, "WHAT DO YOU CALL IT")
+        body.border_title = self._step_title(4 if self.kind == "adopt" else 7, "WHAT DO YOU CALL IT")
         default_id = _slugify(Path(self.root).name) if self.root else "team"
         await body.mount(PlainStatic("Team id (short, no spaces) -- confirm the default, or edit it:"))
         id_input = Input(value=default_id, id="team_id_input")
@@ -457,10 +487,16 @@ class SetupScreen(Screen):
         # the model step's own selection) -- found live 2026-08-18 that
         # dropping it here meant TeamsPanel's "activity · model" column
         # rendered with no model at all despite it being right there in
-        # self.candidates the whole time. Never send "effort": nothing
-        # in either flow asks for it today, and SPEC-teams.md SS6 is
-        # explicit that a real None is correct here, not a value to
-        # invent.
+        # self.candidates the whole time.
+        #
+        # effort: c.get("effort") is None for every ADOPTED candidate --
+        # never set, never invented. Verified live 2026-08-20 (a real
+        # scratch session launched with --effort high, then queried via
+        # /status): the raw view has no Effort field at all, confirming
+        # SPEC-teams.md SS6's note that /status does not expose it. FRESH
+        # candidates carry the real value chosen at the effort step
+        # (TODO-feature-queue.md item 2) -- the two paths differ in what
+        # they KNOW, not in whether this line trusts them.
         # Checked HERE, before create_team(), so a name clash is a
         # correctable mistake inside the flow rather than a thrown
         # ValueError at the end of it. On the fresh path the sessions are
@@ -477,7 +513,10 @@ class SetupScreen(Screen):
                 await body.mount(PlainStatic(f"⚠ {alias_check['detail']} -- pick another alias."))
                 return
 
-        members = [{"tmux": c["tmux"], "claude_session": c["claude_session"], "model": c.get("model")} for c in self.candidates]
+        members = [
+            {"tmux": c["tmux"], "claude_session": c["claude_session"], "model": c.get("model"), "effort": c.get("effort")}
+            for c in self.candidates
+        ]
         try:
             setup_state.create_team(team_id, aliases, self.root, self.inbox_tmux, members)
         except ValueError as e:
@@ -512,6 +551,8 @@ class SetupScreen(Screen):
             await self._show_fresh_directory_step()
         elif bid == "back_to_fresh_count":
             await self._show_fresh_count_step()
+        elif bid == "back_to_fresh_model":
+            await self._show_fresh_model_step()
         elif bid == "continue_partial":
             await self._show_inbox_step()
         elif bid == "finish_submit":
@@ -538,3 +579,5 @@ class SetupScreen(Screen):
             await self._on_fresh_count_chosen(chosen_name)
         elif list_id == "fresh_model_list":
             await self._on_fresh_model_chosen(chosen_name)
+        elif list_id == "fresh_effort_list":
+            await self._on_fresh_effort_chosen(chosen_name)

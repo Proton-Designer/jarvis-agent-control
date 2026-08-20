@@ -47,6 +47,7 @@ from setup_flow import SetupScreen  # noqa: E402
 from reconnect_flow import ReconnectScreen  # noqa: E402
 from revive_flow import ReviveScreen  # noqa: E402
 from team_flow import TeamManageScreen  # noqa: E402
+from quick_adopt_flow import QuickAdoptScreen  # noqa: E402
 from quit_warning import QuitWarningScreen  # noqa: E402
 import wake_control  # noqa: E402
 
@@ -83,6 +84,7 @@ class JarvisConsole(App):
     CSS_PATH = "app.tcss"
     BINDINGS = [
         ("a", "add_team", "Add team"),
+        ("u", "quick_adopt", "Adopt a session"),
         ("r", "reconnect", "Reconnect"),
         ("v", "revive_everything", "Revive everything"),
         ("t", "manage_teams", "Manage teams"),
@@ -92,6 +94,14 @@ class JarvisConsole(App):
 
     def action_add_team(self) -> None:
         self.push_screen(SetupScreen())
+
+    def action_quick_adopt(self) -> None:
+        # SPEC-TUI.md §6 / TODO-feature-queue.md item 3: assigning a
+        # KNOWN unassigned session should be one keystroke, distinct from
+        # [a]'s full deliberate-setup wizard -- see quick_adopt_flow.py's
+        # own docstring for why this is a separate screen rather than a
+        # fast-path branch bolted onto SetupScreen.
+        self.push_screen(QuickAdoptScreen())
 
     def action_reconnect(self) -> None:
         self.push_screen(ReconnectScreen())
@@ -150,7 +160,7 @@ class JarvisConsole(App):
         # slipping through the per-widget fix. len(screen_stack) > 1
         # means a SetupScreen/ReconnectScreen is pushed on top of the
         # base Rail/Console/Signal screen.
-        if action in ("add_team", "reconnect", "revive_everything", "manage_teams") and len(self.screen_stack) > 1:
+        if action in ("add_team", "quick_adopt", "reconnect", "revive_everything", "manage_teams") and len(self.screen_stack) > 1:
             return False
         return True
 

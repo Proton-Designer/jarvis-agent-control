@@ -6,22 +6,27 @@ never run concurrently, and priority order is honored") is exactly the
 kind of thing that looks fine in isolation and only breaks under real
 concurrent load, which unit tests of a single call can't exercise.
 
-Monkeypatches the actual `subprocess.run` call say_feedback's worker
-makes, so this never makes the laptop talk and never depends on real
-`say` timing -- an artificial delay is injected instead, which is what
-actually lets check 1 detect overlap (with instant no-op calls, two
-threads racing to "speak" would never observably collide even if the
-code had zero serialization). Deliberately does NOT set JARVIS_MUTE=1:
-mute skips the `say` call entirely (`if not MUTE: subprocess.run(...)`),
-which would make the patched fake never run at all and every timing/
-ordering check below silently vacuous -- the patch on subprocess.run is
-what keeps this silent, not mute. Also monkeypatches
-say_feedback.listen_for_cancel so check 5 doesn't depend on L1's real
-cancel socket being up.
+Monkeypatches say_feedback._speak_now() -- the one seam the worker calls
+per item regardless of which backend (Kokoro or the `say` fallback)
+would actually produce the audio (2026-08-20 Kokoro rewrite) -- so this
+never makes the laptop talk and never depends on real synthesis/`say`
+timing. An artificial delay is injected instead, which is what actually
+lets check 1 detect overlap (with instant no-op calls, two threads
+racing to "speak" would never observably collide even if the code had
+zero serialization). Deliberately does NOT set JARVIS_MUTE=1: mute skips
+the call entirely (`if not MUTE: _speak_now(text)`), which would make
+the patched fake never run at all and every timing/ordering check below
+silently vacuous -- the patch on _speak_now is what keeps this silent,
+not mute. Also monkeypatches say_feedback.listen_for_cancel so check 5
+doesn't depend on L1's real cancel socket being up.
 
-Run after touching say_feedback.py:
+Run after touching say_feedback.py. MUST run via the venv that has
+kokoro-onnx installed (2026-08-20 Kokoro rewrite) -- say_feedback.py now
+imports kokoro_tts at module load, which needs numpy/onnxruntime, so a
+bare system `python3` fails at import with ModuleNotFoundError before
+this canary's own code ever runs:
 
-    python3 l4_controller/speech_queue_canary.py
+    l4_controller/.venv/bin/python3 l4_controller/speech_queue_canary.py
 """
 from __future__ import annotations
 
@@ -35,15 +40,15 @@ from pathlib import Path
 if os.environ.get("JARVIS_MUTE") == "1":
     # Fails LOUD and specific here, not as a confusing downstream timing
     # assertion -- found live (the Lead, first run): running this muted
-    # made the `subprocess.run` patch below never fire at all (mute skips
+    # made the _speak_now() patch below never fire at all (mute skips
     # that call entirely), so every timing/ordering check quietly measured
     # nothing and failed on the arming assertion with no clue why. A test
     # whose failure doesn't say what's wrong teaches the next person to
     # distrust it rather than fix their invocation.
     print(
         "REFUSING TO RUN: this canary must not run under JARVIS_MUTE=1. "
-        "The subprocess.run patch below is what keeps it silent, not mute -- "
-        "under mute, say_feedback's worker skips the `say` call entirely, so "
+        "The _speak_now() patch below is what keeps it silent, not mute -- "
+        "under mute, say_feedback's worker skips that call entirely, so "
         "the patched fake never runs and every timing/ordering check in this "
         "file becomes vacuous. Unset JARVIS_MUTE and run again."
     )
@@ -78,7 +83,7 @@ def read_log_texts() -> list[str]:
     return [json.loads(line)["text"] for line in lines if line.strip()]
 
 
-# --- Instrumented fake `say` process: records overlap, adds a real delay
+# --- Instrumented fake _speak_now(): records overlap, adds a real delay
 # so two truly-concurrent invocations would actually be caught racing ----
 _active = 0
 _active_lock = threading.Lock()
@@ -86,9 +91,8 @@ _max_concurrent = 0
 _call_log: list[tuple[str, float]] = []  # (text, wall-clock start time)
 
 
-def _fake_subprocess_run(args, **kwargs):
+def _fake_speak_now(text):
     global _active, _max_concurrent
-    text = args[-1]
     with _active_lock:
         _active += 1
         _max_concurrent = max(_max_concurrent, _active)
@@ -102,7 +106,7 @@ def run() -> int:
     print("say_feedback speech-queue canary\n")
     print(f"  isolated say_log: {sf.SAY_LOG_PATH}")
     reset_log()
-    sf.subprocess.run = _fake_subprocess_run  # patch the module's bound name, not the stdlib
+    sf._speak_now = _fake_speak_now  # patch the module's bound name, decoupled from Kokoro/say internals
 
     # --- 1. True serialization: never two "say" calls active at once ----
     print("\n1. concurrent speak() calls never run `say` overlapping")

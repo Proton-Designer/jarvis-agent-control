@@ -106,6 +106,78 @@ def is_blocked(member) -> bool:
     return bool(getattr(member, "blocked_question", None))
 
 
+# SPEC-teams.md SS2: how long a stale identity confirmation is trusted
+# before it's worth flagging. member_identity.py fires AT DISPATCH TIME
+# (not on a poll), so this isn't a poll-cadence threshold -- it's "how
+# long since I last confirmed this is genuinely the conversation I think
+# it is." 30 minutes: long enough that back-to-back dispatches during
+# active work never flicker this on (two dispatches ten minutes apart
+# stay silent), short enough that returning to a team after a genuine gap
+# -- the exact window in which someone could manually kill and restart a
+# session without a new dispatch happening yet to catch it -- gets
+# flagged before Ayman acts on a false-confident "active".
+IDENTITY_STALE_THRESHOLD_S = 30 * 60
+
+
+def identity_staleness_note(member) -> str:
+    """"" when there's nothing worth showing, else "unverified since Xm"
+    / "unverified since XhYYm".
+
+    JUDGMENT CALL, made explicit per the Lead's ask (2026-08-20):
+    identity_verified_at is None means "never dispatched to" -- the
+    ordinary starting state for any freshly adopted/created member, and
+    for every member Ayman simply hasn't sent anything to yet. There is
+    no PRIOR claim of "this is still the same agent" for a restart to
+    have quietly falsified, so showing anything for None would be noise
+    on every brand-new team, not signal -- exactly the "should not be
+    visually noisy" case the Lead flagged. Only a STALE verification --
+    one that WAS established and has since gone unrefreshed past the
+    threshold -- is the false-confident-active case SPEC-teams.md SS2
+    names: a member that looked verified a while ago could have been
+    restarted since, with nothing yet to have caught it.
+
+    PURE: a TeamMember in, a string out -- same shape as blocked_for(),
+    so a canary can assert on it directly without mounting a Textual
+    app."""
+    verified_at = getattr(member, "identity_verified_at", None)
+    if verified_at is None:
+        return ""
+    elapsed = time.time() - verified_at
+    if elapsed < IDENTITY_STALE_THRESHOLD_S:
+        return ""
+    mins = int(elapsed // 60)
+    if mins < 60:
+        return f"unverified since {mins}m"
+    hours = mins // 60
+    return f"unverified since {hours}h{mins % 60:02d}m"
+
+
+def is_identity_stale(member) -> bool:
+    """One predicate, shared by every surface (same reasoning as
+    is_blocked()) -- Rail's aggregate count and Console/team_flow's
+    per-member note can never disagree about which members count."""
+    return bool(identity_staleness_note(member))
+
+
+def model_effort_suffix(member) -> str:
+    """"sonnet · high" / "opus" / "" -- model and effort folded together
+    (TODO-feature-queue.md item 2, SPEC-teams.md SS5's "model folds into
+    the existing activity column as compact text," extended to effort).
+    Shared by console.py's TeamsPanel and team_flow.py's detail view so
+    they can't render two different suffixes for the same member, same
+    reasoning as every other function here.
+
+    Either half is OMITTED, never a placeholder, when unknown -- an
+    ADOPTED member's effort is permanently None (/status does not expose
+    it, verified live 2026-08-20: a real session launched with
+    `--effort high`, queried immediately after, no Effort field anywhere
+    in the raw view), and that is a real fact about what's knowable, not
+    a gap to paper over with "unknown"."""
+    model = compact_model_name(member.model) if getattr(member, "model", None) else None
+    effort = getattr(member, "effort", None)
+    return " · ".join(v for v in (model, effort) if v)
+
+
 def role_status_icon(slot) -> str:
     """The glyph beside role_status_phrase(). Its own function, and NOT
     liveness_icon(slot.liveness), because the two disagree in exactly one

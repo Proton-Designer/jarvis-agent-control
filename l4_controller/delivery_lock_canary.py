@@ -20,9 +20,12 @@ concurrent calls would actually collide and get caught, the same
 technique speech_queue_canary.py uses for say_feedback's worker. The real
 deliver() method (and its locking) is untouched and is what's under test.
 
+MUST run via l4_controller/.venv (2026-08-20: say_feedback.py now imports
+kokoro_tts at module load, transitively pulled in through transport.py).
+
 Run after touching transport.py's deliver()/_lock_for_target:
 
-    python3 l4_controller/delivery_lock_canary.py
+    l4_controller/.venv/bin/python3 l4_controller/delivery_lock_canary.py
 """
 from __future__ import annotations
 

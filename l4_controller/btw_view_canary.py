@@ -2,7 +2,10 @@
 """
 /btw busy-tolerant-view canary (SPEC-orchestration.md SS1.5).
 
-Run after any Claude Code update: `python3 btw_view_canary.py`. Live-drives
+Run after any Claude Code update: `l4_controller/.venv/bin/python3
+l4_controller/btw_view_canary.py` (MUST run via l4_controller/.venv as of
+2026-08-20 -- say_feedback.py now imports kokoro_tts at module load,
+transitively pulled in through transport.py). Live-drives
 one throwaway tmux Claude Code session (auto mode -- the mode real targets
 run in) through the exact scenario /btw exists for and asserts the real
 transport.TmuxTransport.deliver() call succeeds through it.

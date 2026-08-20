@@ -32,9 +32,11 @@ from __future__ import annotations
 
 from mcp.server.mcpserver import MCPServer
 
+import kokoro_tts
 import tools_read
 import tools_handoff
 import tools_voice
+from latency_log import log_event
 
 app = MCPServer(name="jarvis-l4-readonly")
 
@@ -57,4 +59,9 @@ handoff_to_router = app.tool()(tools_handoff.handoff_to_router)
 
 
 if __name__ == "__main__":
+    # kokoro_tts.py -- not tools_write.py, not transitively either (it
+    # only imports numpy/kokoro_onnx) -- safe against this file's own
+    # import-graph guarantee above. See server.py's identical call for
+    # why this happens here rather than on the first real speak().
+    log_event("kokoro_tts_warm_startup", **kokoro_tts.warm())
     app.run(transport="stdio")

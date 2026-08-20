@@ -118,6 +118,7 @@ class Footer(PlainStatic):
         ("space", "stop listening"),
         ("tab", "move between buttons"),
         ("a", "add team"),
+        ("u", "adopt a session"),
         ("r", "reconnect"),
         ("v", "revive everything"),
         ("t", "manage teams"),

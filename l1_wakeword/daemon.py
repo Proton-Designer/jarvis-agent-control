@@ -1142,27 +1142,26 @@ if __name__ == "__main__":
     ap.add_argument("--target", default=None, help="orchestrator tmux session name (only used with --live-deliver)")
     args = ap.parse_args()
 
-    # Warm the L2.5 concierge's local model once at startup, not on the
-    # first real dictation. With KEEP_ALIVE now at 5m (down from 30m, to
-    # stop holding 4.7GB of real unified memory hostage through long idle
-    # gaps -- see ollama_client.py's KEEP_ALIVE comment), the cold-load
-    # penalty (measured: ~3s) would otherwise land on whichever dictation
-    # happens to be the first in a session, or the first after any 5m+
-    # gap mid-session -- and for a QUERY specifically, that 3s is pure
-    # silence before anything is spoken (transcribe -> classify -> answer
-    # is the order), exactly the "did it hear me?" moment this project
-    # has designed against everywhere else. Startup is different: Ayman
-    # is already watching terminal output and expecting things to
-    # initialize, so a few seconds here is invisible the way the same
-    # few seconds mid-conversation would not be. Printed, not silent --
-    # same "confidence from watching it react" reasoning as every other
+    # Warm Kokoro once at startup, not on the first real thing this
+    # process speaks -- which can be the instant ack (default_deliver(),
+    # speak_instant_ack()) or a failure message from this same function,
+    # either of which exists specifically to avoid silence. Measured live
+    # (kokoro_tts.py's docstring): the first synthesis call after a fresh
+    # model load costs an extra ~1.5s (ONNX Runtime's own session
+    # warmup) on top of ~390ms model load -- ~1.9s total, which would
+    # otherwise land on that first spoken thing instead of here. This is
+    # the exact same "startup cost is invisible, mid-conversation cost is
+    # not" reasoning this file used to apply to the old L2.5 local
+    # model's warmup before it was disconnected (2026-08-18) -- reused
+    # for the thing that actually needs it now. Printed, not silent --
+    # same "confidence from watching it react" discipline as every other
     # state transition in this file.
-    # No local model to warm any more (concierge disconnected
-    # 2026-08-18 -- see default_deliver). Startup is now just whisper +
-    # the wake model. Left the surrounding reasoning above intact: it
-    # explains WHY warming belongs at startup rather than on the first
-    # utterance, and it will apply again to whatever the Haiku layer
-    # needs to prime.
+    sys.path.insert(0, str(Path(__file__).parent.parent / "l4_controller"))
+    import kokoro_tts  # noqa: E402
+    warm_result = kokoro_tts.warm()
+    status = "ok" if warm_result["ok"] else f"FAILED ({warm_result['detail']}) -- will fall back to `say` audibly/logged"
+    print(f"[{time.strftime('%H:%M:%S')}] Kokoro warm-up: {status} (load={warm_result['load_ms']}ms, warmup={warm_result['warmup_ms']}ms)")
+
     print(f"[{time.strftime('%H:%M:%S')}] ready")
 
     kwargs = {"model_path": Path(args.model)} if args.model else {}
