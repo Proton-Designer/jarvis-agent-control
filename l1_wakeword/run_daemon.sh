@@ -35,4 +35,24 @@ export PYTHONPATH="$(pwd)/.venv/lib/python3.13/site-packages"
 # `cd "$(dirname "$0")"` above already made pwd absolute and correct
 # regardless of how this script itself was invoked (relative, absolute,
 # or via a symlink from the LaunchAgent).
-exec "$PYTHON" "$(pwd)/daemon.py"
+# --live-deliver IS REQUIRED HERE, and its absence was a real bug.
+#
+# Found 2026-08-20 from Ayman's own logs. Without it, default_deliver()
+# returns at its dry-run gate: label FORWARDED, forwarded=false,
+# end_to_end_s=0.001, and -- because the instant ack is gated on the same
+# flag -- NOT ONE SOUND. He said "hey Jarvis, hello, how are you doing",
+# Whisper transcribed it perfectly in 508ms, and the system did nothing
+# at all, silently.
+#
+# This script is what the CONSOLE'S START BUTTON runs (wake_control.start()
+# -> run_daemon.sh), which is the primary way the app is used. So the
+# primary path could never deliver anything. The only way to get a
+# working daemon was to know to run daemon.py by hand with the flag --
+# which is exactly the kind of thing nobody knows.
+#
+# The flag exists so routine testing (and --simulate) can't touch a real
+# session by accident. That reasoning is right for a bare `python
+# daemon.py`. It is wrong here: pressing "start" in the console IS the
+# deliberate act the flag is asking for, and requiring a second one
+# turned the button into a placebo.
+exec "$PYTHON" "$(pwd)/daemon.py" --live-deliver

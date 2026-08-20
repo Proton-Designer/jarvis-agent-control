@@ -128,14 +128,21 @@ def run() -> int:
         concierge_cage = " ".join(er._role_cage_args("concierge"))
         orchestrator_cage = " ".join(er._role_cage_args("orchestrator"))
         check(
-            "concierge cage includes both --allowedTools and --disallowedTools",
-            "--allowedTools" in concierge_cage and "--disallowedTools" in concierge_cage,
+            "concierge cage: don't-ask, with deletion still denied (Ayman's 2026-08-20 decision)",
+            "--dangerously-skip-permissions" in concierge_cage
+            and "Bash(rm:*)" in concierge_cage,
             detail=concierge_cage,
         )
         check(
-            "orchestrator cage is --dangerously-skip-permissions, nothing else",
-            orchestrator_cage == "--dangerously-skip-permissions",
-            detail=orchestrator_cage,
+            "...and the deny patterns are SHELL-QUOTED -- unquoted, Bash(rm:*) is a syntax "
+            "error and claude never starts",
+            "'Bash(rm:*)'" in concierge_cage,
+            detail=concierge_cage,
+        )
+        check(
+            "both roles now carry the IDENTICAL cage -- one _role_cage_args(), no per-role drift",
+            orchestrator_cage == concierge_cage,
+            detail=f"{orchestrator_cage!r} vs {concierge_cage!r}",
         )
         check(
             "neither cage ever mentions the removed --dangerously-load-development-channels flag",
@@ -478,13 +485,13 @@ def run() -> int:
             except ValueError:
                 minted_is_valid_uuid = False
             check("the minted claude_session is a well-formed uuid4", minted_is_valid_uuid, detail=record["claude_session"])
-            check("actual argv includes the concierge cage: --permission-mode acceptEdits", "--permission-mode acceptEdits" in cmdline, detail=cmdline)
-            check("actual argv includes --disallowedTools with the full measured list (spot-check: Workflow, CronCreate, RemoteTrigger)", all(t in cmdline for t in ("--disallowedTools", "Workflow", "CronCreate", "RemoteTrigger")), detail=cmdline)
+            check("actual argv carries don't-ask (Ayman's 2026-08-20 decision)", "--dangerously-skip-permissions" in cmdline, detail=cmdline)
+            check("actual argv still carries a --disallowedTools list at all", "--disallowedTools" in cmdline, detail=cmdline)
             check(
-                "actual argv includes --allowedTools with the full measured list (spot-check: list_sessions, handoff_to_router, claude-peers__list_peers) -- required or the concierge hangs on its own tools' permission prompt",
-                all(t in cmdline for t in ("--allowedTools", "mcp__jarvis-l4-readonly__list_sessions", "mcp__jarvis-l4-readonly__handoff_to_router", "mcp__claude-peers__list_peers")),
-                detail=cmdline,
-            )
+            "actual argv DENIES DELETION, shell-quoted so the shell passes it through intact",
+            "Bash(rm:*)" in cmdline,
+            detail=cmdline,
+        )
             check("actual argv NEVER includes the removed --dangerously-load-development-channels flag", "dangerously-load-development-channels" not in cmdline, detail=cmdline)
 
             # "server_readonly.py" itself never appears in the `claude`
@@ -577,13 +584,20 @@ def run() -> int:
                 # framing): "a revived concierge coming back uncaged."
                 # Checked directly against the real revived process's argv,
                 # not assumed from the code reading the same as create's.
-                check("revived process actual argv still has the concierge cage: --permission-mode acceptEdits", "--permission-mode acceptEdits" in revived_cmdline, detail=revived_cmdline)
-                check("revived process actual argv still has the full --disallowedTools list (spot-check: Workflow, CronCreate, RemoteTrigger)", all(t in revived_cmdline for t in ("--disallowedTools", "Workflow", "CronCreate", "RemoteTrigger")), detail=revived_cmdline)
+                check("revived process argv carries don't-ask, same as a fresh launch", "--dangerously-skip-permissions" in revived_cmdline, detail=revived_cmdline)
                 check(
-                    "revived process actual argv still has the full --allowedTools list (spot-check: list_sessions, handoff_to_router, claude-peers__list_peers) -- the exact 'revived uncaged' gap this design has to rule out",
-                    all(t in revived_cmdline for t in ("--allowedTools", "mcp__jarvis-l4-readonly__list_sessions", "mcp__jarvis-l4-readonly__handoff_to_router", "mcp__claude-peers__list_peers")),
-                    detail=revived_cmdline,
-                )
+                "revived process argv still DENIES DELETION -- the 'revived uncaged' gap, "
+                "now measured on the one thing still denied under don't-ask",
+                "Bash(rm:*)" in revived_cmdline,
+                detail=revived_cmdline,
+            )
+                check(
+                "revived process argv carries the SAME cage as a fresh launch -- byte-identical, "
+                "so create and revive cannot drift",
+                er._role_cage_args("concierge")[0] in revived_cmdline
+                and all(p.strip("'") in revived_cmdline for p in er._DELETION_DENIED),
+                detail=revived_cmdline,
+            )
                 check("revived process actual argv NEVER includes the removed --dangerously-load-development-channels flag", "dangerously-load-development-channels" not in revived_cmdline, detail=revived_cmdline)
                 revived_liveness = er.role_liveness("concierge")
                 check(

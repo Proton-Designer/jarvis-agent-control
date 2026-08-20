@@ -461,6 +461,18 @@ def _send_boot_message(role: str, tmux_name: str) -> None:
 # here that needs a keystroke sent before wait_for_ready().
 
 
+# Deletion, denied for both roles even under don't-ask. Patterns rather
+# than a blanket Bash denial, so everything else in the shell still
+# works. Verified live that these survive --dangerously-skip-permissions.
+_DELETION_DENIED = (
+    "Bash(rm:*)",
+    "Bash(rmdir:*)",
+    "Bash(trash:*)",
+    "Bash(shred:*)",
+    "Bash(git clean:*)",
+)
+
+
 def _role_cage_args(role: str) -> list[str]:
     """The security-boundary flags -- IDENTICAL regardless of whether
     this is a fresh launch or a revival, because both _build_launch_cmd()
@@ -483,13 +495,41 @@ def _role_cage_args(role: str) -> list[str]:
     Orchestrator: `--dangerously-skip-permissions` instead -- team leads
     aren't meant to be sandboxed (SPEC-orchestration.md SS1.6), so no
     allow/deny list is needed."""
-    if role == "concierge":
-        return [
-            "--permission-mode", "acceptEdits",
-            "--allowedTools", *_CONCIERGE_ALLOWED_TOOLS,
-            "--disallowedTools", *_CONCIERGE_DISALLOWED_TOOLS,
-        ]
-    return ["--dangerously-skip-permissions"]
+    # BOTH roles now run don't-ask, with deletion denied. Ayman's
+    # decision, 2026-08-20, after the concierge sat stuck on a permission
+    # prompt for `Read(~/.jarvis/dictations/...)` -- the file EVERY
+    # dictation arrives in. Its cage blocked the one thing it always
+    # needs, so it asked, nobody answered, and it waited forever while he
+    # heard nothing back.
+    #
+    # I am recording what this costs, because it is a real reduction and
+    # he decided it knowingly: the concierge previously could not run
+    # shell commands or deliver to any session, so its blast radius was
+    # "text into one input line via handoff_to_router". It can now do
+    # what any agent can. The bright line about never answering an
+    # AUTHORISATION prompt on another session's behalf is unchanged --
+    # that lives in the role instructions and in the transport, not here.
+    #
+    # Deletion stays denied, and the pattern form is what makes that
+    # possible without giving up Bash entirely. Verified live: under
+    # --dangerously-skip-permissions, `--disallowedTools "Bash(rm:*)"`
+    # still blocks `rm -rf` while `echo` runs normally. A deny list
+    # surviving bypass mode is not obvious and was measured, not assumed.
+    # shlex.quote on every pattern, for the same reason -n needed it:
+    # this whole command is typed into the pane as ONE literal string and
+    # then parsed by the pane's own shell. "Bash(rm:*)" is shell SYNTAX --
+    # bare parentheses are a subshell and * is a glob -- so unquoted it is
+    # a syntax error and `claude` never starts at all.
+    #
+    # Caught by engine_roles_canary immediately ("did not reach READY
+    # after launch"), which is the second time today a deny list has been
+    # broken by the shell rather than by its own logic. Both times the
+    # symptom was the session simply not existing.
+    return [
+        "--dangerously-skip-permissions",
+        "--disallowedTools",
+        *(shlex.quote(p) for p in _DELETION_DENIED),
+    ]
 
 
 def _build_launch_cmd(role: str, session_id: str, name: str | None, model: str, effort: str | None) -> str:

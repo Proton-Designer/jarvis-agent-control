@@ -284,11 +284,34 @@ def stop_phrase_near_miss(text: str) -> bool:
 VERIFY_BUFFER_S = 2.0  # rolling pre-roll + trigger-window buffer sent to Whisper for verification
 VERIFY_BUFFER_FRAMES = int(VERIFY_BUFFER_S * SAMPLE_RATE / VAD_FRAME_SAMPLES)
 
-# Be permissive about spelling -- Whisper may render the word "Jarvis",
-# "jarvis,", "Jervis" (a real, phonetically plausible mishearing), etc.
-# Reject anything that doesn't recognizably contain the word, including an
-# empty or unclear transcript -- fail closed means ambiguous also rejects.
-_JARVIS_TRANSCRIPT_RE = re.compile(r"jarvis|jervis", re.IGNORECASE)
+# Be permissive about SPELLING, strict about the WORD. Whisper renders
+# the name inconsistently, and the old `jarvis|jervis` was too narrow:
+# Ayman's live test on 2026-08-20 was rejected six times in a row on
+# transcripts of "hey Jorvis" / "Hey Jorvis" / "ei jorvis" -- the
+# acoustic model scored 0.90-0.98, he said the wake word correctly, and
+# Whisper simply spelled the vowel differently. A verifier that rejects
+# the real wake word is worse than no verifier: it trains him to repeat
+# himself and doubt the system.
+#
+# Shape: [j|g] + vowel(s) + "rv" + optional vowels + optional s, plus the
+# dropped-r forms ("javis"). That covers jarvis/jervis/jorvis/jurvis/
+# jarvus/jarviss/javis/garvis without loosening what this check EXISTS to
+# reject.
+#
+# The rejection half is the whole reason this stage exists -- measured,
+# not assumed: "Hey Charles" (0.998) and "Hey Travis" (0.983) score
+# indistinguishably from a real "Hey Jarvis" (0.999) on the acoustic
+# model, so no threshold separates them. Whisper does, because the
+# PHONETIC CONTENT is nothing alike. Widening the spelling must not undo
+# that, so the pattern is anchored on "j/g + vowel + rv" -- "travis",
+# "charles", "harvest", "carve", "starve" and "marvis" all still reject,
+# and the canary asserts every one of them, in both directions.
+#
+# Still fails closed: an empty or unrecognisable transcript rejects.
+_JARVIS_TRANSCRIPT_RE = re.compile(
+    r"\b[jg][aeiouy]{1,2}rv[aeiouy]{0,2}s{0,2}\b|\b[jg][aeiouy]v[aeiouy]s\b",
+    re.IGNORECASE,
+)
 
 
 def verify_wake_trigger(whisper: WhisperDaemon, preroll_frames: "collections.deque", tmp_wav_path: Path) -> tuple[bool, str]:
