@@ -199,6 +199,21 @@ def model_effort_suffix(member) -> str:
     return " · ".join(v for v in (model, effort) if v)
 
 
+def is_prompt_pending(slot) -> bool:
+    """One predicate, shared by every surface (same reasoning as
+    is_blocked()) -- Console's full ENGINE panel and Rail's compact line
+    can never disagree about whether a role is stuck on a permission
+    prompt (TODO-feature-queue.md item 5, the 2026-08-20 stuck-concierge
+    incident)."""
+    return bool(getattr(slot, "prompt_pending", False))
+
+
+def prompt_preview_text(slot) -> str:
+    """"" when nothing pending, else the verbatim (untrusted, same
+    discipline as TeamMember.blocked_question) captured prompt preview."""
+    return getattr(slot, "prompt_preview", None) or ""
+
+
 def role_status_icon(slot) -> str:
     """The glyph beside role_status_phrase(). Its own function, and NOT
     liveness_icon(slot.liveness), because the two disagree in exactly one

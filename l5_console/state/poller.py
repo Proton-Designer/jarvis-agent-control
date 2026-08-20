@@ -152,6 +152,8 @@ class Poller:
             tools_reachable=liveness["tools_reachable"],
             cwd_mismatch=liveness.get("cwd_mismatch", False),
             found_cwd=liveness.get("found_cwd"),
+            prompt_pending=liveness.get("prompt_pending", False),
+            prompt_preview=liveness.get("prompt_preview"),
         )
 
     def _loop_engine(self) -> None:
@@ -163,6 +165,19 @@ class Poller:
                     concierge=self._role_slot(state["concierge"]),
                     orchestrator=self._role_slot(state["orchestrator"]),
                 )
+                # TODO-feature-queue.md item 5: the auto-resolve half.
+                # Runs AFTER the read-only state above, same "detection
+                # in the cheap/read path, action in the poller" split
+                # _maybe_escalate_blocked() already uses for blocked
+                # teams -- never mixes a side effect into the function
+                # this thread's own read (get_engine_state()) or the
+                # render layer's (role_liveness()) trust as side-effect-
+                # free. Runs unconditionally for both roles every tick;
+                # maybe_auto_approve_role_prompt() itself is a fast no-op
+                # (one capture-pane, one classify) whenever there's
+                # nothing to do.
+                for role in engine_roles_mod.ROLES:
+                    engine_roles_mod.maybe_auto_approve_role_prompt(role)
             except Exception as e:  # noqa: BLE001 -- must never take this thread down
                 with self._lock:
                     old = self._state.engine

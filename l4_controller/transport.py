@@ -571,6 +571,85 @@ class TmuxTransport(Transport):
             reason="answer_not_confirmed",
         )
 
+    def approve_permission_prompt(self, target: str) -> DeliveryResult:
+        """Auto-approval backup for an engine role stuck on a tool-use
+        permission prompt (the 2026-08-20 concierge incident: it sat on
+        `Read(~/.jarvis/dictations/...)` -- the file every dictation
+        arrives in -- forever, with nobody watching). Both engine roles
+        now launch with --dangerously-skip-permissions, which makes this
+        prompt nearly impossible; "nearly impossible" is not "impossible",
+        and this is the net underneath that fact.
+
+        WHETHER TO CALL THIS AT ALL IS ENTIRELY THE CALLER'S JUDGMENT --
+        this method has no opinion about which role, which tool, or what
+        the prompt says. l5_console/state/engine_roles.py's
+        maybe_auto_approve_role_prompt() is the only caller, and it is
+        where every actual safety decision lives: engine roles only,
+        Read/Glob/Grep-shaped prompts only (positively identified from
+        the prompt's own header), refused outright if the captured text
+        touches deletion/credentials/money/production/force-push
+        language anywhere on screen. This method's only job is the
+        mechanics, and it always selects option 1 ("Yes") -- NEVER
+        option 2, which on a real captured prompt read "Yes, allow
+        reading from /tmp and /private/tmp during this session": a
+        broader standing grant nobody chose, the same reasoning
+        answer_blocked_question() already applies to never trying free
+        text.
+
+        Same shape as answer_blocked_question(), deliberately: refuses
+        unless the pane is POSITIVELY, FRESHLY reconfirmed as
+        PERMISSION_PROMPT at the moment of this call (never trusted from
+        whatever a caller last observed -- the prompt may have resolved
+        itself, or Ayman may have already answered it from a terminal, in
+        the time between detection and this call); one literal digit
+        keystroke, NO Enter -- verified live 2026-08-20 against a real
+        captured Read-tool prompt (a bare "1" submitted it correctly,
+        matching answer_blocked_question()'s own finding for a DIFFERENT
+        UI component, independently confirmed rather than assumed by
+        analogy); then polls until the pane actually leaves
+        PERMISSION_PROMPT before reporting success."""
+        with _lock_for_target(target):
+            return self._approve_permission_prompt_locked(target)
+
+    def _approve_permission_prompt_locked(self, target: str) -> DeliveryResult:
+        if not self.session_exists(target):
+            return DeliveryResult(ok=False, detail=f"no such tmux session: {target}", reason="no_session")
+
+        ansi_text = self.capture_pane(target)
+        state = classify_pane_ansi(ansi_text, self.patterns)
+        if state != PaneState.PERMISSION_PROMPT:
+            return DeliveryResult(
+                ok=False,
+                detail=f"refused: {target} is not currently showing a permission prompt (pane state is {state.value})",
+                reason=state.value,
+            )
+
+        try:
+            subprocess.run(
+                [self.tmux_bin, "send-keys", "-t", target, "-l", "--", "1"],
+                check=True,
+                capture_output=True,
+            )
+        except subprocess.CalledProcessError as e:
+            return DeliveryResult(
+                ok=False,
+                detail=f"tmux send-keys failed: {e.stderr.decode(errors='replace')}",
+                reason="tmux_error",
+            )
+
+        for _ in range(ANSWER_VERIFY_POLL_ATTEMPTS):
+            time.sleep(ANSWER_VERIFY_POLL_INTERVAL_S)
+            ansi_text = self.capture_pane(target)
+            if classify_pane_ansi(ansi_text, self.patterns) != PaneState.PERMISSION_PROMPT:
+                return DeliveryResult(ok=True, detail=f"approved {target}'s permission prompt")
+
+        return DeliveryResult(
+            ok=False,
+            detail=f"sent approval to {target} but it's still showing a permission prompt after "
+            f"{ANSWER_VERIFY_POLL_ATTEMPTS * ANSWER_VERIFY_POLL_INTERVAL_S:.1f}s -- may not have landed, check manually",
+            reason="approval_not_confirmed",
+        )
+
     def _handle_busy_tolerant_view(self, target: str, command: str, leading_token: str) -> DeliveryResult:
         """
         Same capture-then-dismiss-then-return-content contract as

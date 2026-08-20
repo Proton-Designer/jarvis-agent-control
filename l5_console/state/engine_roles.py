@@ -61,7 +61,10 @@ from jarvis_paths import jarvis_project_home  # noqa: E402
 
 sys.path.insert(0, str(Path(__file__).parent.parent.parent / "l4_controller"))
 from latency_log import log_event  # noqa: E402
+from pane_state import PaneState, classify_pane  # noqa: E402
+import providers  # noqa: E402
 from providers import list_sessions as _list_live_sessions  # noqa: E402
+import say_feedback  # noqa: E402
 
 from models import LIVENESS_LOST, LIVENESS_RUNNING, LIVENESS_STOPPED  # noqa: E402
 from reconnect import wait_for_ready  # noqa: E402
@@ -270,6 +273,173 @@ def _log_cwd_mismatch(role: str, tmux: str, expected_cwd: str, found_cwd: str) -
     log_event("engine_role_cwd_mismatch", role=role, tmux=tmux, expected_cwd=expected_cwd, found_cwd=found_cwd)
 
 
+# --- TODO-feature-queue.md item 5: engine-role permission-prompt -----
+# detection + narrow auto-approve. The 2026-08-20 incident: the
+# concierge sat on `Read(~/.jarvis/dictations/...)` -- the file EVERY
+# dictation arrives in -- forever, with nobody watching. The Lead's
+# immediate fix (--dangerously-skip-permissions on both roles) makes
+# this specific prompt impossible; this section is the backup, because
+# "we made this prompt impossible" is not the same as "no prompt can
+# ever appear."
+
+# Positive identification, allowlist not denylist -- SAME instinct as
+# transport.py's _is_known_readonly_view(). Read/Glob/Grep ONLY, never
+# Write/Edit/Bash, even though under don't-ask either role could in
+# principle hit a prompt for any of those now (an earlier version of
+# this comment said the concierge's tool cage made this moot -- it no
+# longer does, both roles share the same broader cage). The irony worth
+# stating: under don't-ask, a permission prompt firing AT ALL is already
+# a case nobody predicted, which argues for a narrow allowlist and a
+# loud escalation on anything else, not a broad one. Matched against the
+# FULL captured pane (re.MULTILINE), not just the tail -- verified live
+# 2026-08-20 against a real captured prompt: "Read(/path)" appears on
+# its own line, above the "Do you want to proceed?" line, and a longer
+# prompt could push it further up than a 10-line tail window reaches.
+_SAFE_TOOL_HEADER_RE = re.compile(r"^\s*(Read|Glob|Grep)\(", re.MULTILINE)
+
+# Second, INDEPENDENT gate -- SPEC-blockers.md SS2's own hard-refusal
+# language, reused verbatim rather than a new list invented here:
+# "deletion or destruction, credentials or secrets, money or billing,
+# production or deployment, force-push or history rewrite." Refuses even
+# a Read-shaped match if any of this appears ANYWHERE in the captured
+# pane (e.g. a Read whose path or preceding context mentions
+# "credentials") -- both gates must pass, matched independently, neither
+# one implies the other.
+_DANGEROUS_PROMPT_RE = re.compile(
+    r"delet|destroy|\brm\b|rmdir|shred|\btrash\b|"
+    r"credential|secret|password|api[_ -]?key|\btoken\b|"
+    r"\bmoney\b|billing|payment|\bcharge\b|"
+    r"production|\bdeploy|"
+    r"force[-_ ]?push|rebase|history rewrite",
+    re.IGNORECASE,
+)
+
+
+def _prompt_preview(plain_text: str) -> str:
+    """Short, verbatim -- UNTRUSTED content, same discipline as
+    TeamMember.blocked_question -- capture of a permission prompt for
+    display and for the announcement text. Prefers the tool-header line
+    (e.g. "Read(/path)") since that names the actual action; falls back
+    to the "Do you want to..." question line, then to the last non-blank
+    line rather than nothing."""
+    lines = [ln.strip() for ln in plain_text.splitlines() if ln.strip()]
+    tail = lines[-10:]
+    header = _SAFE_TOOL_HEADER_RE.search(plain_text)
+    if header:
+        for ln in lines:
+            if ln.strip().startswith(header.group(1) + "("):
+                return ln.strip()
+    for ln in tail:
+        if ln.lower().startswith("do you want to"):
+            return ln
+    return tail[-1] if tail else "permission prompt"
+
+
+def _role_prompt_state(tmux: str) -> tuple[bool, str | None]:
+    """READ-ONLY: captures + classifies the pane, never sends a
+    keystroke. Used by role_liveness() for RENDER only --
+    maybe_auto_approve_role_prompt() below NEVER trusts this snapshot,
+    it re-captures and re-classifies fresh at the moment it actually
+    acts, same "never act on a caller's earlier observation" discipline
+    transport.answer_blocked_question() already established."""
+    try:
+        plain = providers.transport.capture_pane_plain(tmux)
+    except Exception:
+        return False, None
+    if classify_pane(plain, providers.transport.patterns) != PaneState.PERMISSION_PROMPT:
+        return False, None
+    return True, _prompt_preview(plain)
+
+
+# role -> the prompt_preview() text already acted on (approved OR
+# escalated) for the CURRENT episode. Cleared the instant the pane
+# leaves PERMISSION_PROMPT. In-memory, never persisted -- same "never
+# store observed state" discipline as _LOGGED_CWD_MISMATCHES above --
+# and it exists for the same reason: without it, an escalated prompt
+# (nobody sent a keystroke, so it just sits there) would re-announce
+# itself every poll tick forever, exactly the spam SPEC-blockers.md SS7
+# rules out for blocked-question escalation ("rate-limit... a session
+# that blocks repeatedly... must be structurally impossible").
+_ROLE_PROMPT_EPISODE: dict[str, str] = {}
+
+
+def _announce_role_prompt(role: str, detail: str) -> None:
+    """ALWAYS spoken and logged, whether approved, refused, or attempted
+    -but-unconfirmed -- "silent resolution is not acceptable even when
+    correct" (SPEC-blockers.md SS7), same rule this project already
+    applies to auto-answers."""
+    log_event("engine_role_permission_prompt", role=role, detail=detail[:200])
+    say_feedback.speak(detail)
+
+
+def maybe_auto_approve_role_prompt(role: str) -> dict:
+    """The auto-resolve half. NARROWLY scoped, Ayman's decision via the
+    Lead, 2026-08-20:
+      - ENGINE ROLES ONLY -- this function takes a `role` from
+        engine_roles.ROLES and nothing else; there is no call site
+        anywhere that could pass a team member's tmux name. Team agents
+        keep the existing escalate-to-Ayman path unchanged
+        (SPEC-blockers.md SS2's bright line).
+      - Read/Glob/Grep-shaped prompts ONLY (_SAFE_TOOL_HEADER_RE),
+        positively identified from the prompt's own captured header --
+        never inferred, never a blind keystroke into whatever is on
+        screen.
+      - A second, independent gate (_DANGEROUS_PROMPT_RE) refuses even a
+        Read-shaped match if the FULL captured pane touches deletion/
+        credentials/money/production/force-push language anywhere.
+      - Sends ONLY "1" (Yes) via transport.approve_permission_prompt() --
+        never option 2's broader standing-grant text.
+      - Every outcome is announced (spoken + logged) -- see
+        _announce_role_prompt().
+
+    Re-captures and re-classifies FRESH here -- never trusts
+    role_liveness()'s own prompt_pending snapshot, which may be a full
+    poll tick stale by the time this runs.
+
+    Called from poller.py's engine loop, same relationship
+    _maybe_escalate_blocked() has to teams -- detection lives in the
+    cheap/read path (role_liveness/_role_prompt_state), action and
+    announcement live in the poller, which is where side effects belong
+    in this codebase."""
+    record = get_role_record(role)
+    if record is None or not record.get("tmux"):
+        _ROLE_PROMPT_EPISODE.pop(role, None)
+        return {"ok": True, "action": "none", "detail": "role not attached"}
+    tmux = record["tmux"]
+
+    try:
+        plain = providers.transport.capture_pane_plain(tmux)
+    except Exception as e:  # noqa: BLE001 -- must never take the poller thread down
+        return {"ok": True, "action": "none", "detail": f"couldn't capture pane: {e}"}
+
+    if classify_pane(plain, providers.transport.patterns) != PaneState.PERMISSION_PROMPT:
+        _ROLE_PROMPT_EPISODE.pop(role, None)
+        return {"ok": True, "action": "none", "detail": "no permission prompt"}
+
+    preview = _prompt_preview(plain)
+    if _ROLE_PROMPT_EPISODE.get(role) == preview:
+        return {"ok": True, "action": "already_handled", "detail": "already acted on this prompt, waiting for it to clear"}
+    _ROLE_PROMPT_EPISODE[role] = preview  # marked BEFORE acting -- a crash mid-action must not retry-loop
+
+    if _DANGEROUS_PROMPT_RE.search(plain):
+        detail = f"{role.capitalize()} is stuck on a permission prompt with sensitive language -- {preview} -- I did not approve it, check the terminal."
+        _announce_role_prompt(role, detail)
+        return {"ok": True, "action": "escalated", "detail": detail}
+
+    if not _SAFE_TOOL_HEADER_RE.search(plain):
+        detail = f"{role.capitalize()} is stuck on a permission prompt for something other than a read -- {preview} -- I did not approve it, check the terminal."
+        _announce_role_prompt(role, detail)
+        return {"ok": True, "action": "escalated", "detail": detail}
+
+    result = providers.transport.approve_permission_prompt(tmux)
+    if result.ok:
+        detail = f"{role.capitalize()} was stuck on a permission prompt -- {preview} -- I approved it, a read-only request."
+    else:
+        detail = f"{role.capitalize()} is stuck on a permission prompt -- {preview} -- I tried to approve it and couldn't confirm it cleared, check the terminal."
+    _announce_role_prompt(role, detail)
+    return {"ok": result.ok, "action": "approved" if result.ok else "approve_failed", "detail": detail}
+
+
 def role_liveness(role: str) -> dict:
     """{"attached": bool, "running": bool, "liveness": str|None, "record":
     dict|None, "tools_reachable": bool, "cwd_mismatch": bool, "found_cwd":
@@ -299,11 +469,13 @@ def role_liveness(role: str) -> dict:
         return {
             "attached": False, "running": False, "liveness": None, "record": None,
             "tools_reachable": False, "cwd_mismatch": False, "found_cwd": None,
+            "prompt_pending": False, "prompt_preview": None,
         }
 
     live_by_name = {s["session_id"]: s for s in _list_live_sessions()}
     live = live_by_name.get(record["tmux"])
     if live is not None and live["working_dir"] == record["working_dir"]:
+        prompt_pending, prompt_preview = _role_prompt_state(record["tmux"])
         return {
             "attached": True,
             "running": True,
@@ -312,6 +484,8 @@ def role_liveness(role: str) -> dict:
             "tools_reachable": _role_tools_reachable(role),
             "cwd_mismatch": False,
             "found_cwd": None,
+            "prompt_pending": prompt_pending,
+            "prompt_preview": prompt_preview,
         }
 
     cwd_mismatch = live is not None and live["working_dir"] != record["working_dir"]
@@ -323,6 +497,7 @@ def role_liveness(role: str) -> dict:
     return {
         "attached": True, "running": False, "liveness": liveness, "record": record,
         "tools_reachable": False, "cwd_mismatch": cwd_mismatch, "found_cwd": found_cwd,
+        "prompt_pending": False, "prompt_preview": None,
     }
 
 
@@ -461,15 +636,47 @@ def _send_boot_message(role: str, tmux_name: str) -> None:
 # here that needs a keystroke sent before wait_for_ready().
 
 
-# Deletion, denied for both roles even under don't-ask. Patterns rather
-# than a blanket Bash denial, so everything else in the shell still
-# works. Verified live that these survive --dangerously-skip-permissions.
+# Deletion, denied for both roles even under don't-ask. Ayman's one
+# carve-out from "all permissions".
+#
+# READ THIS BEFORE TRUSTING IT. Measured 2026-08-20, after a security
+# review flagged the bypass-mode change: a Bash deny pattern matches the
+# COMMAND NAME, and several ordinary routes go straight around it.
+#
+#     rm -f x                    BLOCKED
+#     env rm -f x                BLOCKED
+#     /bin/rm -f x               ALLOWED   <- absolute path
+#     sh -c 'rm -f x'            ALLOWED   <- nested shell
+#     find . -name x -delete     ALLOWED   <- deletion without "rm"
+#
+# The patterns below close the ones found. They cannot close the class.
+# A denylist over an infinite space of spellings is the same losing shape
+# as the first terminal_window guard, and the reason that one became an
+# allowlist -- which is not available here, because Ayman's requirement
+# is "everything EXCEPT deletion", and enumerating everything is exactly
+# what an allowlist would have to do.
+#
+# So this is an honest speed bump, not a guarantee: it stops a casual or
+# accidental `rm`, and it does not stop an agent that is determined or
+# adversarial. Under --dangerously-skip-permissions with Bash available,
+# nothing at this layer can. The real protections remain the ones that
+# do not depend on command spelling -- the roles work in ~/Jarvis, the
+# source tree is under git, and the transport still refuses to answer
+# authorisation prompts on another session's behalf.
 _DELETION_DENIED = (
     "Bash(rm:*)",
+    "Bash(/bin/rm:*)",
+    "Bash(/usr/bin/rm:*)",
     "Bash(rmdir:*)",
+    "Bash(/bin/rmdir:*)",
+    "Bash(unlink:*)",
     "Bash(trash:*)",
     "Bash(shred:*)",
     "Bash(git clean:*)",
+    "Bash(find:*)",      # `find ... -delete` deletes without ever saying "rm"
+    "Bash(sudo:*)",      # sudo makes every other entry here decorative
+    "Bash(dd:*)",
+    "Bash(mkfs:*)",
 )
 
 
