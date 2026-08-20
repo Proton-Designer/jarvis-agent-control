@@ -137,6 +137,36 @@ role — and none of the other six servers.
 
 Both halves of what Ayman asked for, with none of what he did not.
 
+### 3.3 `--dangerously-load-development-channels` must NOT be passed
+
+The flag from Ayman's alias is not merely redundant once claude-peers is
+in `.mcp.json` — it is actively fatal to automated creation. Launched for
+real in tmux it stops on a confirmation dialog:
+
+```
+  WARNING: Loading development channels
+  ❯ 1. I am using this for local development
+    2. Exit
+  Enter to confirm · Esc to cancel
+```
+
+The session never reaches READY, so every create would hang forever.
+
+**This did not appear in any `-p` test**, which is the lesson worth
+keeping: `--print` never renders the interactive dialogs, so a flag set
+can pass every headless probe and still deadlock the moment it runs the
+way it will actually run. The composition tests above were necessary and
+were not sufficient; only launching it in a real tmux pane found this.
+
+Note also that its dialog matches `pane_state`'s
+`permission_prompt_pairs` ("enter to confirm" + "esc to cancel"), so the
+system would have classified it as a permission prompt and refused it
+rather than answering — failing closed, correctly, forever.
+
+The peers tools load without the flag. What is lost is only the automatic
+push of peer messages into a session; the tools themselves, including
+`check_messages`, are all present.
+
 ---
 
 ## 4. Launch
