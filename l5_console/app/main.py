@@ -37,6 +37,7 @@ import sys
 from pathlib import Path
 
 from textual.app import App, ComposeResult
+from textual.widgets import Button
 
 sys.path.insert(0, str(Path(__file__).parent))
 from rail import Rail  # noqa: E402
@@ -147,6 +148,27 @@ class JarvisConsole(App):
             self.push_screen(QuitWarningScreen())
             return
         self.exit()
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        # docs/PLAN-silence-and-ux.md U3: a clicked button keeps Textual's
+        # :focus styling (a visible highlight) until something else takes
+        # focus -- which for a button that stays mounted after its action
+        # (WakePanel's start/stop toggle is the one Ayman actually clicks
+        # repeatedly; EnginePanel's buttons the same way) reads as "this
+        # is still doing something" indefinitely, long after the real
+        # action finished.
+        #
+        # App-level, not per-widget: every Button.Pressed handler in this
+        # app (WakePanel/EnginePanel/every modal screen) is defined
+        # CLOSER to the widget than the App, and none of them call
+        # event.stop() (checked), so Textual's message bubbling delivers
+        # the event to each of those FIRST and to this handler LAST --
+        # one line here covers every button in the app instead of adding
+        # a blur() call to each individual on_button_pressed. Safe even
+        # for a button that's about to be removed/disabled/hidden by its
+        # own handler (already run by the time this fires): blurring an
+        # about-to-vanish widget is a harmless no-op, not a race.
+        event.button.blur()
 
     def check_action(self, action: str, parameters: tuple) -> bool | None:
         # Defense in depth for the setup/reconnect focus bug (see

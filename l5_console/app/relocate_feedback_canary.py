@@ -61,20 +61,14 @@ class _FakeState:
 
 
 class _T(App):
-    def compose(self) -> ComposeResult:
-        yield team_flow.TeamManageScreen()
-
-
-async def _slow_relocate(team_id: str, tmux: str) -> dict:
-    await asyncio.sleep(0.3)
-    return {"ok": True, "detail": f"relocated {tmux} (stubbed)"}
+    def on_mount(self) -> None:
+        self.push_screen(team_flow.TeamManageScreen())
 
 
 def _slow_relocate_sync(team_id: str, tmux: str) -> dict:
     # asyncio.to_thread() runs a SYNC callable in a worker thread -- the
     # real relocate_team_member() is sync (subprocess-based), so the stub
-    # must be too, not the async version above (kept for reference of
-    # intent, unused as the actual patch target).
+    # must be too.
     time.sleep(0.3)
     return {"ok": True, "detail": "relocated fake-relocate-tmux (stubbed)"}
 
@@ -98,10 +92,12 @@ async def main() -> int:
             await asyncio.sleep(0.05)  # well before the stub's 0.3s resolves
 
             body = screen._body()
-            mid_text = "\n".join(
-                (c.renderable.plain if hasattr(c.renderable, "plain") else str(c.renderable))
-                for c in body.children if hasattr(c, "renderable")
-            )
+            parts = []
+            for c in body.children:
+                if hasattr(c, "render"):
+                    r = c.render()
+                    parts.append(r.plain if hasattr(r, "plain") else str(r))
+            mid_text = "\n".join(parts)
             check(
                 "the working message is visible WHILE the slow call is still in flight",
                 "Relocating" in mid_text and "fake-relocate-tmux" in mid_text,
