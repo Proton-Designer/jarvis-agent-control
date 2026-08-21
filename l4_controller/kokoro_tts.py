@@ -16,19 +16,15 @@ reaching out to the network mid-conversation. The caller (say_feedback.py)
 is what turns that into an audible/logged fallback to `say` -- never a
 silent one.
 
-VOICE: bm_george -- British male, Kokoro's own Grade-C tier (tied-best
-among its four bm_* voices; bm_daniel and bm_lewis both grade lower, D
-and D+ respectively -- see hexgrad/Kokoro-82M's own VOICES.md). Chosen
-over the equally-graded bm_fable for CHARACTER, not just the grade:
-independent voice reviews describe bm_george as calm/professional,
-suited to tutorials and explainers, where bm_fable is graded for
-storytelling/narration -- the former is the register an assistant's
-status/confirmation speech actually wants. Do NOT assume "bm_daniel" is
-the match for Ayman's requested "Daniel" just because the string
-matches -- it's Kokoro's WORST-graded British male voice of the four,
-found by actually checking rather than assuming (the Lead's explicit
-instruction). Samples of all four were generated and sent to Ayman for
-his own ear-check; he can overrule this recommendation.
+VOICE: bm_lewis -- British male. Originally defaulted to bm_george
+(Kokoro's own Grade-C tier, tied-best among its four bm_* voices;
+bm_lewis grades lower, D+ -- see hexgrad/Kokoro-82M's own VOICES.md),
+chosen over the equally-graded bm_fable for CHARACTER (calm/professional
+vs. storytelling/narration register). Samples of all four were
+generated and sent to Ayman for his own ear-check, and per that
+explicit ear-check he overruled the grade-based recommendation in favor
+of bm_lewis (2026-08-21) -- the grade tier is a generic TTS-benchmark
+score, not a judgment of fit for this assistant's actual voice.
 
 COLD-START, MEASURED LIVE (2026-08-20, this machine -- Apple M4 Pro, 24GB
 unified memory): model load ~390ms, but the FIRST real synthesis call
@@ -67,7 +63,7 @@ MODELS_DIR = Path(__file__).parent / "models"
 MODEL_PATH = MODELS_DIR / "kokoro-v1.0.onnx"
 VOICES_PATH = MODELS_DIR / "voices-v1.0.bin"
 
-DEFAULT_VOICE = "bm_george"
+DEFAULT_VOICE = "bm_lewis"
 DEFAULT_LANG = "en-gb"
 
 _lock = threading.Lock()

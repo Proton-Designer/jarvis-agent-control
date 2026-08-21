@@ -100,10 +100,9 @@ from jarvis_paths import jarvis_home  # noqa: E402
 MUTE = os.environ.get("JARVIS_MUTE", "0") == "1"
 SAY_LOG_PATH = jarvis_home() / "say_log.jsonl"
 
-# Kokoro's own voice (kokoro_tts.py:DEFAULT_VOICE, "bm_george" -- see that
-# module's docstring for why, over the equally-graded bm_fable and the
-# lower-graded bm_daniel/bm_lewis). Overridable so a later ear-check
-# result (Ayman's, or a future voice) is a config change, not a code one.
+# Kokoro's own voice (kokoro_tts.py:DEFAULT_VOICE, "bm_lewis" -- see that
+# module's docstring for why). Overridable so a later ear-check result
+# (Ayman's, or a future voice) is a config change, not a code one.
 KOKORO_VOICE = os.environ.get("JARVIS_KOKORO_VOICE", kokoro_tts.DEFAULT_VOICE)
 
 # FALLBACK-ONLY now (Kokoro is primary -- see _speak_now()). "Daniel" is
@@ -195,7 +194,7 @@ def _speak_now(text: str) -> None:
     measured synthesis time, or `kokoro_tts_fallback` with the error) --
     this is the "audible or logged" requirement's LOGGED half; the
     audible half is that a fallback genuinely sounds different (Daniel
-    via `say`, not Kokoro's bm_george), which Ayman can hear without
+    via `say`, not Kokoro's bm_lewis), which Ayman can hear without
     reading a log at all."""
     t0 = time.monotonic()
     try:
