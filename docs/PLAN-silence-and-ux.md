@@ -82,11 +82,11 @@ against a live utterance.
 Done when `latency_log` shows `enqueued → flushed` at ~2.5s, not 180s.
 Until that line exists, fix #4 is unverified, not proven.
 
-### R2 — A direct answer must not be batched · Lead
+### R2 — A direct answer must not be batched · Lead — **BUILT**, awaiting live drive
 
-`KINDS` is closed: `blocked_question | error | completion`. There is no
+`KINDS` was closed: `blocked_question | error | completion`. There was no
 kind meaning *"I am answering the question you just asked."* So the
-concierge's only expressible option routes a live conversational reply
+concierge's only expressible option routed a live conversational reply
 into a queue built for asynchronous agent completions.
 
 The harm is already in the log, independent of the stale process:
@@ -101,6 +101,38 @@ The harm is already in the log, independent of the stale process:
 Restarting fixes the silence. It does not fix this. **Even with the new
 code running perfectly, a direct answer waits `SETTLE_S` and is eligible
 to merge with an unrelated completion.** Wrong by design, not by bug.
+
+#### What it cost, measured before the fix
+
+Engineer 1, 2026-08-21, from `latency_log.jsonl` and `say_log.jsonl`:
+**18 of 19** conversational replies were typed `completion`. Reply
+latency therefore ran ~5s from dictation end — the settle delay plus the
+flush poll — against `instant_ack`'s `ACK_FALLBACK_AFTER_S = 3.0`. The
+ack fired **7 times against 1 suppression**, an 87.5% rate on a mechanism
+built to be rare. That is the "Okay, one sec before every single reply"
+Ayman reported, and it was a symptom of this item, not of the ack.
+
+The threshold was deliberately **not** touched. 3.0s is correct; the 5s
+was the defect. Lowering it would have hidden the cause and made the ack
+fire on a path about to become fast.
+
+#### The fix
+
+`answer` joins `KINDS` at `PRIORITY_HIGH`, absent from `return_queue`'s
+`_TIER` so it can never be batched, and the concierge prompt now teaches
+the distinction at all three points where it decides what to say:
+`answer` for a reply Ayman is waiting on, `completion` only for news he
+did not ask for, and **`answer` when both look like they fit** — a report
+spoken a moment early costs nothing, a reply held costs the reason the
+layer exists.
+
+Canary asserts both directions, including the one that actually bit: an
+answer arriving while a completion is already queued must overtake it and
+leave it queued, not join it into one blob.
+
+**Not done until driven live** — a prompt change reaches nothing until
+the role session is relaunched (§4). Verified means `latency_log` shows
+`kind="answer"`, `batched=false`, and `instant_ack_suppressed`.
 
 ### R3 — One flusher, enforced across processes · Engineer 1
 

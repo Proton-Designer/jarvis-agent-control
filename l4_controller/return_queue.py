@@ -119,6 +119,19 @@ WAKE_STATE_STALE_AFTER_S = 1.0
 # Speech order. Lower speaks first. Mirrors say_feedback's priority
 # meaning so the two orderings can never disagree about what outranks
 # what.
+#
+# Membership here is not a ranking table -- it IS the batchable set
+# (BATCHABLE_KINDS is derived from it, so the two can never drift). A
+# kind absent from this dict is spoken immediately by tools_voice.
+#
+# `answer` and `error` are absent DELIBERATELY. `error` because silence
+# on a failure is the failure class this project keeps finding.
+# `answer` because Ayman asked a question seconds ago and is waiting on
+# the reply -- every property that makes batching correct for a
+# completion (hold it, group it with unrelated news, speak them as one
+# utterance) is a defect when applied to a reply. Adding either one here
+# would look like a one-line consistency tidy and would silently
+# reintroduce the bug this queue was rewritten twice to stop causing.
 _TIER = {"blocked_question": 0, "completion": 1}
 
 BATCHABLE_KINDS = frozenset(_TIER)

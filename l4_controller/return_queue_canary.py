@@ -123,6 +123,51 @@ def run() -> int:
           f"speak={sp6.call_count} pending={len(rq.pending())}")
 
     print()
+    print("R2 -- a reply is not a report (docs/PLAN-silence-and-ux.md SS1)")
+    # The bug this closes: the concierge had no way to say "I am
+    # answering the question you just asked", so a live reply went out as
+    # `completion` and inherited a policy written for asynchronous agent
+    # news -- held SETTLE_S, and eligible to merge into one blob with an
+    # unrelated completion. Measured consequence: reply latency crossed
+    # instant_ack's 3.0s fallback, so Ayman heard "Okay, one sec" before
+    # nearly every answer (Engineer 1, 2026-08-21: 18/19 conversational
+    # replies typed `completion`, ack fired 7/8 times).
+    check("'answer' is an accepted kind at all",
+          "answer" in tools_voice.KINDS, str(sorted(tools_voice.KINDS)))
+    check("'answer' is NOT batchable",
+          "answer" not in rq.BATCHABLE_KINDS, str(sorted(rq.BATCHABLE_KINDS)))
+    check("enqueue REFUSES 'answer' rather than accepting it",
+          rq.enqueue("answer", "doing well, ready to help")["ok"] is False)
+    rq._write([])
+    with mock.patch("tools_voice.speak") as sp7:
+        tools_voice.jarvis_say("doing well, ready to help", kind="answer")
+    check("jarvis_say(kind='answer') speaks IMMEDIATELY, bypassing the queue",
+          sp7.call_count == 1 and rq.pending() == [],
+          f"speak={sp7.call_count} pending={rq.pending()}")
+    check("...at HIGH priority -- he is waiting on it, it outranks queued news",
+          sp7.call_args.kwargs.get("priority") == 0, str(sp7.call_args))
+
+    # Both directions on the property that actually bit: an answer must
+    # not be absorbed into a batch that is already waiting. A test that
+    # only checked an answer on an empty queue would pass even if the
+    # answer were appended to a pending completion and spoken as one
+    # blob -- which is precisely the "Still good. Good. I'm here."
+    # failure in the log.
+    rq._write([])
+    rq.enqueue("completion", "Gateway finished its tests")
+    with mock.patch("tools_voice.speak") as sp8:
+        tools_voice.jarvis_say("five sessions running", kind="answer")
+    check("an answer overtakes a WAITING completion instead of joining it",
+          sp8.call_count == 1
+          and sp8.call_args.args[0] == "five sessions running"
+          and len(rq.pending()) == 1
+          and rq.pending()[0]["kind"] == "completion",
+          f"speak={sp8.call_count} args={sp8.call_args} pending={rq.pending()}")
+    check("...and the completion is still queued, not lost to the answer",
+          "Gateway finished its tests" in rq.pending()[0]["text"],
+          str(rq.pending()))
+
+    print()
     print("flush gating -- and failing toward speech, never toward silence")
     rq._write([])
     rq.enqueue("completion", "just arrived")

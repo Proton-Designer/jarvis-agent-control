@@ -28,21 +28,43 @@ this tool do anything at all."
 spam channel wired directly into Ayman's attention, and untyped messages
 cannot be batched or prioritised -- ue6rruxg's design point, and it is
 the right one. An agent that wants to narrate its progress does not get
-to; only the three events below are worth interrupting a person for.
+to; only the four events below are worth interrupting a person for.
 
-## What this does NOT do yet
+## The line that matters most: answer vs completion
 
-Speak IMMEDIATELY, one utterance per call. The batching and end-of-
-dictation flush policy (SPEC-blockers.md §5.3, generalised to all return
-traffic in SPEC-orchestration.md §2.3) is deliberately NOT built here
-yet: it needs the dictation lifecycle to hang off, and wiring that comes
-with the daemon->concierge change. Priority ordering is already real
-though -- say_feedback's queue is priority-then-FIFO, so an escalation
-submitted behind three completions still goes first.
+`answer` and `completion` are not two words for "I have something to
+say." They are the difference between a reply and a report, and putting
+a reply in the wrong one is the bug this file was rewritten to kill.
 
-Callers should therefore treat this as "say this when you can," not "say
-this now" -- the queue may hold it behind higher-priority speech, which
-is the intended behaviour and not a bug to route around.
+An `answer` is a response to something Ayman said seconds ago. He is
+standing there waiting for it, so it goes out IMMEDIATELY. A
+`completion` is work that finished while he was doing something else,
+so it BATCHES -- three agents finishing together become one
+interruption instead of three.
+
+Batching a reply is wrong by design, not by accident: it makes a fast
+system feel slow, it lets a live answer merge with an unrelated
+completion into one blob, and -- measured -- it pushed reply latency
+past the instant ack's fallback threshold, so Ayman heard "Okay, one
+sec" before nearly every answer. The delay that makes three completions
+polite makes one answer broken.
+
+**When both fit, choose `answer`.** A report spoken a moment early
+costs nothing; a reply held 2.5 seconds is the failure above.
+
+## Batching, and what it deliberately does not touch
+
+`completion` and `blocked_question` route through return_queue.py:
+collect, settle, flush in priority-tier order, never mid-dictation.
+`answer` and `error` go straight to speak().
+
+Nothing that was already immediate is delayed by any of this. The
+instant ack, refusals and cancel-window confirmations never come through
+jarvis_say at all -- they call speak() directly.
+
+Priority ordering is real and independent of batching -- say_feedback's
+queue is priority-then-FIFO, so an escalation submitted behind three
+completions still goes first.
 """
 from __future__ import annotations
 
@@ -65,6 +87,7 @@ from say_feedback import speak, PRIORITY_HIGH, PRIORITY_NORMAL  # noqa: E402
 # through a queue any agent can also fill would put that guarantee behind
 # other people's traffic.
 KINDS = {
+    "answer": PRIORITY_HIGH,             # Ayman asked; this is the reply. He is standing there waiting for it.
     "blocked_question": PRIORITY_HIGH,   # work has STOPPED and needs Ayman -- outranks anything merely finished
     "error": PRIORITY_HIGH,              # something failed; silence here is the failure class this project keeps finding
     "completion": PRIORITY_NORMAL,       # work finished; it can wait behind a blocker
@@ -81,8 +104,11 @@ def jarvis_say(message: str, kind: str, team: str = "") -> dict:
         than prefixing a callsign: "Gateway finished its tests, three
         passing" reads as one voice reporting, where "Gateway here --"
         turns the system into a phone tree (SPEC-orchestration.md §2.2).
-    kind: one of blocked_question | error | completion. Required and
-        closed -- see the module docstring for why this is not free prose.
+    kind: one of answer | blocked_question | error | completion. Required
+        and closed -- see the module docstring for why this is not free
+        prose. Use `answer` whenever Ayman just asked something and this
+        is the reply; `completion` is for work that finished while he was
+        doing something else.
     team: optional, for the log only. Never spoken; the message already
         names its own subject.
 

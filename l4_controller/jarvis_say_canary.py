@@ -45,6 +45,20 @@ if os.environ.get("JARVIS_MUTE") == "1":
     print("that call entirely and makes every ordering check vacuous.")
     sys.exit(2)
 
+# Isolate the return queue BEFORE anything imports it. Added 2026-08-21:
+# return_queue's isolation guard moved into _write(), which this canary
+# calls directly at section 3 -- so without these it aborts on an
+# unisolated write and the whole file stops running. It failed loudly,
+# which is the guard working, but a canary nobody can run is a hole
+# whatever the reason.
+#
+# The worker is disabled rather than left alone because section 3 drives
+# flush_now() explicitly: a background flusher racing those calls would
+# make the "ONE utterance" assertion nondeterministic, and a flaky
+# ordering check teaches people to ignore it.
+os.environ["JARVIS_NO_RETURN_QUEUE_WORKER"] = "1"
+os.environ.setdefault("JARVIS_TEST_RUN", "jarvis-say-canary")
+
 sys.path.insert(0, str(Path(__file__).parent))
 import say_feedback as sf  # noqa: E402
 import tools_voice  # noqa: E402

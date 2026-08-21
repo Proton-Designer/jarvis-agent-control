@@ -210,8 +210,11 @@ class PendingSpeechItem:
     l4_controller/return_queue.py's contract -- l5_console/state/poller.py
     maps that module's plain dicts to this 1:1, nothing invented). Mirrors
     return_queue.pending()'s shape exactly: kind is "completion" or
-    "blocked_question" -- NEVER "error", refusals are never queued (the
-    one priority-tier rule that survives unchanged, per the spec)."""
+    "blocked_question" -- NEVER "error" or "answer". Refusals are never
+    queued (the one priority-tier rule that survives unchanged, per the
+    spec), and an "answer" is a reply Ayman is waiting on, spoken
+    immediately, so it is never pending long enough to render. This panel
+    showing an "answer" would itself be the bug."""
     kind: str
     text: str  # what will be spoken, verbatim -- untrusted content, same discipline as TeamMember.blocked_question
     team: str | None

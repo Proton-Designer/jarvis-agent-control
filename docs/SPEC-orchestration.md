@@ -293,9 +293,23 @@ one build, two purposes.
 
 ## 2.1 `jarvis_say()` takes a typed class, not free prose
 
-`completion` / `blocked_question` / `error`. Free prose from any agent at
-any time is a spam channel built into Ayman's attention, and untyped
-messages cannot be batched or prioritized.
+`answer` / `completion` / `blocked_question` / `error`. Free prose from
+any agent at any time is a spam channel built into Ayman's attention, and
+untyped messages cannot be batched or prioritized.
+
+**`answer` vs `completion` is the load-bearing distinction**, added
+2026-08-21 after the original three shipped without it. An `answer` is a
+reply to something Ayman said seconds ago; a `completion` is news that
+arrived while he was busy. Only the second may be held and grouped. With
+no `answer` class the concierge's only expressible option was
+`completion`, so every live reply inherited a policy written for
+asynchronous agent news — held for the settle delay, eligible to merge
+with unrelated news into one blob, and (measured) pushed past the instant
+ack's fallback threshold so a filler line preceded nearly every reply.
+
+The rule for anyone adding a fifth class: **the class encodes whether
+Ayman is waiting, not what the message is about.** Batching is correct
+exactly when he is not.
 
 ## 2.2 Identification by grammar, not callsign
 
